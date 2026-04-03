@@ -1,0 +1,120 @@
+# build-q (bq) 🚀
+
+**build-q** (pronounced *bq*) is a lightweight, zero-dependency Python CLI tool for streamlined local Docker Buildx operations. It auto-detects repository info from Git and reads local `cicd/cicd.json` to mirror production-ready builds on your local machine.
+
+---
+
+## 🛠 Features
+
+- **Zero-Dependency**: No external Python libraries required (only standard library).
+- **Git Auto-detection**: Automatically identifies repo name and branch/tag from your current directory.
+- **Resource Management**: Pre-configured defaults for memory and CPU limits to keep your machine responsive.
+- **Auto-push**: Images are pushed to the registry by default after a successful build.
+- **Default Secrets**: Automatically includes `$HOME/.netrc` as a build secret (`id=netrc`).
+- **Smart Branch Detection**: Sets `BRANCH=production` for tags starting with `v*`, and `BRANCH=develop` otherwise.
+- **CI/CD Integration**: Integrates with `cicd/cicd.json` for shared build arguments.
+
+---
+
+## 📦 Installation
+
+To install `build-q` for local use, clone the repository and install it in editable mode:
+
+```bash
+pip install -e .
+```
+
+This will provide two commands: `build-q` and the shorthand `bq`.
+
+---
+
+## 🚀 Usage
+
+### Simple Build (Auto-detected)
+Run this inside a git repository to auto-detect the service name and branch:
+```bash
+bq --local
+```
+
+### Explicit Build
+```bash
+bq my-service staging --local --push
+```
+
+### Full Example (Customizing defaults)
+```bash
+bq plus-be-service staging \
+    --secret id=custom,src=/path/to/secret \
+    --platform linux/amd64 \
+    --local --no-push \
+    --build-arg BRANCH=custom-branch
+```
+
+### Dry Run
+Check what command will be executed without actually running it:
+```bash
+bq my-service develop --local --dry-run
+```
+
+---
+
+## ⚙️ Configuration
+
+Initialize your local configuration file:
+```bash
+bq --init
+```
+This creates a config file at `~/.build-q/.env`. You can edit this file to set your default registry URL and resource limits.
+
+### Configuration Options
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `BUILDER_NAME` | Name of the Docker Buildx builder | `mybuilder` |
+| `REGISTRY_URL` | Default container registry URL | `registry.example.com` |
+| `DEFAULT_MEMORY` | Memory limit for builds | `4g` |
+| `DEFAULT_CPU_PERIOD` | CPU period limit | `100000` |
+| `DEFAULT_CPU_QUOTA` | CPU quota limit | `200000` |
+
+---
+
+## 🚀 Automation & Release
+
+The project includes a `Makefile` for streamlined building and releasing to PyPI.
+
+### Build
+To build the distribution packages:
+```bash
+make build
+```
+
+### Release
+To release a new version (automatically bumps the patch version, e.g., `0.1.0` -> `0.1.1`):
+```bash
+make release
+```
+
+To specify a version explicitly:
+```bash
+make release V=1.0.0
+```
+
+The release process:
+1. Bumps the version in `pyproject.toml` and `build_q/__init__.py`.
+2. Builds the source and wheel distributions.
+3. Uploads to PyPI using `twine`.
+4. Creates a git commit and tag (e.g., `v1.0.0`).
+5. Pushes tags and the `main` branch to origin.
+
+---
+
+## 📋 Requirements
+
+- Python 3.7+
+- Docker with Buildx plugin
+- Git (optional, for auto-detection)
+
+---
+
+## 📄 License
+
+MIT

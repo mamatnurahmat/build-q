@@ -1,0 +1,9 @@
+Metadata-Version: 2.4
+Name: build-q
+Version: 0.1.0
+Summary: Simple Docker Buildx CLI for local builds
+Author: ngen contributors
+License: MIT
+Project-URL: Homepage, https://github.com/mamatnurahmat/ngen-tools
+Keywords: cli,docker,buildx,devops
+Requires-Python: >=3.7

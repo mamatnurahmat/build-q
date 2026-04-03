@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "build-q"
+version = "0.1.0"
+description = "Simple Docker Buildx CLI for local builds"
+requires-python = ">=3.7"
+license = {text = "MIT"}
+authors = [
+    {name = "ngen contributors"}
+]
+keywords = ["cli", "docker", "buildx", "devops"]
+dependencies = []
+
+[project.scripts]
+build-q = "build_q.cli:main"
+bq = "build_q.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/mamatnurahmat/ngen-tools"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-dir]
+"" = "."
+build_q = "build_q"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["build_q*"]
