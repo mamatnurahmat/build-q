@@ -18,10 +18,15 @@
 
 ## 📦 Installation
 
-To install `build-q` for local use, clone the repository and install it in editable mode:
+To install `build-q` globally on your system, it is recommended to use `pipx` (or `pip`):
 
 ```bash
-pip install -e .
+pipx install build-q
+```
+
+*Atau melalui pip:*
+```bash
+pip install build-q
 ```
 
 This will provide two commands: `build-q` and the shorthand `bq`.
@@ -102,8 +107,6 @@ The release process:
 1. Bumps the version in `pyproject.toml` and `build_q/__init__.py`.
 2. Builds the source and wheel distributions.
 3. Uploads to PyPI using `twine`.
-4. Creates a git commit and tag (e.g., `v1.0.0`).
-5. Pushes tags and the `main` branch to origin.
 
 ---
 
