@@ -17,6 +17,8 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 
 from . import __version__
@@ -69,6 +71,16 @@ Config file: ~/.build-q/.env
     parser.add_argument("ref", nargs="?", help="Branch or tag (e.g. staging, main, v1.0.0)")
 
     # Build options
+    parser.add_argument(
+        "--clone",
+        metavar="GITHUB_REPO",
+        help="Clone repository using gh CLI before building (e.g., owner/repo)",
+    )
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="Delete the freshly cloned repository directory after build (requires --clone)",
+    )
     parser.add_argument("--local", action="store_true", help="Build from local directory (assumed by default)")
     parser.add_argument(
         "--cicd",
@@ -104,6 +116,18 @@ Config file: ~/.build-q/.env
         action="store_false",
         dest="push",
         help="Do not push image to registry",
+    )
+    parser.add_argument(
+        "--image-check",
+        action="store_true",
+        default=True,
+        help="Check registry if image exists and skip build if it does (default: True)",
+    )
+    parser.add_argument(
+        "--no-image-check",
+        action="store_false",
+        dest="image_check",
+        help="Do not check registry for existing image",
     )
     parser.add_argument(
         "--platform",
@@ -149,34 +173,124 @@ Config file: ~/.build-q/.env
         # Auto-detect repo/ref from git when not provided
         repo = args.repo
         ref = args.ref
-        if not repo or not ref:
-            print("🔍 Auto-detecting repo and branch from git...")
-            try:
-                info = get_git_info()
-            except BuildError as e:
-                print(f"❌ {e}", file=sys.stderr)
-                print("   Provide <repo> and <ref> explicitly, or run from a git directory.", file=sys.stderr)
-                sys.exit(1)
-            if not repo:
-                repo = info["repo"]
+        
+        original_cwd = os.getcwd()
+        clone_dir = None
+        
+        if args.clone:
+            if not ref and repo:
+                ref = repo
+                repo = None
             if not ref:
-                ref = info["ref"]
-            print(f"   repo: {repo}  ref: {ref}")
+                print("❌ Error: <ref> is required when using --clone to specify the branch/tag.", file=sys.stderr)
+                sys.exit(1)
+            
+            if args.image_check:
+                preview_tag = args.tag
+                if not preview_tag:
+                    print("🔍 Predicting image tag without cloning...")
+                    import json
+                    from .builder import check_image_exists
+                    config = load_config()
+                    registry_url = config.get("registry", {}).get("url", "")
+                    
+                    api_repo = args.clone
+                    if api_repo.endswith(".git"):
+                        api_repo = api_repo[:-4]
+                    parts = api_repo.replace(":", "/").split("/")
+                    api_repo = f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else args.clone
+                    
+                    try:
+                        sha_res = subprocess.run(
+                            ["gh", "api", f"repos/{api_repo}/commits/{ref}", "--jq", ".sha"],
+                            capture_output=True, text=True, check=True
+                        )
+                        commit_hash = sha_res.stdout.strip()[:7]
+                        
+                        cicd_res = subprocess.run(
+                            ["gh", "api", f"repos/{api_repo}/contents/{args.cicd}?ref={ref}", "-H", "Accept: application/vnd.github.v3.raw"],
+                            capture_output=True, text=True
+                        )
+                        
+                        clone_dir = api_repo.split("/")[-1]
+                        image_name = repo if repo else clone_dir
+                        
+                        if cicd_res.returncode == 0 and cicd_res.stdout:
+                            try:
+                                cicd_data = json.loads(cicd_res.stdout)
+                                image_name = cicd_data.get("IMAGE", image_name)
+                            except json.JSONDecodeError:
+                                pass
+                                
+                        preview_tag = f"{registry_url}/{image_name}:{commit_hash}" if registry_url else f"{image_name}:{commit_hash}"
+                        
+                    except subprocess.CalledProcessError:
+                        print("⚠️ Could not fetch remote info via gh api, skipping pre-clone check.", file=sys.stderr)
+                
+                if preview_tag:
+                    from .builder import check_image_exists
+                    print(f"🔍 Checking registry for existing image: {preview_tag} ...")
+                    if check_image_exists(preview_tag):
+                        print(f"✅ Image {preview_tag} already exists in the registry.")
+                        print("⏭️ Skipping clone and build.")
+                        sys.exit(0)
+            
+            print(f"📥 Cloning repository {args.clone} (branch: {ref}) ...")
+            try:
+                subprocess.run(
+                    ["gh", "repo", "clone", args.clone, "--", "--branch", ref, "--single-branch"],
+                    check=True
+                )
+            except subprocess.CalledProcessError as e:
+                print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
+                sys.exit(1)
+            except FileNotFoundError:
+                print("❌ GitHub CLI ('gh') is not installed or not in PATH.", file=sys.stderr)
+                sys.exit(1)
+            
+            clone_dir = args.clone.split("/")[-1]
+            print(f"📁 Changing directory to {clone_dir} ...")
+            os.chdir(clone_dir)
+            
+            if not repo:
+                repo = clone_dir
+        else:
+            if not repo or not ref:
+                print("🔍 Auto-detecting repo and branch from git...")
+                try:
+                    info = get_git_info()
+                except BuildError as e:
+                    print(f"❌ {e}", file=sys.stderr)
+                    print("   Provide <repo> and <ref> explicitly, or run from a git directory.", file=sys.stderr)
+                    sys.exit(1)
+                if not repo:
+                    repo = info["repo"]
+                if not ref:
+                    ref = info["ref"]
+                print(f"   repo: {repo}  ref: {ref}")
 
-        rc = run_build(
-            repo=repo,
-            ref=ref,
-            cicd_path=args.cicd,
-            platform=args.platform,
-            push=args.push,
-            tag=args.tag,
-            dockerfile=args.dockerfile,
-            context=args.context,
-            extra_build_args=args.build_args,
-            secrets=args.secret,
-            dry_run=args.dry_run,
-        )
-        sys.exit(rc)
+        try:
+            rc = run_build(
+                repo=repo,
+                ref=ref,
+                cicd_path=args.cicd,
+                platform=args.platform,
+                push=args.push,
+                tag=args.tag,
+                dockerfile=args.dockerfile,
+                context=args.context,
+                extra_build_args=args.build_args,
+                secrets=args.secret,
+                dry_run=args.dry_run,
+                image_check=args.image_check,
+            )
+            sys.exit(rc)
+        finally:
+            if args.clone and args.clean and clone_dir:
+                os.chdir(original_cwd)
+                print(f"🧹 Cleaning up: removing {clone_dir} ...")
+                import shutil
+                shutil.rmtree(clone_dir, ignore_errors=True)
 
     except (BuildError, FileNotFoundError) as e:
         print(f"❌ Error: {e}", file=sys.stderr)

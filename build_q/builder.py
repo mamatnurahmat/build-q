@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import load_config, load_local_cicd
 
@@ -79,7 +79,7 @@ def build_command(
     context: str = ".",
     extra_build_args: Optional[List[str]] = None,
     secrets: Optional[List[str]] = None,
-) -> List[str]:
+) -> Tuple[List[str], str]:
     """Assemble the docker buildx build command.
 
     Args:
@@ -96,7 +96,7 @@ def build_command(
         secrets: List of secret specs e.g. ["id=netrc,src=/home/me/.netrc"]
 
     Returns:
-        List of command parts ready for subprocess
+        Tuple of (command_list, image_tag)
     """
     builder = config["builder"]
     registry_url = config["registry"]["url"]
@@ -152,7 +152,7 @@ def build_command(
 
     # Tag
     if tag:
-        image_tag = tag
+        image_tag = str(tag)
     else:
         image_name = cicd.get("IMAGE", repo)
         commit = get_local_commit_short()
@@ -174,7 +174,21 @@ def build_command(
     # Context (must be last)
     cmd.append(context)
 
-    return cmd
+    return cmd, image_tag
+
+
+def check_image_exists(image_tag: str) -> bool:
+    """Check if image exists in destination registry using docker buildx imagetools."""
+    try:
+        result = subprocess.run(
+            ["docker", "buildx", "imagetools", "inspect", image_tag],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def format_cmd(cmd: List[str]) -> str:
@@ -205,6 +219,7 @@ def run_build(
     extra_build_args: Optional[List[str]] = None,
     secrets: Optional[List[str]] = None,
     dry_run: bool = False,
+    image_check: bool = True,
 ) -> int:
     """Load config, build the command, and execute it.
 
@@ -214,7 +229,7 @@ def run_build(
     config = load_config()
     cicd = load_local_cicd(cicd_path)
 
-    cmd = build_command(
+    cmd, image_tag = build_command(
         repo=repo,
         ref=ref,
         cicd=cicd,
@@ -227,6 +242,14 @@ def run_build(
         extra_build_args=extra_build_args,
         secrets=secrets,
     )
+
+    if image_check:
+        print(f"\n🔍 Checking registry for existing image: {image_tag} ...")
+        if check_image_exists(image_tag):
+            print(f"✅ Image {image_tag} already exists in the registry. Skipping build.")
+            return 0
+        else:
+            print("   Image not found. Proceeding with build.")
 
     print(f"\n🚀 Build command:")
     print("=" * 60)
