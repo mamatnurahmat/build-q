@@ -54,6 +54,9 @@ def load_config() -> Dict[str, Any]:
         "registry": {
             "url": os.getenv("REGISTRY_URL", ""),
         },
+        "git": {
+            "ssh_prefix": os.getenv("GIT_SSH_PREFIX", "git@github.com:"),
+        },
     }
 
 
@@ -79,6 +82,9 @@ DEFAULT_CPU_QUOTA=200000
 
 # Container registry URL
 REGISTRY_URL=registry.example.com
+
+# Git remote settings (for --remote)
+GIT_SSH_PREFIX=git@github.com:
 """
     ENV_FILE.write_text(default)
     ENV_FILE.chmod(0o600)

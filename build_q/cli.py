@@ -77,6 +77,11 @@ Config file: ~/.build-q/.env
         help="Clone repository using gh CLI before building (e.g., owner/repo)",
     )
     parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="Build remotely from git using buildx instead of cloning locally",
+    )
+    parser.add_argument(
         "--clean",
         action="store_true",
         help="Delete the freshly cloned repository directory after build (requires --clone)",
@@ -124,15 +129,16 @@ Config file: ~/.build-q/.env
         help="Check registry if image exists and skip build if it does (default: True)",
     )
     parser.add_argument(
-        "--no-image-check",
+        "--no-image-check", "--rebuild",
         action="store_false",
         dest="image_check",
-        help="Do not check registry for existing image",
+        help="Do not check registry for existing image (force rebuild)",
     )
     parser.add_argument(
         "--platform",
         metavar="PLATFORM",
-        help='Target platform (e.g. "linux/amd64" or "linux/amd64,linux/arm64")',
+        default="linux/amd64",
+        help='Target platform (default: linux/amd64)',
     )
     parser.add_argument(
         "--build-arg",
@@ -176,8 +182,68 @@ Config file: ~/.build-q/.env
         
         original_cwd = os.getcwd()
         clone_dir = None
+        cicd_data = None
         
-        if args.clone:
+        if args.remote:
+            if not repo or not ref:
+                print("❌ Error: <repo> and <ref> are required when using --remote.", file=sys.stderr)
+                sys.exit(1)
+            
+            import json
+            config = load_config()
+            ssh_prefix = config.get("git", {}).get("ssh_prefix", "git@github.com:")
+            
+            api_repo = repo
+            if api_repo.endswith(".git"):
+                api_repo = api_repo[:-4]
+            if "github.com/" in api_repo:
+                api_repo = api_repo.split("github.com/")[-1]
+            if api_repo.startswith("git@github.com:"):
+                api_repo = api_repo.split("git@github.com:")[-1]
+                
+            print(f"🔍 Fetching {args.cicd} from remote {api_repo}@{ref} ...")
+            try:
+                cicd_res = subprocess.run(
+                    ["gh", "api", f"repos/{api_repo}/contents/{args.cicd}?ref={ref}", "-H", "Accept: application/vnd.github.v3.raw"],
+                    capture_output=True, text=True
+                )
+                if cicd_res.returncode == 0 and cicd_res.stdout:
+                    cicd_data = json.loads(cicd_res.stdout)
+                else:
+                    print(f"⚠️ Warning: Could not fetch {args.cicd} from remote. Using empty defaults.")
+                    cicd_data = {}
+            except Exception as e:
+                print(f"⚠️ Warning: Error fetching remote cicd.json: {e}. Using empty defaults.")
+                cicd_data = {}
+
+            if repo.startswith("http://") or repo.startswith("https://") or repo.startswith("git@") or repo.startswith("git://"):
+                git_url = repo
+            else:
+                git_url = f"{ssh_prefix}{repo}.git"
+            
+            args.context = f"{git_url}#{ref}"
+            print(f"🌐 Remote context set to: {args.context}")
+            
+            repo_name = api_repo.split("/")[-1]
+            if not args.tag:
+                commit_hash = "unknown"
+                try:
+                    sha_res = subprocess.run(
+                        ["gh", "api", f"repos/{api_repo}/commits/{ref}", "--jq", ".sha"],
+                        capture_output=True, text=True, check=True
+                    )
+                    if sha_res.returncode == 0 and sha_res.stdout.strip():
+                        commit_hash = sha_res.stdout.strip()[:7]
+                except Exception:
+                    pass
+                registry_url = config.get("registry", {}).get("url", "")
+                image_name = cicd_data.get("IMAGE", repo_name)
+                args.tag = f"{registry_url}/{image_name}:{commit_hash}" if registry_url else f"{image_name}:{commit_hash}"
+                print(f"🏷️ Auto-generated tag for remote: {args.tag}")
+            
+            repo = repo_name
+
+        elif args.clone:
             if not ref and repo:
                 ref = repo
                 repo = None
@@ -274,6 +340,7 @@ Config file: ~/.build-q/.env
                 repo=repo,
                 ref=ref,
                 cicd_path=args.cicd,
+                cicd_dict=cicd_data,
                 platform=args.platform,
                 push=args.push,
                 tag=args.tag,

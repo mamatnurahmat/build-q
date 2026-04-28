@@ -10,8 +10,9 @@
 - **Git Auto-detection**: Automatically identifies repo name and branch/tag from your current directory.
 - **Resource Management**: Pre-configured defaults for memory and CPU limits to keep your machine responsive.
 - **Auto-push**: Images are pushed to the registry by default after a successful build.
-- **Image Check**: By default, verifies if the image already exists in the registry to avoid redundant builds (disable with `--no-image-check`).
+- **Image Check**: By default, verifies if the image already exists in the registry to avoid redundant builds (force rebuild with `--rebuild` or `--no-image-check`).
 - **Default Secrets**: Automatically includes `$HOME/.netrc` as a build secret (`id=netrc`).
+- **Default Platform**: Defaults to `--platform linux/amd64` for all builds.
 - **Smart Branch Detection**: Sets `BRANCH=production` for tags starting with `v*`, and `BRANCH=develop` otherwise.
 - **CI/CD Integration**: Integrates with `cicd/cicd.json` for shared build arguments.
 
@@ -56,6 +57,14 @@ bq plus-be-service staging \
     --build-arg BRANCH=custom-branch
 ```
 
+### Remote Build
+Build directly from a remote Git repository without cloning locally (uses buildx git context). Defaults to SSH access.
+```bash
+bq user/repo v1.0.0 --remote
+# Or with a full URL
+bq https://github.com/user/repo.git v1.0.0 --remote
+```
+
 ### Dry Run
 Check what command will be executed without actually running it:
 ```bash
@@ -80,6 +89,7 @@ This creates a config file at `~/.build-q/.env`. You can edit this file to set y
 | `DEFAULT_MEMORY` | Memory limit for builds | `4g` |
 | `DEFAULT_CPU_PERIOD` | CPU period limit | `100000` |
 | `DEFAULT_CPU_QUOTA` | CPU quota limit | `200000` |
+| `GIT_SSH_PREFIX` | Default prefix for remote repo SSH access | `git@github.com:` |
 
 ---
 

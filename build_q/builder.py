@@ -72,7 +72,7 @@ def build_command(
     cicd: Dict[str, Any],
     config: Dict[str, Any],
     *,
-    platform: Optional[str] = None,
+    platform: Optional[str] = "linux/amd64",
     push: bool = False,
     tag: Optional[str] = None,
     dockerfile: str = "Dockerfile",
@@ -211,7 +211,8 @@ def run_build(
     ref: str,
     *,
     cicd_path: str = "cicd/cicd.json",
-    platform: Optional[str] = None,
+    cicd_dict: Optional[Dict[str, Any]] = None,
+    platform: Optional[str] = "linux/amd64",
     push: bool = False,
     tag: Optional[str] = None,
     dockerfile: str = "Dockerfile",
@@ -227,7 +228,11 @@ def run_build(
         Exit code (0 = success)
     """
     config = load_config()
-    cicd = load_local_cicd(cicd_path)
+    
+    if cicd_dict is not None:
+        cicd = cicd_dict
+    else:
+        cicd = load_local_cicd(cicd_path)
 
     cmd, image_tag = build_command(
         repo=repo,

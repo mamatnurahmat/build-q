@@ -7,7 +7,7 @@ build:
 	python3 -m build || pipx run build
 	pipx install -e . --force
 
-release:
+release: clean
 	@echo "Releasing package..."
 	@if [ -z "$(V)" ]; then \
 		python3 scripts/bump_version.py; \
@@ -16,7 +16,7 @@ release:
 	fi
 	@$(MAKE) build
 	@echo "Publishing to PyPI..."
-	twine upload dist/* || python3 -m twine upload dist/* || pipx run twine upload dist/*
+	twine upload --skip-existing dist/* || python3 -m twine upload --skip-existing dist/* || pipx run twine upload --skip-existing dist/*
 
 clean:
 	rm -rf dist/ build/ *.egg-info
