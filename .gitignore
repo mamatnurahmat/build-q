@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.egg
+
+# Distribution / packaging
+build/
+dist/
+*.whl
+*.tar.gz
+
+# Local dev
+.venv/
+venv/
+.env

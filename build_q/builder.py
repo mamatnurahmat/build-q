@@ -1,5 +1,6 @@
 """Core build logic for build-q CLI."""
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -177,6 +178,231 @@ def build_command(
     return cmd, image_tag
 
 
+def ensure_builder(name: str, *, bootstrap: bool = False) -> bool:
+    """Ensure docker buildx builder exists. Create it (and use it) if missing.
+
+    Args:
+        name: Builder name (e.g. from config BUILDER_NAME).
+        bootstrap: If True, also boot the builder container so it's ready immediately.
+
+    Returns:
+        True if the builder is ready, False if docker/buildx is unavailable.
+    """
+    try:
+        inspect = subprocess.run(
+            ["docker", "buildx", "inspect", name],
+            capture_output=True, text=True
+        )
+        if inspect.returncode == 0:
+            if "Error:" in inspect.stdout:
+                print(f"⚠️ Buildx builder '{name}' exists but endpoint is stale. Recreating ...")
+                subprocess.run(
+                    ["docker", "buildx", "rm", "-f", name],
+                    capture_output=True, text=True
+                )
+            else:
+                print(f"✅ Buildx builder '{name}' already exists.")
+                use = subprocess.run(
+                    ["docker", "buildx", "use", name],
+                    capture_output=True, text=True
+                )
+                if use.returncode != 0:
+                    print(f"⚠️ Could not set '{name}' as active: {use.stderr.strip()}", file=sys.stderr)
+                return True
+
+        print(f"🔧 Creating buildx builder '{name}' ...")
+        create_cmd = ["docker", "buildx", "create", "--name", name, "--use"]
+        if bootstrap:
+            create_cmd.append("--bootstrap")
+        create = subprocess.run(create_cmd, capture_output=True, text=True)
+        if create.returncode == 0:
+            print(f"✅ Buildx builder '{name}' created and set as active.")
+            return True
+        print(f"❌ Failed to create builder: {create.stderr.strip()}", file=sys.stderr)
+        return False
+    except FileNotFoundError:
+        print("⚠️ Docker not found in PATH — skipping builder init.", file=sys.stderr)
+        return False
+
+
+def _parse_github_remote(url: str) -> Optional[str]:
+    """Return `owner/repo` from any GitHub remote URL, else None."""
+    if not url:
+        return None
+    if url.startswith("git@github.com:"):
+        path = url[len("git@github.com:"):]
+    elif "github.com/" in url:
+        path = url.split("github.com/", 1)[1]
+    else:
+        return None
+    if path.endswith(".git"):
+        path = path[:-4]
+    parts = path.strip("/").split("/")
+    if len(parts) >= 2:
+        return f"{parts[0]}/{parts[1]}"
+    return None
+
+
+def detect_github_repo() -> Optional[str]:
+    """Detect current GitHub repo (owner/repo) from `git remote get-url origin`."""
+    try:
+        remote = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, check=True
+        ).stdout.strip()
+        return _parse_github_remote(remote)
+    except subprocess.CalledProcessError:
+        return None
+
+
+def _fetch_jx_token(context: str, namespace: str, secret_name: str) -> Optional[str]:
+    """Fetch webhook trigger token from k8s secret. Returns None on failure."""
+    import base64
+
+    cmd = ["kubectl"]
+    if context:
+        cmd += ["--context", context]
+    cmd += [
+        "-n", namespace, "get", "secret", secret_name,
+        "-o", "jsonpath={.data.token}",
+    ]
+    try:
+        b64 = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.strip()
+        if not b64:
+            return None
+        return base64.b64decode(b64).decode().strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def init_secrets(
+    repo: Optional[str] = None,
+    token: Optional[str] = None,
+    url: Optional[str] = None,
+) -> bool:
+    """Set GitHub Actions secrets WEBHOOK_TRIGGER_URL & WEBHOOK_TRIGGER_TOKEN on `repo`.
+
+    - `repo`: `owner/repo`. Auto-detected from `git remote origin` if None.
+    - `token`: webhook token. Fetched from configured k8s secret if None.
+    - `url`: webhook URL. Falls back to config WEBHOOK_TRIGGER_URL.
+
+    Returns True on success.
+    """
+    config = load_config()
+    webhook = config.get("webhook", {})
+
+    if not repo:
+        repo = detect_github_repo()
+    if not repo:
+        print("❌ Cannot detect target repo. Pass `bq --init-secrets <owner>/<repo>` "
+              "or run inside a git repo with GitHub origin.", file=sys.stderr)
+        return False
+
+    if not url:
+        url = webhook.get("trigger_url", "https://cicd-hw.qoin.id/trigger")
+
+    if not token:
+        ctx = webhook.get("k8s_context", "")
+        ns = webhook.get("k8s_namespace", "jenkins-x")
+        secret = webhook.get("k8s_secret", "webhook-trigger-token")
+        ctx_display = ctx or "(current context)"
+        print(f"🔑 Fetching webhook token from k8s: context={ctx_display} ns={ns} secret={secret}")
+        token = _fetch_jx_token(ctx, ns, secret)
+        if not token:
+            print(f"❌ Could not fetch token. Ensure kubectl is authenticated and "
+                  f"secret `{secret}` exists in `{ns}`. Or pass `--token <VALUE>`.", file=sys.stderr)
+            return False
+
+    print(f"🔐 Setting secrets on {repo}:")
+    entries = [
+        ("WEBHOOK_TRIGGER_URL", url, url),
+        ("WEBHOOK_TRIGGER_TOKEN", token, "***"),
+    ]
+    for name, value, display in entries:
+        result = subprocess.run(
+            ["gh", "secret", "set", name, "--repo", repo, "--body", value],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"   ❌ {name}: {result.stderr.strip()}", file=sys.stderr)
+            return False
+        print(f"   ✅ {name} = {display}")
+    print(f"\n✅ GitHub Actions secrets configured on {repo}.")
+    return True
+
+
+def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
+    """Scaffold Makefile / compose.yaml / Dockerfile / .github/workflows/trigger-ci.yml
+    from `cicd/cicd.json`.
+
+    Returns True if any file was written.
+    """
+    from .templates import (
+        COMPOSE_TPL, DOCKERFILE_TPL, MAKEFILE_TPL, TRIGGER_CI_TPL, render,
+    )
+
+    try:
+        cicd = load_local_cicd(cicd_path)
+    except FileNotFoundError:
+        print(f"❌ {cicd_path} not found. Create it first with IMAGE/PROJECT/PORT keys.", file=sys.stderr)
+        return False
+
+    config = load_config()
+    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+
+    image = cicd.get("IMAGE") or Path.cwd().name
+    ctx = {
+        "IMAGE": image,
+        "PROJECT": cicd.get("PROJECT", "qoin"),
+        "PORT": cicd.get("PORT", "8080"),
+        "CLUSTER": cicd.get("CLUSTER", "qoin"),
+        "DEPLOYMENT": cicd.get("DEPLOYMENT", image),
+        "NODETYPE": cicd.get("NODETYPE", "back"),
+        "ORG_REGISTRY": registry,
+    }
+
+    print(f"📦 Scaffolding from {cicd_path}:")
+    for k, v in ctx.items():
+        print(f"   {k:12} = {v}")
+    print()
+
+    files = [
+        (Path("Makefile"), render(MAKEFILE_TPL, ctx)),
+        (Path("compose.yaml"), render(COMPOSE_TPL, ctx)),
+        (Path("Dockerfile"), render(DOCKERFILE_TPL, ctx)),
+        (Path(".github/workflows/trigger-ci.yml"), TRIGGER_CI_TPL),
+    ]
+
+    written = 0
+    for path, content in files:
+        if path.exists() and not force:
+            print(f"⏭️  Skip existing: {path} (use --force to overwrite)")
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+        print(f"✅ Wrote {path}")
+        written += 1
+
+    if written == 0:
+        print("\nℹ️  No files written. Use --force to overwrite existing files.")
+    else:
+        print(f"\n✅ Scaffolded {written} file(s).")
+
+    repo = detect_github_repo()
+    if repo:
+        print(f"\n🔗 Detected GitHub remote: {repo} — configuring Actions secrets ...")
+        init_secrets(repo=repo)
+    else:
+        print("\nℹ️  No GitHub remote detected. After pushing the repo, configure secrets:")
+        print("   bq --init-secrets <owner>/<repo>")
+
+    print("\n📋 Next steps:")
+    print("   • Review generated Dockerfile & adjust go build path (server.go or cmd/…)")
+    print("   • Ensure .env.<env> files exist for each environment")
+    print("   • Commit and push to trigger Jenkins X pipeline")
+    return written > 0
+
+
 def check_image_exists(image_tag: str) -> bool:
     """Check if image exists in destination registry using docker buildx imagetools."""
     try:
@@ -191,11 +417,19 @@ def check_image_exists(image_tag: str) -> bool:
         return False
 
 
+def _mask_sensitive(part: str) -> str:
+    """Mask sensitive build-arg values in log output."""
+    if part.startswith("GITHUB_TOKEN=") and len(part) > len("GITHUB_TOKEN="):
+        return "GITHUB_TOKEN=***"
+    return part
+
+
 def format_cmd(cmd: List[str]) -> str:
-    """Pretty-print the command with line continuations."""
+    """Pretty-print the command with line continuations. Masks sensitive values."""
     lines: List[str] = []
     buf = ""
-    for part in cmd:
+    for raw in cmd:
+        part = _mask_sensitive(raw)
         if buf and (part.startswith("--") or part.startswith("-f") or part.startswith("-t")):
             lines.append(buf)
             buf = f"  {part}"
@@ -204,6 +438,76 @@ def format_cmd(cmd: List[str]) -> str:
     if buf:
         lines.append(buf)
     return " \\\n".join(lines)
+
+
+NETRC_RUN_SH_RE = re.compile(
+    r"(?m)^(?P<indent>\s*)RUN\s+sh\s+-c\s+'"
+    r"echo\s+\"machine\s+github\.com\s+login\s+\$\{?GITHUB_USER\}?\s+"
+    r"password\s+\$\{?GITHUB_TOKEN\}?\"\s*>\s*~/\.netrc\s*&&\s*"
+    r"chmod\s+\d+\s+~/\.netrc\s*&&\s*(?P<rest>.+?)'\s*$"
+)
+NETRC_RUN_BARE_RE = re.compile(
+    r"(?m)^(?P<indent>\s*)RUN\s+"
+    r"echo\s+\"machine\s+github\.com\s+login\s+\$\{?GITHUB_USER\}?\s+"
+    r"password\s+\$\{?GITHUB_TOKEN\}?\"\s*>\s*~/\.netrc\s*&&\s*"
+    r"chmod\s+\d+\s+~/\.netrc\s*&&\s*(?P<rest>.+?)$"
+)
+FROM_CASING_RE = re.compile(r"(?m)^(\s*FROM\s+\S+(?:\s+\S+)*?)\s+as\s+(\S+)")
+ARG_GITHUB_RE = re.compile(r"(?m)^\s*ARG\s+GITHUB_(USER|TOKEN)\s*(=[^\n]*)?\n")
+
+
+def fix_dockerfile(path: str = "Dockerfile") -> bool:
+    """Migrate Dockerfile from ARG-based netrc to `--mount=type=secret` pattern.
+
+    Also normalizes `FROM ... as ...` casing and removes `ARG GITHUB_USER/TOKEN`.
+    A `.bak` backup is written alongside the file.
+
+    Returns:
+        True if any change was applied.
+    """
+    p = Path(path)
+    if not p.exists():
+        print(f"❌ Dockerfile not found: {path}", file=sys.stderr)
+        return False
+
+    original = p.read_text()
+    content = original
+    changes: List[str] = []
+
+    content, n = FROM_CASING_RE.subn(r"\1 AS \2", content)
+    if n:
+        changes.append(f"normalized {n} `FROM ... AS ...` casing")
+
+    def _run_repl(m: "re.Match[str]") -> str:
+        indent = m.group("indent")
+        rest = m.group("rest").strip()
+        return f"{indent}RUN --mount=type=secret,id=netrc,target=/root/.netrc \\\n{indent}    {rest}"
+
+    content, n = NETRC_RUN_SH_RE.subn(_run_repl, content)
+    if n:
+        changes.append(f"migrated {n} `RUN sh -c` block to secret mount")
+
+    content, n = NETRC_RUN_BARE_RE.subn(_run_repl, content)
+    if n:
+        changes.append(f"migrated {n} bare `RUN echo` block to secret mount")
+
+    content, n = ARG_GITHUB_RE.subn("", content)
+    if n:
+        changes.append(f"removed {n} `ARG GITHUB_*` line(s)")
+
+    if not changes:
+        print(f"ℹ️  No known netrc/ARG pattern found in {path}. Nothing to fix.")
+        return False
+
+    backup = p.with_suffix(p.suffix + ".bak")
+    backup.write_text(original)
+    p.write_text(content)
+
+    print(f"✅ Fixed {path} (backup: {backup.name})")
+    for c in changes:
+        print(f"   • {c}")
+    print(f"\n💡 Rebuild now — `bq` already injects `--secret id=netrc,src=~/.netrc`.")
+    return True
 
 
 def run_build(
@@ -228,7 +532,10 @@ def run_build(
         Exit code (0 = success)
     """
     config = load_config()
-    
+
+    if not dry_run:
+        ensure_builder(config["builder"]["name"])
+
     if cicd_dict is not None:
         cicd = cicd_dict
     else:

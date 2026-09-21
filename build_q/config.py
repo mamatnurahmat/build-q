@@ -56,6 +56,13 @@ def load_config() -> Dict[str, Any]:
         },
         "git": {
             "ssh_prefix": os.getenv("GIT_SSH_PREFIX", "git@github.com:"),
+            "org": os.getenv("GITHUB_ORG", ""),
+        },
+        "webhook": {
+            "trigger_url": os.getenv("WEBHOOK_TRIGGER_URL", "https://cicd-hw.qoin.id/trigger"),
+            "k8s_context": os.getenv("JX_KUBE_CONTEXT", ""),
+            "k8s_namespace": os.getenv("JX_KUBE_NAMESPACE", "jenkins-x"),
+            "k8s_secret": os.getenv("JX_TOKEN_SECRET", "webhook-trigger-token"),
         },
     }
 
@@ -83,8 +90,20 @@ DEFAULT_CPU_QUOTA=200000
 # Container registry URL
 REGISTRY_URL=registry.example.com
 
-# Git remote settings (for --remote)
+# Git remote settings (for --remote / --clone)
 GIT_SSH_PREFIX=git@github.com:
+
+# Default GitHub organization — when set, shorthand works: `bq <repo> <ref> --remote`
+# Example: GITHUB_ORG=Qoin-Digital-Indonesia
+GITHUB_ORG=
+
+# Jenkins X webhook trigger — used by `bq --init-secrets` to configure GitHub Actions
+WEBHOOK_TRIGGER_URL=https://cicd-hw.qoin.id/trigger
+# Optional: kubectl context/namespace/secret for fetching the trigger token.
+# Leave JX_KUBE_CONTEXT empty to use current kubectl context.
+JX_KUBE_CONTEXT=
+JX_KUBE_NAMESPACE=jenkins-x
+JX_TOKEN_SECRET=webhook-trigger-token
 """
     ENV_FILE.write_text(default)
     ENV_FILE.chmod(0o600)

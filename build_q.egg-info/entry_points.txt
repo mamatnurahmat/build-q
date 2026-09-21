@@ -1,3 +1,0 @@
-[console_scripts]
-bq = build_q.cli:main
-build-q = build_q.cli:main

@@ -22,8 +22,20 @@ import subprocess
 import sys
 
 from . import __version__
-from .builder import BuildError, get_git_info, run_build
+from .builder import (
+    BuildError, ensure_builder, fix_dockerfile, get_git_info,
+    init_jx, init_secrets, run_build,
+)
 from .config import init_config, load_config, ENV_FILE
+
+
+def _expand_repo(name: str, default_org: str) -> str:
+    """Prepend default org if `name` is a bare repo shorthand (no `/`, no scheme)."""
+    if not name or not default_org:
+        return name
+    if "/" in name or "://" in name or name.startswith("git@"):
+        return name
+    return f"{default_org}/{name}"
 
 
 def main() -> None:
@@ -65,6 +77,29 @@ Config file: ~/.build-q/.env
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
     parser.add_argument("--force", action="store_true", help="Force recreate config (use with --init)")
     parser.add_argument("--config", action="store_true", help="Show current configuration")
+    parser.add_argument(
+        "--fix-dockerfile",
+        nargs="?",
+        const="Dockerfile",
+        default=None,
+        metavar="PATH",
+        help="Migrate ARG-based netrc + FROM casing to buildx-native pattern (default: ./Dockerfile)",
+    )
+    parser.add_argument(
+        "--init-jx",
+        action="store_true",
+        help="Scaffold Makefile / compose.yaml / Dockerfile / trigger-ci.yml from cicd/cicd.json",
+    )
+    parser.add_argument(
+        "--init-secrets",
+        action="store_true",
+        help="Set GitHub Actions webhook secrets on target repo (auto-detect from git)",
+    )
+    parser.add_argument(
+        "--token",
+        metavar="VALUE",
+        help="Webhook trigger token (skip kubectl fetch, used with --init-secrets)",
+    )
 
     # Positional args (optional — auto-detected from git when --local is used)
     parser.add_argument("repo", nargs="?", help="Repository / service name")
@@ -153,6 +188,11 @@ Config file: ~/.build-q/.env
         metavar="id=ID,src=PATH",
         help="Expose secret to build (can be repeated)",
     )
+    parser.add_argument(
+        "--gh-auth",
+        action="store_true",
+        help="Auto-inject --build-arg GITHUB_USER and GITHUB_TOKEN from `gh` CLI (for legacy Dockerfiles)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print command without executing")
 
     args = parser.parse_args()
@@ -161,7 +201,21 @@ Config file: ~/.build-q/.env
         # ── Subcommands ──────────────────────────────────────────────────────────
         if args.init:
             init_config(force=args.force)
+            config = load_config()
+            ensure_builder(config["builder"]["name"], bootstrap=True)
             return
+
+        if args.fix_dockerfile is not None:
+            ok = fix_dockerfile(args.fix_dockerfile)
+            sys.exit(0 if ok else 1)
+
+        if args.init_jx:
+            ok = init_jx(cicd_path=args.cicd, force=args.force)
+            sys.exit(0 if ok else 1)
+
+        if args.init_secrets:
+            ok = init_secrets(repo=args.repo, token=args.token)
+            sys.exit(0 if ok else 1)
 
         if args.config:
             config = load_config()
@@ -192,7 +246,13 @@ Config file: ~/.build-q/.env
             import json
             config = load_config()
             ssh_prefix = config.get("git", {}).get("ssh_prefix", "git@github.com:")
-            
+            default_org = config.get("git", {}).get("org", "")
+
+            expanded = _expand_repo(repo, default_org)
+            if expanded != repo:
+                print(f"🏷️ Expanded '{repo}' → '{expanded}' using GITHUB_ORG")
+                repo = expanded
+
             api_repo = repo
             if api_repo.endswith(".git"):
                 api_repo = api_repo[:-4]
@@ -250,7 +310,14 @@ Config file: ~/.build-q/.env
             if not ref:
                 print("❌ Error: <ref> is required when using --clone to specify the branch/tag.", file=sys.stderr)
                 sys.exit(1)
-            
+
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            expanded_clone = _expand_repo(args.clone, default_org)
+            if expanded_clone != args.clone:
+                print(f"🏷️ Expanded '{args.clone}' → '{expanded_clone}' using GITHUB_ORG")
+                args.clone = expanded_clone
+
             if args.image_check:
                 preview_tag = args.tag
                 if not preview_tag:
@@ -334,6 +401,30 @@ Config file: ~/.build-q/.env
                 if not ref:
                     ref = info["ref"]
                 print(f"   repo: {repo}  ref: {ref}")
+
+        if args.gh_auth:
+            try:
+                gh_user = subprocess.run(
+                    ["gh", "api", "user", "--jq", ".login"],
+                    capture_output=True, text=True, check=True
+                ).stdout.strip()
+                gh_token = subprocess.run(
+                    ["gh", "auth", "token"],
+                    capture_output=True, text=True, check=True
+                ).stdout.strip()
+            except FileNotFoundError:
+                print("❌ 'gh' CLI not found. Install: brew install gh", file=sys.stderr)
+                sys.exit(1)
+            except subprocess.CalledProcessError as e:
+                print(f"❌ Failed to fetch gh credentials: {e.stderr.strip()}", file=sys.stderr)
+                sys.exit(1)
+
+            args.build_args = list(args.build_args or [])
+            if not any(a.startswith("GITHUB_USER=") for a in args.build_args):
+                args.build_args.append(f"GITHUB_USER={gh_user}")
+            if not any(a.startswith("GITHUB_TOKEN=") for a in args.build_args):
+                args.build_args.append(f"GITHUB_TOKEN={gh_token}")
+            print(f"🔐 --gh-auth: injected GITHUB_USER={gh_user}, GITHUB_TOKEN=***")
 
         try:
             rc = run_build(
