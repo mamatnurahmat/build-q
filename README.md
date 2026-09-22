@@ -15,7 +15,7 @@ Bagian ini untuk yang baru pertama kali pakai `bq`. Kalau sudah familiar, lanjut
 Sebelum pakai `bq`, siapkan tools berikut di laptop:
 
 | Tools | Wajib? | Kegunaan | Cara install (macOS via Homebrew) |
-|-------|--------|----------|-----------------------------------|
+| ------- | -------- | ---------- | ----------------------------------- |
 | **Python 3.7+** | ✅ Wajib | Runtime `bq` | `brew install python` (biasanya sudah ada) |
 | **pipx** | ✅ Rekomendasi | Install CLI Python secara terisolasi | `brew install pipx && pipx ensurepath` |
 | **Docker Desktop** / **Colima** | ✅ Wajib | Docker engine + Buildx plugin | `brew install --cask docker` atau `brew install colima docker docker-buildx` |
@@ -24,6 +24,7 @@ Sebelum pakai `bq`, siapkan tools berikut di laptop:
 | **kubectl** | ⚙️ Opsional | Fetch webhook token otomatis dari k8s (`--init-secrets`) | `brew install kubectl` |
 
 Cek versi setelah install:
+
 ```bash
 python3 --version        # >= 3.7
 pipx --version
@@ -71,6 +72,7 @@ bq --version
 ```
 
 Tips: jika `pipx upgrade` bilang "already at latest" tapi kamu yakin ada rilis baru, refresh cache PyPI:
+
 ```bash
 pipx install --force build-q     # reinstall dari PyPI terbaru
 ```
@@ -107,6 +109,7 @@ Kalau muncul error `authentication required` saat push → login ke Docker Hub /
 ## 🛠 Fitur
 
 ### Build & Push
+
 - **Zero-dependency**: hanya Python 3.7+ standard library.
 - **Git auto-detection**: nama repo & ref (branch/tag/short-SHA) dari Git.
 - **Mode sumber kode**: build lokal, `--clone` (via `gh` CLI), atau `--remote` (Buildx Git context).
@@ -121,6 +124,7 @@ Kalau muncul error `authentication required` saat push → login ke Docker Hub /
 - **`--compose` mode**: jalankan `make build ENV=...` + `make release ENV=...` sebagai alternatif `docker buildx` (cocok untuk repo yang alur build-nya via Makefile + docker compose).
 
 ### Setup & Automation
+
 - **`--init`**: buat file config `~/.build-q/.env` **dan** auto-create Docker Buildx builder (bootstrap).
 - **`--init-jx`**: scaffold `Makefile` + `compose.yaml` + `Dockerfile` (modern secret mount) + `.github/workflows/trigger-ci.yml` dari `cicd/cicd.json`. Auto-panggil `--init-secrets` bila git remote GitHub terdeteksi.
 - **`--init-legacy`**: scaffold `Makefile` + `compose.yaml` untuk pola **legacy** (Dockerfile pakai `ARG GITHUB_USER/GITHUB_TOKEN` — bukan BuildKit secret). Makefile auto-ambil `gh auth token` untuk local dev. **Dockerfile tidak di-overwrite** — cocok untuk repo lama yang belum bisa migrasi ke secret mount.
@@ -150,6 +154,7 @@ pip install build-q
 Dua entry point tersedia: `build-q` dan shorthand `bq`.
 
 **Upgrade ke versi terbaru:**
+
 ```bash
 pipx upgrade build-q
 # atau
@@ -169,7 +174,7 @@ bq --config       # tampilkan konfigurasi aktif
 ### `~/.build-q/.env`
 
 | Variable | Default | Keterangan |
-|----------|---------|-----------|
+| ---------- | --------- | ----------- |
 | `BUILDER_NAME` | `mybuilder` | Nama Docker Buildx builder |
 | `REGISTRY_URL` | `registry.example.com` | Docker registry (Qoin: `loyaltolpi`) |
 | `DEFAULT_MEMORY` | `4g` | Memory limit build |
@@ -183,6 +188,7 @@ bq --config       # tampilkan konfigurasi aktif
 | `JX_TOKEN_SECRET` | `webhook-trigger-token` | Nama k8s secret berisi token |
 
 Contoh minimal untuk Qoin:
+
 ```env
 BUILDER_NAME=cloud-loyaltolpi
 REGISTRY_URL=loyaltolpi
@@ -195,7 +201,9 @@ WEBHOOK_TRIGGER_URL=https://cicd-hw.qoin.id/trigger
 ## 🚀 Panduan Penggunaan
 
 ### 1. Build dari direktori lokal
+
 Auto-detect nama repo & branch dari `git`:
+
 ```bash
 cd my-service
 bq                                    # build + push (default)
@@ -205,6 +213,7 @@ bq my-service staging                 # eksplisit repo/ref
 ```
 
 ### 2. Build dari repo remote tanpa clone
+
 ```bash
 # Dengan GITHUB_ORG di config → shorthand
 bq plus-be-paymentlink-manager staging --remote
@@ -219,23 +228,27 @@ bq git@github.com:owner/repo.git v1.0.0 --remote
 > **Catatan `--remote`:** bila `SSH_AUTH_SOCK` tidak tersetel (tidak jalanin `ssh-agent`), `bq` otomatis fallback ke HTTPS + `GIT_AUTH_TOKEN` secret (via `gh auth token`) supaya Buildx Git context tetap bisa jalan tanpa perlu bootstrap ssh-agent.
 
 ### 3. Build dengan clone via `gh` CLI
+
 ```bash
 bq --clone plus-be-paymentlink-manager staging
 bq --clone plus-be-paymentlink-manager staging --clean   # hapus folder setelah build
 ```
 
 ### 4. Preview command (dry-run)
+
 ```bash
 bq --dry-run
 bq plus-be-paymentlink-manager staging --remote --no-image-check --dry-run
 ```
 
 ### 5. Paksa rebuild (bypass image check)
+
 ```bash
 bq plus-be-paymentlink-manager staging --remote --rebuild
 ```
 
 ### 6. Bootstrap CI/CD service baru (Jenkins X — modern, secret mount)
+
 ```bash
 mkdir my-new-service && cd my-new-service
 mkdir cicd && cat > cicd/cicd.json <<EOF
@@ -249,7 +262,9 @@ git push -u origin main      # trigger Jenkins X pipeline via GitHub Actions
 ```
 
 ### 7. Bootstrap CI/CD service **legacy** (Dockerfile pakai ARG GITHUB_USER/TOKEN)
+
 Kalau Dockerfile di repo lama belum bisa dimigrasi ke `--mount=type=secret`, pakai `--init-legacy`. Makefile-nya akan auto-ambil `gh auth token` untuk local dev.
+
 ```bash
 cd my-old-service              # Dockerfile-nya masih pakai ARG GITHUB_USER/TOKEN
 bq --init-legacy               # scaffold Makefile + compose.yaml (Dockerfile TIDAK ditimpa)
@@ -259,7 +274,9 @@ make release ENV=staging
 ```
 
 ### 8. Bootstrap GitHub Actions trigger sebagai satu-satunya workflow
+
 Berguna kalau repo punya banyak workflow lama yang tidak dipakai lagi:
+
 ```bash
 cd existing-repo
 bq --gh-action-init            # hapus workflow lain + tulis trigger-ci.yml + set webhook secrets
@@ -267,6 +284,7 @@ bq --gh-action-init --token xxxx   # skip kubectl fetch, pakai token eksplisit
 ```
 
 ### 9. Migrasi Dockerfile legacy (ARG-based netrc → secret mount)
+
 ```bash
 cd my-old-service
 bq --fix-dockerfile                # migrasi ./Dockerfile (backup ke .bak)
@@ -275,6 +293,7 @@ bq --no-push --rebuild             # test build hasil migrasi
 ```
 
 Yang di-fix otomatis:
+
 - `FROM x as y` → `FROM x AS y`
 - `ARG GITHUB_USER/TOKEN` dihapus
 - `RUN echo "machine github.com ..." > ~/.netrc && chmod ... && <cmd>` → `RUN --mount=type=secret,id=netrc,...`
@@ -283,12 +302,14 @@ Yang di-fix otomatis:
 - `ENV KEY value` → `ENV KEY=value`
 
 ### 10. Workaround Dockerfile legacy tanpa migrasi (--gh-auth)
+
 ```bash
 bq plus-be-service staging --remote --rebuild --gh-auth
 # → inject GITHUB_USER dari `gh api user` + GITHUB_TOKEN dari `gh auth token`
 ```
 
 ### 11. Setup secrets Jenkins X untuk repo existing
+
 ```bash
 cd existing-repo
 bq --init-secrets                                        # auto-detect dari git
@@ -297,7 +318,9 @@ bq --init-secrets foo-service --token xxxx               # skip kubectl
 ```
 
 ### 12. Mode `--compose` (build via `make build && make release`)
+
 Untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`):
+
 ```bash
 bq --compose                       # jalankan `make build ENV=develop && make release ENV=develop`
 bq --compose my-service v1.2.3     # ENV=production (karena ref diawali `v`)
@@ -305,6 +328,7 @@ bq --compose --dry-run             # preview command
 ```
 
 ### 13. Contoh full (customize secret, platform, build-arg)
+
 ```bash
 bq plus-be-service staging \
     --secret id=custom,src=/path/to/secret \
@@ -372,7 +396,7 @@ Build options:
 ## 🧭 Troubleshooting
 
 | Gejala | Kemungkinan penyebab | Solusi |
-|--------|---------------------|--------|
+| -------- | --------------------- | -------- |
 | `builder "mybuilder" not found` | Buildx belum di-bootstrap | `bq --init` |
 | `authentication required` saat push | Belum login registry | `docker login` (atau `docker login <registry>`) |
 | `invalid empty ssh agent socket` (mode `--remote`) | `SSH_AUTH_SOCK` kosong | Sudah auto-fallback ke HTTPS + `gh auth token`. Kalau tetap gagal → `gh auth login` |
@@ -385,21 +409,125 @@ Build options:
 
 ## 🚀 Development & Release
 
-Proyek pakai `Makefile` untuk build & release.
+Ada **dua cara** rilis: (A) via GitHub Actions otomatis dari tag — **direkomendasikan**, dan (B) via `Makefile` lokal — cocok untuk hotfix/debug.
+
+### A. Auto-release via GitHub Actions (rekomendasi)
+
+Workflow `.github/workflows/pypi-release.yml` dipicu oleh push tag `v*` (atau manual via `workflow_dispatch`) dan otomatis build + upload ke PyPI.
+
+**Flow rilis versi berikutnya:**
 
 ```bash
-make build         # build sdist + wheel ke dist/
-make install       # install local (pipx editable)
-make release       # bump patch, build, install, upload ke PyPI
-make release V=1.0.0   # release versi spesifik
-make clean         # bersihkan artefak
+# 1. Bump versi (patch) — auto-update pyproject.toml + build_q/__init__.py
+python3 scripts/bump_version.py                # bump patch (0.1.12 → 0.1.13)
+# atau versi eksplisit:
+python3 scripts/bump_version.py 0.2.0
+
+# 2. Baca versi baru
+VER=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+echo "Releasing v$VER"
+
+# 3. Commit bump
+git add pyproject.toml build_q/__init__.py
+git commit -m "release: v$VER"
+
+# 4. Tag + push (tag inilah yang memicu workflow)
+git tag "v$VER"
+git push origin main "v$VER"
+
+# 5. Pantau workflow
+gh run watch --repo mamatnurahmat/build-q --exit-status
+# atau lihat di browser:
+gh run list --workflow=pypi-release.yml --repo mamatnurahmat/build-q --limit 3
 ```
 
-Release process (`make release`):
-1. `scripts/bump_version.py` bump patch version di `pyproject.toml` & `build_q/__init__.py`.
+Setelah workflow selesai (± 15 detik), package tersedia di:
+
+- <https://pypi.org/project/build-q/><versi>/
+- Upgrade user: `pipx upgrade build-q`
+
+**Apa yang dilakukan workflow (lihat `.github/workflows/pypi-release.yml`):**
+
+1. **Checkout** repo pada commit tag.
+2. **Setup Python 3.12**.
+3. **Verifikasi tag** — pastikan `v<X>` cocok dengan version di `pyproject.toml` **dan** `build_q/__init__.py`. Bila mismatch, gagal (mencegah rilis "kosong").
+4. **Install** `build` + `twine`.
+5. **Build** sdist + wheel via `python -m build`.
+6. **Validate** dengan `twine check dist/*`.
+7. **Upload** via `twine upload --skip-existing` — kalau versi sudah ada di PyPI, aman skip (idempoten).
+8. **Summary** dengan link PyPI.
+
+**Autentikasi:** workflow pakai GitHub Actions secret `PYPI_API_TOKEN` (username `__token__`). Token PyPI **project-scoped** ini di-set sekali via `gh secret set`. Cara set/rotate token:
+
+```bash
+# Metode andal — pakai env-file (JANGAN pakai --body - karena pipe stdin
+# rawan corrupt untuk token panjang).
+TMPFILE=$(mktemp) && chmod 600 "$TMPFILE"
+python3 -c "
+import configparser, os
+c = configparser.ConfigParser()
+c.read(os.path.expanduser('~/.pypirc'))
+print('PYPI_API_TOKEN=' + c['pypi']['password'])
+" > "$TMPFILE"
+gh secret set -f "$TMPFILE" --repo mamatnurahmat/build-q
+rm -f "$TMPFILE"
+
+# Verifikasi:
+gh secret list --repo mamatnurahmat/build-q
+```
+
+**Manual trigger tanpa tag** (misal untuk re-upload versi yang sudah ada di `pyproject.toml` — `--skip-existing` akan handle):
+
+```bash
+gh workflow run pypi-release.yml --repo mamatnurahmat/build-q
+```
+
+**Cek/re-run workflow yang gagal:**
+
+```bash
+gh run list --workflow=pypi-release.yml --repo mamatnurahmat/build-q --limit 5
+gh run view <RUN_ID> --repo mamatnurahmat/build-q --log-failed
+gh run rerun <RUN_ID> --failed --repo mamatnurahmat/build-q
+```
+
+### B. Release manual via Makefile (lokal)
+
+Cocok untuk hotfix cepat / troubleshoot. Baca kredensial dari `~/.pypirc` lokal.
+
+```bash
+make build             # build sdist + wheel ke dist/
+make install           # install lokal (pipx editable)
+make release           # bump patch, build, install, upload ke PyPI
+make release V=1.0.0   # release versi spesifik
+make clean             # bersihkan artefak
+```
+
+Langkah `make release`:
+
+1. `scripts/bump_version.py` bump patch di `pyproject.toml` + `build_q/__init__.py`.
 2. Build sdist + wheel via `python3 -m build` (fallback: `pipx run --spec build pyproject-build`).
-3. Install lokal editable via `pipx`.
-4. Upload ke PyPI via `pipx run twine`. Kredensial dibaca dari `~/.pypirc`.
+3. Install lokal editable via `pipx install -e . --force`.
+4. Upload ke PyPI via `pipx run twine upload --skip-existing dist/*` — kredensial dari `~/.pypirc`.
+
+> ⚠️ **Setelah `make release`, jangan lupa commit + tag + push** supaya history Git & GitHub Actions selaras dengan PyPI:
+>
+> ```bash
+> VER=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+> git add pyproject.toml build_q/__init__.py
+> git commit -m "release: v$VER"
+> git tag "v$VER" && git push origin main "v$VER"
+> ```
+>
+> Tag push tetap akan memicu workflow, tapi karena `--skip-existing`, upload akan skip (idempoten).
+
+### Release troubleshooting
+
+| Gejala | Penyebab | Solusi |
+| -------- | ---------- | -------- |
+| Workflow gagal di step **Verify tag matches** | Tag `v0.1.13` tapi `pyproject.toml` masih `0.1.12` | Jalankan `python3 scripts/bump_version.py 0.1.13` dulu, commit, re-tag |
+| Workflow gagal `403 Forbidden` di upload | Secret `PYPI_API_TOKEN` corrupt / kadaluwarsa | Re-set secret via metode env-file di atas |
+| PyPI `400 File already exists` | Versi sudah pernah di-upload dari lokal | Sudah di-handle `--skip-existing` — workflow tetap hijau |
+| Version di PyPI tidak berubah setelah tag | Tag lama di-hapus & re-push versi sama | PyPI TIDAK menerima re-upload versi yang sama — bump patch dulu |
 
 ---
 
