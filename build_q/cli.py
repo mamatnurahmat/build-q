@@ -24,7 +24,7 @@ import sys
 from . import __version__
 from .builder import (
     BuildError, ensure_builder, fix_dockerfile, get_git_info,
-    init_jx, init_secrets, run_build,
+    init_gh_action, init_jx, init_legacy, init_secrets, run_build, run_compose,
 )
 from .config import init_config, load_config, ENV_FILE
 
@@ -91,9 +91,19 @@ Config file: ~/.build-q/.env
         help="Scaffold Makefile / compose.yaml / Dockerfile / trigger-ci.yml from cicd/cicd.json",
     )
     parser.add_argument(
+        "--init-legacy",
+        action="store_true",
+        help="Scaffold Makefile + compose.yaml pola legacy (GITHUB_USER/TOKEN build-args, auto gh auth token)",
+    )
+    parser.add_argument(
         "--init-secrets",
         action="store_true",
         help="Set GitHub Actions webhook secrets on target repo (auto-detect from git)",
+    )
+    parser.add_argument(
+        "--gh-action-init",
+        action="store_true",
+        help="Bootstrap standar .github/workflows/trigger-ci.yml — hapus workflow lain + set webhook secrets",
     )
     parser.add_argument(
         "--token",
@@ -193,6 +203,11 @@ Config file: ~/.build-q/.env
         action="store_true",
         help="Auto-inject --build-arg GITHUB_USER and GITHUB_TOKEN from `gh` CLI (for legacy Dockerfiles)",
     )
+    parser.add_argument(
+        "--compose",
+        action="store_true",
+        help="Run make build & release instead of buildx",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Print command without executing")
 
     args = parser.parse_args()
@@ -211,6 +226,14 @@ Config file: ~/.build-q/.env
 
         if args.init_jx:
             ok = init_jx(cicd_path=args.cicd, force=args.force)
+            sys.exit(0 if ok else 1)
+
+        if args.init_legacy:
+            ok = init_legacy(cicd_path=args.cicd, force=args.force)
+            sys.exit(0 if ok else 1)
+
+        if args.gh_action_init:
+            ok = init_gh_action(token=args.token)
             sys.exit(0 if ok else 1)
 
         if args.init_secrets:
@@ -280,7 +303,33 @@ Config file: ~/.build-q/.env
                 git_url = repo
             else:
                 git_url = f"{ssh_prefix}{repo}.git"
-            
+
+            # Buildkit auto-enables SSH agent forwarding for SSH git contexts.
+            # Without SSH_AUTH_SOCK, buildx fails with:
+            #   "invalid empty ssh agent socket: make sure SSH_AUTH_SOCK is set"
+            # Fall back to HTTPS + GIT_AUTH_TOKEN secret when the agent isn't reachable.
+            if git_url.startswith("git@") and not os.environ.get("SSH_AUTH_SOCK"):
+                try:
+                    gh_token = subprocess.run(
+                        ["gh", "auth", "token"],
+                        capture_output=True, text=True, check=True,
+                    ).stdout.strip()
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    print(
+                        "❌ SSH_AUTH_SOCK is not set and `gh auth token` failed.\n"
+                        "   Either start ssh-agent (`eval $(ssh-agent) && ssh-add`)\n"
+                        "   or authenticate with `gh auth login`, then retry.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+                git_url = f"https://github.com/{api_repo}.git"
+                os.environ["GIT_AUTH_TOKEN"] = gh_token
+                args.secret = list(args.secret or [])
+                if not any(s.startswith("id=GIT_AUTH_TOKEN") for s in args.secret):
+                    args.secret.append("id=GIT_AUTH_TOKEN,env=GIT_AUTH_TOKEN")
+                print("ℹ️ SSH_AUTH_SOCK not set — using HTTPS + GIT_AUTH_TOKEN secret for remote git context.")
+
             args.context = f"{git_url}#{ref}"
             print(f"🌐 Remote context set to: {args.context}")
             
@@ -427,21 +476,32 @@ Config file: ~/.build-q/.env
             print(f"🔐 --gh-auth: injected GITHUB_USER={gh_user}, GITHUB_TOKEN=***")
 
         try:
-            rc = run_build(
-                repo=repo,
-                ref=ref,
-                cicd_path=args.cicd,
-                cicd_dict=cicd_data,
-                platform=args.platform,
-                push=args.push,
-                tag=args.tag,
-                dockerfile=args.dockerfile,
-                context=args.context,
-                extra_build_args=args.build_args,
-                secrets=args.secret,
-                dry_run=args.dry_run,
-                image_check=args.image_check,
-            )
+            if args.compose:
+                rc = run_compose(
+                    repo=repo,
+                    ref=ref,
+                    cicd_path=args.cicd,
+                    cicd_dict=cicd_data,
+                    tag=args.tag,
+                    dry_run=args.dry_run,
+                    image_check=args.image_check,
+                )
+            else:
+                rc = run_build(
+                    repo=repo,
+                    ref=ref,
+                    cicd_path=args.cicd,
+                    cicd_dict=cicd_data,
+                    platform=args.platform,
+                    push=args.push,
+                    tag=args.tag,
+                    dockerfile=args.dockerfile,
+                    context=args.context,
+                    extra_build_args=args.build_args,
+                    secrets=args.secret,
+                    dry_run=args.dry_run,
+                    image_check=args.image_check,
+                )
             sys.exit(rc)
         finally:
             if args.clone and args.clean and clone_dir:

@@ -2,7 +2,105 @@
 
 **build-q** (dibaca *bq*) adalah CLI Python zero-dependency untuk operasi `docker buildx` lokal & remote yang selaras dengan pipeline CI/CD (Jenkins X). Satu perintah pendek `bq` menggantikan `docker buildx build` yang panjang, dengan auto-detect Git, `cicd/cicd.json`, secret `netrc`, resource limit, dan idempotency check terhadap registry.
 
-Selain itu, `bq` menyediakan scaffolding CI/CD (`--init-jx`), setup secrets GitHub Actions (`--init-secrets`), migrasi Dockerfile legacy ke pola `--mount=type=secret` (`--fix-dockerfile`), dan auto-init Docker Buildx builder (`--init`).
+Selain build, `bq` menyediakan scaffolding CI/CD (`--init-jx`, `--init-legacy`), bootstrap GitHub Actions trigger (`--gh-action-init`), setup secrets (`--init-secrets`), migrasi Dockerfile legacy ke pola `--mount=type=secret` (`--fix-dockerfile`), auto-init Docker Buildx builder (`--init`), dan mode compose (`--compose`) untuk build via `make build && make release`.
+
+---
+
+## 📚 Panduan Cepat untuk Pemula
+
+Bagian ini untuk yang baru pertama kali pakai `bq`. Kalau sudah familiar, lanjut ke [Instalasi](#-instalasi).
+
+### Apa saja yang perlu di-install?
+
+Sebelum pakai `bq`, siapkan tools berikut di laptop:
+
+| Tools | Wajib? | Kegunaan | Cara install (macOS via Homebrew) |
+|-------|--------|----------|-----------------------------------|
+| **Python 3.7+** | ✅ Wajib | Runtime `bq` | `brew install python` (biasanya sudah ada) |
+| **pipx** | ✅ Rekomendasi | Install CLI Python secara terisolasi | `brew install pipx && pipx ensurepath` |
+| **Docker Desktop** / **Colima** | ✅ Wajib | Docker engine + Buildx plugin | `brew install --cask docker` atau `brew install colima docker docker-buildx` |
+| **Git** | ✅ Wajib | Auto-detect repo/branch | `brew install git` (biasanya sudah ada) |
+| **GitHub CLI (`gh`)** | ⚠️ Wajib untuk `--clone`, `--remote`, `--gh-auth`, `--init-secrets`, `--gh-action-init` | Autentikasi GitHub, fetch token, clone repo | `brew install gh && gh auth login` |
+| **kubectl** | ⚙️ Opsional | Fetch webhook token otomatis dari k8s (`--init-secrets`) | `brew install kubectl` |
+
+Cek versi setelah install:
+```bash
+python3 --version        # >= 3.7
+pipx --version
+docker --version
+docker buildx version
+git --version
+gh --version && gh auth status
+kubectl version --client  # opsional
+```
+
+### Install `bq` (pemula, langkah demi langkah)
+
+```bash
+# 1. Install pipx (kalau belum ada)
+brew install pipx
+pipx ensurepath              # tambahkan pipx ke PATH — restart terminal setelah ini
+
+# 2. Install build-q
+pipx install build-q
+
+# 3. Verifikasi
+bq --version                 # harus menampilkan versi terpasang
+build-q --version            # alias — sama saja
+
+# 4. Bootstrap awal (buat config + Docker buildx builder)
+bq --init
+```
+
+Setelah `bq --init` selesai, file config akan ada di `~/.build-q/.env` dan Docker Buildx builder siap dipakai.
+
+### Upgrade ke versi terbaru
+
+```bash
+# Rekomendasi (pipx)
+pipx upgrade build-q
+
+# Kalau pakai pip biasa
+pip install --upgrade build-q
+
+# Pin versi tertentu (opsional)
+pipx install --force build-q==0.1.11
+
+# Cek versi yang sedang terpasang
+bq --version
+```
+
+Tips: jika `pipx upgrade` bilang "already at latest" tapi kamu yakin ada rilis baru, refresh cache PyPI:
+```bash
+pipx install --force build-q     # reinstall dari PyPI terbaru
+```
+
+### Uninstall
+
+```bash
+pipx uninstall build-q            # kalau install via pipx
+pip uninstall build-q             # kalau install via pip
+rm -rf ~/.build-q                 # hapus config (opsional)
+```
+
+### Alur 5 menit pertama (pemula)
+
+```bash
+# 1. Masuk ke folder service Go/.NET yang sudah ada Dockerfile
+cd my-service
+
+# 2. Preview command yang akan dijalankan (aman — tidak eksekusi)
+bq --dry-run
+
+# 3. Build tanpa push ke registry
+bq --no-push
+
+# 4. Build + push ke registry (mode default)
+bq
+```
+
+Kalau muncul error `builder not found` → jalankan `bq --init` sekali dulu.
+Kalau muncul error `authentication required` saat push → login ke Docker Hub / registry: `docker login`.
 
 ---
 
@@ -19,12 +117,23 @@ Selain itu, `bq` menyediakan scaffolding CI/CD (`--init-jx`), setup secrets GitH
 - **CI/CD alignment**: baca `PORT/PORT2/PROJECT/IMAGE` dari `cicd/cicd.json`.
 - **Dry run**: pratinjau command tanpa eksekusi.
 - **GitHub org shorthand**: set `GITHUB_ORG=...` di config → cukup `bq <repo>` bukan `bq <owner>/<repo>`.
+- **`--remote` fallback HTTPS**: bila `SSH_AUTH_SOCK` tidak tersetel, `bq` otomatis pindah ke HTTPS + `GIT_AUTH_TOKEN` (via `gh auth token`) untuk Buildx Git context — tidak perlu ssh-agent.
+- **`--compose` mode**: jalankan `make build ENV=...` + `make release ENV=...` sebagai alternatif `docker buildx` (cocok untuk repo yang alur build-nya via Makefile + docker compose).
 
 ### Setup & Automation
 - **`--init`**: buat file config `~/.build-q/.env` **dan** auto-create Docker Buildx builder (bootstrap).
 - **`--init-jx`**: scaffold `Makefile` + `compose.yaml` + `Dockerfile` (modern secret mount) + `.github/workflows/trigger-ci.yml` dari `cicd/cicd.json`. Auto-panggil `--init-secrets` bila git remote GitHub terdeteksi.
+- **`--init-legacy`**: scaffold `Makefile` + `compose.yaml` untuk pola **legacy** (Dockerfile pakai `ARG GITHUB_USER/GITHUB_TOKEN` — bukan BuildKit secret). Makefile auto-ambil `gh auth token` untuk local dev. **Dockerfile tidak di-overwrite** — cocok untuk repo lama yang belum bisa migrasi ke secret mount.
+- **`--gh-action-init`**: bootstrap standar `.github/workflows/trigger-ci.yml` sebagai **satu-satunya** workflow — hapus semua workflow YAML lain di `.github/workflows/`, tulis ulang trigger-ci.yml, lalu set webhook secrets (`WEBHOOK_TRIGGER_URL`, `WEBHOOK_TRIGGER_TOKEN`).
 - **`--init-secrets`**: set GitHub Actions secrets (`WEBHOOK_TRIGGER_URL`, `WEBHOOK_TRIGGER_TOKEN`) — auto-fetch token dari k8s secret `webhook-trigger-token` di namespace `jenkins-x`, auto-detect target repo dari `git remote`.
-- **`--fix-dockerfile`**: migrasi Dockerfile legacy — `FROM ... as ...` → `AS`, hapus `ARG GITHUB_USER/TOKEN`, ubah `RUN echo "machine github.com..." > ~/.netrc && ...` → `RUN --mount=type=secret,id=netrc,target=/root/.netrc \ ...`. Simpan backup ke `Dockerfile.bak`.
+- **`--fix-dockerfile`**: migrasi Dockerfile legacy menjadi modern. Deteksi & auto-fix:
+  - `FROM ... as ...` → `AS` (uppercase)
+  - Hapus `ARG GITHUB_USER` / `ARG GITHUB_TOKEN`
+  - `RUN echo "machine github.com ..." > ~/.netrc && chmod ... && <cmd>` → `RUN --mount=type=secret,id=netrc,target=/root/.netrc \ ...`
+  - **Baru**: standalone `RUN echo ... > ~/.netrc` (tanpa `&& chmod && ...`) → dihapus, lalu mount secret otomatis ditambahkan ke RUN line yang berisi `go mod tidy/download` atau `go get`.
+  - **Baru**: `MAINTAINER foo` (deprecated) → `LABEL maintainer="foo"`
+  - **Baru**: `ENV KEY value` (legacy) → `ENV KEY=value`
+  - Backup asli disimpan ke `Dockerfile.bak`.
 - **`--gh-auth`**: injeksi `--build-arg GITHUB_USER` + `GITHUB_TOKEN` dari `gh` CLI (workaround untuk Dockerfile legacy yang belum dimigrasi).
 - **Auto-recover builder stale**: `ensure_builder` deteksi endpoint rusak (misal socket Colima lama) dan recreate otomatis.
 
@@ -39,6 +148,13 @@ pip install build-q
 ```
 
 Dua entry point tersedia: `build-q` dan shorthand `bq`.
+
+**Upgrade ke versi terbaru:**
+```bash
+pipx upgrade build-q
+# atau
+pip install --upgrade build-q
+```
 
 ---
 
@@ -100,6 +216,8 @@ bq Qoin-Digital-Indonesia/plus-be-paymentlink-manager staging --remote
 bq git@github.com:owner/repo.git v1.0.0 --remote
 ```
 
+> **Catatan `--remote`:** bila `SSH_AUTH_SOCK` tidak tersetel (tidak jalanin `ssh-agent`), `bq` otomatis fallback ke HTTPS + `GIT_AUTH_TOKEN` secret (via `gh auth token`) supaya Buildx Git context tetap bisa jalan tanpa perlu bootstrap ssh-agent.
+
 ### 3. Build dengan clone via `gh` CLI
 ```bash
 bq --clone plus-be-paymentlink-manager staging
@@ -117,10 +235,10 @@ bq plus-be-paymentlink-manager staging --remote --no-image-check --dry-run
 bq plus-be-paymentlink-manager staging --remote --rebuild
 ```
 
-### 6. Bootstrap CI/CD service baru (Jenkins X)
+### 6. Bootstrap CI/CD service baru (Jenkins X — modern, secret mount)
 ```bash
 mkdir my-new-service && cd my-new-service
-cat > cicd/cicd.json <<EOF   # buat dulu manual
+mkdir cicd && cat > cicd/cicd.json <<EOF
 {"IMAGE":"my-new-service","PROJECT":"qoinplus","PORT":"8080"}
 EOF
 bq --init-jx                 # scaffold Makefile/compose/Dockerfile/workflow
@@ -130,7 +248,25 @@ git add . && git commit -m "chore: bootstrap CI/CD"
 git push -u origin main      # trigger Jenkins X pipeline via GitHub Actions
 ```
 
-### 7. Migrasi Dockerfile legacy (ARG-based netrc → secret mount)
+### 7. Bootstrap CI/CD service **legacy** (Dockerfile pakai ARG GITHUB_USER/TOKEN)
+Kalau Dockerfile di repo lama belum bisa dimigrasi ke `--mount=type=secret`, pakai `--init-legacy`. Makefile-nya akan auto-ambil `gh auth token` untuk local dev.
+```bash
+cd my-old-service              # Dockerfile-nya masih pakai ARG GITHUB_USER/TOKEN
+bq --init-legacy               # scaffold Makefile + compose.yaml (Dockerfile TIDAK ditimpa)
+gh auth login                  # sekali saja
+make build ENV=staging         # token auto-diambil dari `gh auth token`
+make release ENV=staging
+```
+
+### 8. Bootstrap GitHub Actions trigger sebagai satu-satunya workflow
+Berguna kalau repo punya banyak workflow lama yang tidak dipakai lagi:
+```bash
+cd existing-repo
+bq --gh-action-init            # hapus workflow lain + tulis trigger-ci.yml + set webhook secrets
+bq --gh-action-init --token xxxx   # skip kubectl fetch, pakai token eksplisit
+```
+
+### 9. Migrasi Dockerfile legacy (ARG-based netrc → secret mount)
 ```bash
 cd my-old-service
 bq --fix-dockerfile                # migrasi ./Dockerfile (backup ke .bak)
@@ -138,13 +274,21 @@ bq --fix-dockerfile path/to/Dockerfile
 bq --no-push --rebuild             # test build hasil migrasi
 ```
 
-### 8. Workaround Dockerfile legacy tanpa migrasi (--gh-auth)
+Yang di-fix otomatis:
+- `FROM x as y` → `FROM x AS y`
+- `ARG GITHUB_USER/TOKEN` dihapus
+- `RUN echo "machine github.com ..." > ~/.netrc && chmod ... && <cmd>` → `RUN --mount=type=secret,id=netrc,...`
+- Standalone `RUN echo ... > ~/.netrc` → dihapus, secret mount otomatis nempel di `RUN go mod tidy/download/get`
+- `MAINTAINER foo` → `LABEL maintainer="foo"`
+- `ENV KEY value` → `ENV KEY=value`
+
+### 10. Workaround Dockerfile legacy tanpa migrasi (--gh-auth)
 ```bash
 bq plus-be-service staging --remote --rebuild --gh-auth
 # → inject GITHUB_USER dari `gh api user` + GITHUB_TOKEN dari `gh auth token`
 ```
 
-### 9. Setup secrets Jenkins X untuk repo existing
+### 11. Setup secrets Jenkins X untuk repo existing
 ```bash
 cd existing-repo
 bq --init-secrets                                        # auto-detect dari git
@@ -152,7 +296,15 @@ bq --init-secrets Qoin-Digital-Indonesia/foo-service     # eksplisit
 bq --init-secrets foo-service --token xxxx               # skip kubectl
 ```
 
-### 10. Contoh full (customize secret, platform, build-arg)
+### 12. Mode `--compose` (build via `make build && make release`)
+Untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`):
+```bash
+bq --compose                       # jalankan `make build ENV=develop && make release ENV=develop`
+bq --compose my-service v1.2.3     # ENV=production (karena ref diawali `v`)
+bq --compose --dry-run             # preview command
+```
+
+### 13. Contoh full (customize secret, platform, build-arg)
 ```bash
 bq plus-be-service staging \
     --secret id=custom,src=/path/to/secret \
@@ -173,16 +325,20 @@ Subcommands (mutually exclusive):
   --init                    Buat ~/.build-q/.env + init Buildx builder
   --init --force            Recreate config
   --config                  Tampilkan konfigurasi aktif
-  --init-jx                 Scaffold Makefile/compose/Dockerfile/workflow
+  --init-jx                 Scaffold Makefile/compose/Dockerfile/workflow (modern secret mount)
   --init-jx --force         Overwrite file existing
+  --init-legacy             Scaffold Makefile + compose.yaml pola legacy (ARG GITHUB_USER/TOKEN)
+  --init-legacy --force     Overwrite file existing
+  --gh-action-init          Bootstrap standar trigger-ci.yml (hapus workflow lain + set secrets)
   --init-secrets [<repo>]   Set GitHub Actions webhook secrets
-  --fix-dockerfile [PATH]   Migrasi Dockerfile legacy ke secret mount
+  --fix-dockerfile [PATH]   Migrasi Dockerfile legacy ke secret mount (+ MAINTAINER/ENV/standalone netrc)
 
 Build modes:
-  (default)                 Build dari direktori lokal
+  (default)                 Build dari direktori lokal via docker buildx
   --clone <owner/repo>      Clone via `gh` CLI, lalu build
   --clone ... --clean       Hapus folder clone setelah build
-  --remote                  Build via Buildx Git context (tanpa clone)
+  --remote                  Build via Buildx Git context (tanpa clone) — auto-fallback HTTPS bila SSH_AUTH_SOCK kosong
+  --compose                 Jalankan `make build ENV=... && make release ENV=...` (bukan buildx)
 
 Build options:
   --cicd PATH               Path cicd.json (default: cicd/cicd.json)
@@ -196,7 +352,7 @@ Build options:
   --build-arg KEY=VALUE     Build arg (dapat diulang)
   --secret id=ID,src=PATH   Secret build (dapat diulang; netrc otomatis)
   --gh-auth                 Inject GITHUB_USER/TOKEN dari `gh` CLI
-  --token VALUE             Webhook token (dengan --init-secrets)
+  --token VALUE             Webhook token (dengan --init-secrets / --gh-action-init)
   --dry-run                 Preview command tanpa eksekusi
   --version                 Tampilkan versi
 ```
@@ -208,8 +364,22 @@ Build options:
 - **Python 3.7+**
 - **Docker** + **Buildx plugin**
 - **Git** (opsional; wajib untuk auto-detect & mode local)
-- **GitHub CLI (`gh`)** — wajib untuk `--clone`, `--remote`, `--gh-auth`, `--init-secrets`
-- **kubectl** — opsional; hanya untuk `--init-secrets` (fetch token otomatis dari cluster)
+- **GitHub CLI (`gh`)** — wajib untuk `--clone`, `--remote`, `--gh-auth`, `--init-secrets`, `--gh-action-init`
+- **kubectl** — opsional; hanya untuk `--init-secrets` / `--gh-action-init` (fetch token otomatis dari cluster)
+
+---
+
+## 🧭 Troubleshooting
+
+| Gejala | Kemungkinan penyebab | Solusi |
+|--------|---------------------|--------|
+| `builder "mybuilder" not found` | Buildx belum di-bootstrap | `bq --init` |
+| `authentication required` saat push | Belum login registry | `docker login` (atau `docker login <registry>`) |
+| `invalid empty ssh agent socket` (mode `--remote`) | `SSH_AUTH_SOCK` kosong | Sudah auto-fallback ke HTTPS + `gh auth token`. Kalau tetap gagal → `gh auth login` |
+| `gh: command not found` | GitHub CLI belum ter-install | `brew install gh && gh auth login` |
+| `--init-secrets` gagal fetch token | Konteks kubectl salah / secret tidak ada | Set `JX_KUBE_CONTEXT` di `~/.build-q/.env`, atau `--token xxxx` |
+| Build sukses tapi image tidak muncul di registry | Salah `REGISTRY_URL` di config | `bq --config` → verifikasi, lalu `bq --init --force` |
+| `bq --version` tidak berubah setelah upgrade | pipx cache | `pipx install --force build-q` |
 
 ---
 

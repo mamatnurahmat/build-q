@@ -200,6 +200,182 @@ CMD ["./up.sh"]
 """
 
 
+MAKEFILE_LEGACY_TPL = """\
+# ============================================================
+# {{IMAGE}} — Makefile build / release (legacy netrc via build-args)
+# ============================================================
+# Pola legacy: Dockerfile menerima ARG GITHUB_USER + GITHUB_TOKEN
+# untuk `go mod download` repo private (Qoin-Digital-Indonesia/*).
+# Local dev: token auto-diambil dari `gh auth token`.
+# CI/CD    : override COMPOSE_FILE + inject GITHUB_TOKEN dari secret.
+#
+# Usage:
+#   make build ENV=staging       Build image staging
+#   make build ENV=production    Build image production
+#   make release ENV=staging     Push image staging
+#   make release ENV=production  Push image production
+#   make staging                 Build + release staging
+#   make production              Build + release production
+#   make run ENV=staging         Build + jalankan container
+#   make down                    Stop container
+#   make help                    Daftar perintah
+#
+# Image tag (IMAGE_TAG):
+#   HEAD tepat di tag git (v1.2.3)  →  v1.2.3
+#   HEAD di branch                  →  <commit-id>
+#   bukan repo git                  →  latest
+#
+# Compose file:
+#   make build ENV=staging                              → local (compose.yaml)
+#   make build ENV=staging COMPOSE_FILE=build.compose   → CI/CD
+# ============================================================
+
+SHELL := /bin/sh
+
+ORG_REGISTRY ?= {{ORG_REGISTRY}}
+IMAGE_NAME   ?= {{IMAGE}}
+IMAGE_TAG    ?= $(shell git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD 2>/dev/null || echo latest)
+ENV          ?= staging
+PORT         ?= {{PORT}}
+PROJECT      ?= {{PROJECT}}
+
+# Compose file: default compose.yaml (local), override build.compose (CI/CD)
+COMPOSE_FILE ?= compose.yaml
+ENV_FILE     := .env.$(ENV)
+
+# GitHub creds untuk go mod download private repo (github.com/Qoin-Digital-Indonesia/*)
+# CI/CD JX runner : GIT_USER + GIT_TOKEN dari secret tekton-git (auto-inject)
+# Local dev       : fallback ke `git config user.name` + `gh auth token`
+GITHUB_USER  ?= $(or $(GIT_USER),$(shell git config user.name 2>/dev/null),qoin-bot)
+GITHUB_TOKEN ?= $(or $(GIT_TOKEN),$(shell gh auth token 2>/dev/null))
+
+# BuildKit wajib supaya `RUN --mount=type=secret,id=netrc` bekerja di compose build
+export DOCKER_BUILDKIT := 1
+export COMPOSE_DOCKER_CLI_BUILD := 1
+
+.PHONY: help staging production build release run down check-env netrc
+
+## Tampilkan bantuan
+help:
+	@echo ""
+	@echo "$(IMAGE_NAME) — generic Docker build/release (legacy netrc)"
+	@echo "=========================================================="
+	@echo ""
+	@echo "Usage: make <target> ENV=<env>  (env: staging | production)"
+	@echo ""
+	@echo "  make build ENV=staging       Build image staging"
+	@echo "  make build ENV=production    Build image production"
+	@echo "  make release ENV=staging     Push image staging"
+	@echo "  make release ENV=production  Push image production"
+	@echo "  make run ENV=staging         Build + jalankan container"
+	@echo "  make down                    Stop container"
+	@echo "  make help                    Bantuan ini"
+	@echo ""
+	@echo "CI/CD: override COMPOSE_FILE"
+	@echo "  make build ENV=staging COMPOSE_FILE=build.compose"
+	@echo ""
+
+## Full flow: staging (build + release)
+staging:
+	@$(MAKE) build ENV=staging
+	@$(MAKE) release ENV=staging
+
+## Full flow: production (build + release)
+production:
+	@$(MAKE) build ENV=production
+	@$(MAKE) release ENV=production
+
+## Validasi file .env.{ENV} (warning only)
+check-env:
+	@if [ ! -f "$(ENV_FILE)" ]; then \\
+		echo ">> ⚠️  $(ENV_FILE) tidak ditemukan (pakai default Dockerfile)"; \\
+	fi
+
+## Auto-generate $HOME/.netrc bila belum ada (dipakai compose secret + Dockerfile --mount=type=secret,id=netrc)
+netrc:
+	@if [ -z "$(GITHUB_TOKEN)" ]; then \\
+		echo ">> ❌ GITHUB_TOKEN kosong. Jalankan 'gh auth login' atau export GITHUB_TOKEN=<token>"; \\
+		exit 1; \\
+	fi
+	@if [ ! -f "$$HOME/.netrc" ]; then \\
+		echo ">> ℹ️  Generate $$HOME/.netrc dari GITHUB_USER + GITHUB_TOKEN (needed by CI runner)"; \\
+		printf "machine github.com login %s password %s\\n" "$(GITHUB_USER)" "$(GITHUB_TOKEN)" > "$$HOME/.netrc" && chmod 600 "$$HOME/.netrc"; \\
+	fi
+
+## Build image Docker
+build: netrc
+	@echo ">> Build $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) (compose: $(COMPOSE_FILE))"
+	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) PORT=$(PORT) \\
+	GITHUB_USER=$(GITHUB_USER) GITHUB_TOKEN=$(GITHUB_TOKEN) \\
+		docker compose -f $(COMPOSE_FILE) build
+
+## Build + tag + push image ke registry
+release:
+	@echo ">> Push $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
+	@docker tag $(ORG_REGISTRY)/$(IMAGE_NAME):latest $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || true
+	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) \\
+		docker compose -f $(COMPOSE_FILE) push
+
+## Build + jalankan container
+run: check-env
+	@echo ">> Run $(ENV): $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) on port $(PORT)"
+	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) PORT=$(PORT) \\
+		docker compose -f $(COMPOSE_FILE) up -d
+
+## Stop container
+down:
+	docker compose -f $(COMPOSE_FILE) down 2>/dev/null || true
+"""
+
+
+COMPOSE_LEGACY_TPL = """\
+# ============================================================
+# compose.yaml — Docker Compose (kompatibel legacy + modern)
+# ============================================================
+# Dipakai oleh Makefile legacy:
+#   make build ENV=staging  /  make build ENV=production
+#
+# Mendukung DUA pola Dockerfile sekaligus:
+#   - Legacy: pakai ARG GITHUB_USER/GITHUB_TOKEN (echo ke ~/.netrc)
+#   - Modern: pakai `RUN --mount=type=secret,id=netrc` (hasil bq --fix-dockerfile)
+# Keduanya bisa jalan bersamaan tanpa perubahan file lain.
+#
+# Variable (di-export oleh Makefile):
+#   BUILD_ENV     → environment (staging | production)
+#   IMAGE_NAME    → nama image
+#   IMAGE_TAG     → tag image
+#   ORG_REGISTRY  → Docker Hub registry
+#   PORT          → port host
+#   GITHUB_USER   → user untuk netrc auth (pola legacy)
+#   GITHUB_TOKEN  → token untuk netrc auth (pola legacy)
+# ============================================================
+services:
+  app:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BUILD_ENV: ${BUILD_ENV:-production}
+        BRANCH: ${BUILD_ENV:-staging}
+        PROJECT: ${PROJECT_NAME:-{{PROJECT}}}
+        GITHUB_USER: ${GIT_USER:-${GITHUB_USER:-qoin-bot}}
+        GITHUB_TOKEN: ${GIT_TOKEN:-${GITHUB_TOKEN:-}}
+      secrets:
+        - netrc
+
+    image: ${ORG_REGISTRY:-{{ORG_REGISTRY}}}/${IMAGE_NAME:-{{IMAGE}}}:${IMAGE_TAG:-latest}
+    container_name: ${IMAGE_NAME:-{{IMAGE}}}-${BUILD_ENV:-staging}
+    restart: "no"
+    ports:
+      - "${PORT:-{{PORT}}}:{{PORT}}"
+
+secrets:
+  netrc:
+    file: ${HOME}/.netrc
+"""
+
+
 TRIGGER_CI_TPL = """\
 # ====================================================================
 # CI Trigger — GitHub Actions → Webhook Trigger (Jenkins X)

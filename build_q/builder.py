@@ -403,6 +403,119 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
     return written > 0
 
 
+def init_gh_action(token: Optional[str] = None) -> bool:
+    """Bootstrap .github/workflows/trigger-ci.yml sebagai satu-satunya workflow.
+
+    - Hapus semua file .yml/.yaml lain di .github/workflows/ (workflow lama)
+    - Tulis ulang trigger-ci.yml dari TRIGGER_CI_TPL
+    - Set WEBHOOK_TRIGGER_URL + WEBHOOK_TRIGGER_TOKEN via `gh secret set`
+    """
+    from .templates import TRIGGER_CI_TPL
+
+    workflows_dir = Path(".github/workflows")
+    workflows_dir.mkdir(parents=True, exist_ok=True)
+
+    trigger_path = workflows_dir / "trigger-ci.yml"
+
+    # 1. Hapus workflow lain
+    existing = [
+        p for p in workflows_dir.iterdir()
+        if p.is_file() and p.suffix in {".yml", ".yaml"} and p.name != "trigger-ci.yml"
+    ]
+    if existing:
+        print(f"🗑️  Menghapus {len(existing)} workflow lain di {workflows_dir}:")
+        for p in existing:
+            print(f"   • {p.name}")
+            p.unlink()
+    else:
+        print(f"ℹ️  Tidak ada workflow lain untuk dihapus di {workflows_dir}.")
+
+    # 2. Tulis ulang trigger-ci.yml (selalu overwrite — ini file "standar")
+    if trigger_path.exists():
+        print(f"♻️  Overwrite existing {trigger_path}")
+    trigger_path.write_text(TRIGGER_CI_TPL)
+    print(f"✅ Wrote {trigger_path}")
+
+    # 3. Set webhook secrets (butuh git remote origin)
+    repo = detect_github_repo()
+    if not repo:
+        print("\n⚠️  Git remote origin belum ada — skip pengaturan secret.")
+        print("   Setelah push repo ke GitHub, jalankan:")
+        print("     bq --init-secrets <owner>/<repo>")
+        return True
+
+    print(f"\n🔐 Setting webhook secrets on {repo} ...")
+    ok = init_secrets(repo=repo, token=token)
+    if not ok:
+        print("\n⚠️  Workflow ter-generate, tapi secret gagal di-set. "
+              "Perbaiki lalu jalankan `bq --init-secrets` lagi.", file=sys.stderr)
+        return False
+
+    print("\n📋 Next steps:")
+    print("   • Commit & push perubahan .github/workflows/trigger-ci.yml")
+    print("   • Push branch develop/staging/master atau tag v* akan trigger pipeline JX")
+    return True
+
+
+def init_legacy(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
+    """Scaffold Makefile + compose.yaml pakai pola legacy netrc (build-args).
+
+    Cocok untuk repo yang Dockerfile-nya masih pakai ARG GITHUB_USER + GITHUB_TOKEN
+    (bukan BuildKit secret). Makefile auto-ambil `gh auth token` untuk local dev.
+    Dockerfile TIDAK di-overwrite — biarkan sesuai pola legacy repo.
+
+    Returns True jika ada file yang ditulis.
+    """
+    from .templates import COMPOSE_LEGACY_TPL, MAKEFILE_LEGACY_TPL, render
+
+    try:
+        cicd = load_local_cicd(cicd_path)
+    except FileNotFoundError:
+        print(f"⚠️  {cicd_path} not found — memakai default (image dari nama folder).")
+        cicd = {}
+
+    config = load_config()
+    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+
+    image = cicd.get("IMAGE") or Path.cwd().name
+    ctx = {
+        "IMAGE": image,
+        "PROJECT": cicd.get("PROJECT", "qoin"),
+        "PORT": cicd.get("PORT", "80"),
+        "ORG_REGISTRY": registry,
+    }
+
+    print(f"📦 Scaffolding legacy (netrc via build-args) from {cicd_path}:")
+    for k, v in ctx.items():
+        print(f"   {k:12} = {v}")
+    print()
+
+    files = [
+        (Path("Makefile"), render(MAKEFILE_LEGACY_TPL, ctx)),
+        (Path("compose.yaml"), render(COMPOSE_LEGACY_TPL, ctx)),
+    ]
+
+    written = 0
+    for path, content in files:
+        if path.exists() and not force:
+            print(f"⏭️  Skip existing: {path} (use --force to overwrite)")
+            continue
+        path.write_text(content)
+        print(f"✅ Wrote {path}")
+        written += 1
+
+    if written == 0:
+        print("\nℹ️  No files written. Use --force to overwrite existing files.")
+    else:
+        print(f"\n✅ Scaffolded {written} file(s).")
+
+    print("\n📋 Next steps:")
+    print("   • Pastikan Dockerfile menerima ARG GITHUB_USER + GITHUB_TOKEN")
+    print("   • Local dev: `gh auth login` sekali, lalu `make build ENV=staging`")
+    print("   • CI/CD    : inject GITHUB_TOKEN dari secret & pakai COMPOSE_FILE=build.compose bila perlu")
+    return written > 0
+
+
 def check_image_exists(image_tag: str) -> bool:
     """Check if image exists in destination registry using docker buildx imagetools."""
     try:
@@ -452,8 +565,25 @@ NETRC_RUN_BARE_RE = re.compile(
     r"password\s+\$\{?GITHUB_TOKEN\}?\"\s*>\s*~/\.netrc\s*&&\s*"
     r"chmod\s+\d+\s+~/\.netrc\s*&&\s*(?P<rest>.+?)$"
 )
+# Standalone: `RUN echo "..." > ~/.netrc` tanpa `&& chmod && ...`
+NETRC_RUN_STANDALONE_RE = re.compile(
+    r"(?m)^[ \t]*RUN[ \t]+"
+    r"echo[ \t]+\"machine[ \t]+github\.com[ \t]+login[ \t]+\$\{?GITHUB_USER\}?[ \t]+"
+    r"password[ \t]+\$\{?GITHUB_TOKEN\}?\"[ \t]*>[ \t]*~/\.netrc[ \t]*\n"
+)
+# RUN line yang butuh netrc saat build (go mod tidy/download, go get)
+GO_FETCH_RE = re.compile(
+    r"(?m)^(?P<indent>[ \t]*)RUN[ \t]+(?!--mount)(?P<body>[^\n]*?"
+    r"\bgo[ \t]+(?:mod[ \t]+(?:tidy|download)|get)\b[^\n]*)$"
+)
 FROM_CASING_RE = re.compile(r"(?m)^(\s*FROM\s+\S+(?:\s+\S+)*?)\s+as\s+(\S+)")
 ARG_GITHUB_RE = re.compile(r"(?m)^\s*ARG\s+GITHUB_(USER|TOKEN)\s*(=[^\n]*)?\n")
+# Instruksi deprecated `Maintainer` (case-insensitive) → LABEL maintainer=
+MAINTAINER_RE = re.compile(r"(?im)^(?P<indent>\s*)maintainer\s+(?P<val>.+?)\s*$")
+# Legacy `ENV KEY value` (tanpa `=`) → `ENV KEY=value`
+ENV_LEGACY_RE = re.compile(
+    r"(?m)^(?P<indent>\s*)ENV\s+(?P<key>[A-Z_][A-Z0-9_]*)\s+(?P<val>[^=\n][^\n]*?)\s*$"
+)
 
 
 def fix_dockerfile(path: str = "Dockerfile") -> bool:
@@ -491,9 +621,49 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
     if n:
         changes.append(f"migrated {n} bare `RUN echo` block to secret mount")
 
+    # Standalone `RUN echo ... > ~/.netrc` — hapus + prepend mount ke go mod/get RUN
+    content, n_standalone = NETRC_RUN_STANDALONE_RE.subn("", content)
+    if n_standalone:
+        changes.append(f"removed {n_standalone} standalone `RUN echo ... > ~/.netrc` line(s)")
+
+        def _add_mount(m: "re.Match[str]") -> str:
+            indent = m.group("indent")
+            body = m.group("body").rstrip()
+            return (
+                f"{indent}RUN --mount=type=secret,id=netrc,target=/root/.netrc \\\n"
+                f"{indent}    {body}"
+            )
+
+        content, m_count = GO_FETCH_RE.subn(_add_mount, content)
+        if m_count:
+            changes.append(
+                f"added netrc secret mount to {m_count} `go mod|get` RUN line(s)"
+            )
+
     content, n = ARG_GITHUB_RE.subn("", content)
     if n:
         changes.append(f"removed {n} `ARG GITHUB_*` line(s)")
+
+    def _maintainer_repl(m: "re.Match[str]") -> str:
+        indent = m.group("indent")
+        val = m.group("val").strip().strip('"').replace('"', '\\"')
+        return f'{indent}LABEL maintainer="{val}"'
+
+    content, n = MAINTAINER_RE.subn(_maintainer_repl, content)
+    if n:
+        changes.append(f"converted {n} deprecated `MAINTAINER` → `LABEL maintainer=`")
+
+    def _env_repl(m: "re.Match[str]") -> str:
+        indent = m.group("indent")
+        key = m.group("key")
+        val = m.group("val").strip()
+        if " " in val and not (val.startswith('"') and val.endswith('"')):
+            val = f'"{val}"'
+        return f"{indent}ENV {key}={val}"
+
+    content, n = ENV_LEGACY_RE.subn(_env_repl, content)
+    if n:
+        changes.append(f"converted {n} legacy `ENV KEY value` → `ENV KEY=value`")
 
     if not changes:
         print(f"ℹ️  No known netrc/ARG pattern found in {path}. Nothing to fix.")
@@ -508,6 +678,26 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
         print(f"   • {c}")
     print(f"\n💡 Rebuild now — `bq` already injects `--secret id=netrc,src=~/.netrc`.")
     return True
+
+
+def _predict_image_tag(
+    repo: str,
+    tag: Optional[str],
+    cicd: Dict[str, Any],
+    config: Dict[str, Any],
+) -> str:
+    """Compute the image tag we'll build/push, using the same rule as `build_command`.
+
+    Kept in sync so the pre-build registry check probes the exact tag that would
+    be produced. Falls back to the repo name when cicd.IMAGE is missing.
+    """
+    if tag:
+        return str(tag)
+    registry_url = config.get("registry", {}).get("url", "")
+    image_name = cicd.get("IMAGE", repo)
+    commit = get_local_commit_short()
+    base = f"{image_name}:{commit}"
+    return f"{registry_url}/{base}" if registry_url else base
 
 
 def run_build(
@@ -533,13 +723,39 @@ def run_build(
     """
     config = load_config()
 
-    if not dry_run:
-        ensure_builder(config["builder"]["name"])
-
+    # Load cicd.json early but tolerantly — a missing file must not block the
+    # early registry check (we can still predict the tag from `repo`).
     if cicd_dict is not None:
         cicd = cicd_dict
     else:
-        cicd = load_local_cicd(cicd_path)
+        try:
+            cicd = load_local_cicd(cicd_path)
+        except FileNotFoundError:
+            cicd = {}
+
+    predicted_tag = _predict_image_tag(repo, tag, cicd, config)
+
+    # Early skip: probe the registry BEFORE `ensure_builder` and command build.
+    # When the image is already published, print the ready tag and exit — no
+    # Docker daemon, no builder bootstrap, no gh calls beyond what the caller did.
+    if image_check and not dry_run:
+        print(f"\n🔍 Checking registry for existing image: {predicted_tag} ...")
+        if check_image_exists(predicted_tag):
+            print(f"✅ Image ready: {predicted_tag}")
+            print("⏭️  Skipping build (use --rebuild to force).")
+            return 0
+        print("   Image not found. Proceeding with build.")
+
+    if not dry_run:
+        ensure_builder(config["builder"]["name"])
+
+    # cicd.json is required to build (needs PORT/PROJECT/etc). If we get here,
+    # the image did not exist in registry — surface the missing file clearly.
+    if cicd_dict is None and not cicd:
+        try:
+            cicd = load_local_cicd(cicd_path)
+        except FileNotFoundError as e:
+            raise BuildError(str(e))
 
     cmd, image_tag = build_command(
         repo=repo,
@@ -554,14 +770,6 @@ def run_build(
         extra_build_args=extra_build_args,
         secrets=secrets,
     )
-
-    if image_check:
-        print(f"\n🔍 Checking registry for existing image: {image_tag} ...")
-        if check_image_exists(image_tag):
-            print(f"✅ Image {image_tag} already exists in the registry. Skipping build.")
-            return 0
-        else:
-            print("   Image not found. Proceeding with build.")
 
     print(f"\n🚀 Build command:")
     print("=" * 60)
@@ -579,3 +787,56 @@ def run_build(
         print(f"\n❌ Build failed (exit code {result.returncode}).", file=sys.stderr)
 
     return result.returncode
+
+def run_compose(
+    repo: str,
+    ref: str,
+    *,
+    cicd_path: str = "cicd/cicd.json",
+    cicd_dict: Optional[Dict[str, Any]] = None,
+    tag: Optional[str] = None,
+    dry_run: bool = False,
+    image_check: bool = True,
+) -> int:
+    """Run make build and make release instead of docker buildx."""
+    config = load_config()
+
+    if cicd_dict is not None:
+        cicd = cicd_dict
+    else:
+        try:
+            cicd = load_local_cicd(cicd_path)
+        except FileNotFoundError:
+            cicd = {}
+
+    predicted_tag = _predict_image_tag(repo, tag, cicd, config)
+
+    if image_check and not dry_run:
+        print(f"\n🔍 Checking registry for existing image: {predicted_tag} ...")
+        if check_image_exists(predicted_tag):
+            print(f"✅ Image ready: {predicted_tag}")
+            print("⏭️  Skipping compose build (use --rebuild to force).")
+            return 0
+        print("   Image not found. Proceeding with compose build.")
+
+    env_name = "production" if ref.startswith("v") else "develop"
+
+    cmds = [
+        ["make", "build", f"ENV={env_name}"],
+        ["make", "release", f"ENV={env_name}"]
+    ]
+
+    for cmd in cmds:
+        print(f"\n🚀 Compose command: {' '.join(cmd)}")
+        if dry_run:
+            continue
+
+        res = subprocess.run(cmd)
+        if res.returncode != 0:
+            print(f"❌ Compose failed (exit code {res.returncode}): {' '.join(cmd)}", file=sys.stderr)
+            return res.returncode
+
+    if not dry_run:
+        print("\n✅ Compose completed successfully.")
+
+    return 0
