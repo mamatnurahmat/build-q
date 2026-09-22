@@ -1,8 +1,50 @@
-"""File templates for `bq --init-jx` scaffolding.
+"""File templates for `bq --init-jx` / `bq --init-legacy` / `bq --gh-action-init`.
 
-Placeholders use `{{NAME}}` syntax so they don't collide with shell/docker `${VAR}`
-or Makefile `$(VAR)` expansions.
+**Sumber kebenaran**: central gist di
+https://gist.github.com/mamatnurahmat/35cc4c36e7c7c2d236a1b5149cdbcfd9
+(6 file: Makefile.modern, compose.yaml.modern, Dockerfile.modern,
+Makefile.legacy, compose.yaml.legacy, trigger-ci.yml).
+
+`load_template(name)` mengambil versi terbaru dari gist raw URL, cache di
+`~/.build-q/templates/*` selama TTL (default 3600 detik), dan fallback ke
+konstanta `_FALLBACK_*` yang di-bundle di file ini bila gist tidak dapat
+dijangkau (offline / rate-limit / block).
+
+Placeholder pakai `{{NAME}}` (biar tidak konflik dengan `${VAR}` shell/docker
+atau `${{ }}` GitHub Actions), lalu di-substitusi via `render(tpl, ctx)`.
+
+Update / perubahan template: EDIT DI GIST (via `gh gist edit <id>`),
+bukan di file ini. `_FALLBACK_*` di sini adalah snapshot untuk offline
+resilience — tidak wajib sinkron persis, tapi disarankan di-refresh saat
+release baru `bq` supaya user offline tetap dapat template yang wajar.
 """
+from __future__ import annotations
+
+import os
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Dict, Optional
+
+
+GIST_USER = os.environ.get("BUILD_Q_GIST_USER", "mamatnurahmat")
+GIST_ID = os.environ.get("BUILD_Q_GIST_ID", "35cc4c36e7c7c2d236a1b5149cdbcfd9")
+GIST_CACHE_TTL = int(os.environ.get("BUILD_Q_GIST_TTL", "3600"))  # seconds
+GIST_TIMEOUT = int(os.environ.get("BUILD_Q_GIST_TIMEOUT", "10"))  # seconds
+
+CACHE_DIR = Path.home() / ".build-q" / "templates"
+
+
+# Mapping nama logis (dipakai builder.py) → nama file di gist.
+TEMPLATE_FILES: Dict[str, str] = {
+    "makefile":         "Makefile.modern",
+    "compose":          "compose.yaml.modern",
+    "dockerfile":       "Dockerfile.modern",
+    "makefile_legacy":  "Makefile.legacy",
+    "compose_legacy":   "compose.yaml.legacy",
+    "trigger_ci":       "trigger-ci.yml",
+}
 
 
 def render(tpl: str, ctx: dict) -> str:
@@ -13,7 +55,119 @@ def render(tpl: str, ctx: dict) -> str:
     return result
 
 
-MAKEFILE_TPL = """\
+def _gist_raw_url(filename: str) -> str:
+    return f"https://gist.githubusercontent.com/{GIST_USER}/{GIST_ID}/raw/{filename}"
+
+
+def _cache_path(filename: str) -> Path:
+    return CACHE_DIR / filename
+
+
+def _fetch_from_gist(filename: str) -> Optional[str]:
+    """Fetch template content from gist raw URL. Returns None on any failure."""
+    url = _gist_raw_url(filename)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "build-q"})
+        with urllib.request.urlopen(req, timeout=GIST_TIMEOUT) as r:
+            if r.status != 200:
+                return None
+            return r.read().decode("utf-8")
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        return None
+
+
+def _read_cache(filename: str) -> Optional[str]:
+    p = _cache_path(filename)
+    if not p.exists():
+        return None
+    try:
+        return p.read_text()
+    except OSError:
+        return None
+
+
+def _write_cache(filename: str, content: str) -> None:
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_path(filename).write_text(content)
+    except OSError:
+        pass  # cache adalah best-effort
+
+
+def _cache_is_fresh(filename: str) -> bool:
+    p = _cache_path(filename)
+    if not p.exists():
+        return False
+    try:
+        age = time.time() - p.stat().st_mtime
+        return age < GIST_CACHE_TTL
+    except OSError:
+        return False
+
+
+def load_template(name: str) -> str:
+    """Ambil template — gist first (dengan cache TTL), fallback ke bundled.
+
+    Alur:
+      1. Bila cache masih fresh (< TTL), langsung pakai cache.
+      2. Coba fetch dari gist raw URL. Bila sukses → refresh cache + return.
+      3. Fallback ke cache (walau expired) bila ada.
+      4. Fallback terakhir: konstanta `_FALLBACK_*` di modul ini.
+
+    Args:
+      name: kunci di `TEMPLATE_FILES` (mis. "makefile", "compose", "dockerfile",
+            "makefile_legacy", "compose_legacy", "trigger_ci").
+
+    Raises:
+      KeyError bila nama tidak dikenal.
+    """
+    if name not in TEMPLATE_FILES:
+        raise KeyError(f"Unknown template name: {name!r}")
+    filename = TEMPLATE_FILES[name]
+
+    # 1. Cache fresh → pakai langsung (hemat network round-trip).
+    if _cache_is_fresh(filename):
+        cached = _read_cache(filename)
+        if cached is not None:
+            return cached
+
+    # 2. Coba fetch dari gist.
+    remote = _fetch_from_gist(filename)
+    if remote is not None:
+        _write_cache(filename, remote)
+        return remote
+
+    # 3. Fallback ke cache walau expired.
+    cached = _read_cache(filename)
+    if cached is not None:
+        print(
+            f"⚠️  Gist unreachable; pakai template cache lama untuk {filename} "
+            f"(cache: {_cache_path(filename)})"
+        )
+        return cached
+
+    # 4. Fallback terakhir: bundled snapshot di modul ini.
+    bundled = _BUNDLED_FALLBACK.get(name)
+    if bundled is None:
+        raise RuntimeError(
+            f"Cannot load template {name!r}: gist unreachable, no cache, no bundled fallback."
+        )
+    print(
+        f"⚠️  Gist unreachable dan cache kosong; pakai bundled fallback untuk {filename}. "
+        f"Jalankan online sekali untuk sync cache dari gist."
+    )
+    return bundled
+
+
+# ============================================================
+# Bundled fallback snapshots — dipakai HANYA bila gist tidak dapat dijangkau
+# dan cache kosong. Konstanta di bawah dipertahankan sebagai `_BUNDLED_*` yang
+# didaftarkan di `_BUNDLED_FALLBACK` di bawah. Nama publik lama
+# (`MAKEFILE_TPL`, `COMPOSE_TPL`, ...) juga dipertahankan sebagai alias untuk
+# menjaga backward compatibility bila ada kode eksternal yang import langsung.
+# ============================================================
+
+_BUNDLED_MAKEFILE = """\
 # ============================================================
 # {{IMAGE}} — Makefile build / release (Backend Go)
 # ============================================================
@@ -108,7 +262,7 @@ run:
 """
 
 
-COMPOSE_TPL = """\
+_BUNDLED_COMPOSE = """\
 # ============================================================
 # compose.yaml — Docker Compose (CI/CD + local build)
 # ============================================================
@@ -144,7 +298,7 @@ secrets:
 """
 
 
-DOCKERFILE_TPL = """\
+_BUNDLED_DOCKERFILE = """\
 # syntax=docker/dockerfile:1.4
 # ============================================================
 # Multi-stage Go build with BuildKit secret mount
@@ -200,7 +354,7 @@ CMD ["./up.sh"]
 """
 
 
-MAKEFILE_LEGACY_TPL = """\
+_BUNDLED_MAKEFILE_LEGACY = """\
 # ============================================================
 # {{IMAGE}} — Makefile build / release (legacy netrc via build-args)
 # ============================================================
@@ -328,7 +482,7 @@ down:
 """
 
 
-COMPOSE_LEGACY_TPL = """\
+_BUNDLED_COMPOSE_LEGACY = """\
 # ============================================================
 # compose.yaml — Docker Compose (kompatibel legacy + modern)
 # ============================================================
@@ -376,7 +530,7 @@ secrets:
 """
 
 
-TRIGGER_CI_TPL = """\
+_BUNDLED_TRIGGER_CI = """\
 # ====================================================================
 # CI Trigger — GitHub Actions → Webhook Trigger (Jenkins X)
 # ====================================================================
@@ -457,3 +611,29 @@ jobs:
             exit 1
           fi
 """
+
+
+# ============================================================
+# Registry fallback — dipakai load_template() sebagai layer terakhir bila
+# gist + cache tidak tersedia.
+# ============================================================
+_BUNDLED_FALLBACK: Dict[str, str] = {
+    "makefile":        _BUNDLED_MAKEFILE,
+    "compose":         _BUNDLED_COMPOSE,
+    "dockerfile":      _BUNDLED_DOCKERFILE,
+    "makefile_legacy": _BUNDLED_MAKEFILE_LEGACY,
+    "compose_legacy":  _BUNDLED_COMPOSE_LEGACY,
+    "trigger_ci":      _BUNDLED_TRIGGER_CI,
+}
+
+
+# ============================================================
+# Backward-compat aliases — modul lama import langsung, tapi baru
+# sebaiknya panggil `load_template(name)`.
+# ============================================================
+MAKEFILE_TPL         = _BUNDLED_MAKEFILE
+COMPOSE_TPL          = _BUNDLED_COMPOSE
+DOCKERFILE_TPL       = _BUNDLED_DOCKERFILE
+MAKEFILE_LEGACY_TPL  = _BUNDLED_MAKEFILE_LEGACY
+COMPOSE_LEGACY_TPL   = _BUNDLED_COMPOSE_LEGACY
+TRIGGER_CI_TPL       = _BUNDLED_TRIGGER_CI

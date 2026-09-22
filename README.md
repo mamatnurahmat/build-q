@@ -136,6 +136,7 @@ Kalau muncul error `authentication required` saat push → login ke Docker Hub /
 ### Setup & Automation
 
 - **`--init`**: buat file config `~/.build-q/.env` **dan** auto-create Docker Buildx builder (bootstrap).
+- **Template terpusat di gist**: sejak `v0.1.14`, `--init-jx`, `--init-legacy`, dan `--gh-action-init` fetch template dari [gist mamatnurahmat](https://gist.github.com/mamatnurahmat/35cc4c36e7c7c2d236a1b5149cdbcfd9) (6 file). Cache lokal di `~/.build-q/templates/` (TTL 1 jam). Fallback ke bundled snapshot bila offline. **Update / perbaikan template harus dilakukan di gist** (via `gh gist edit`) — semua user `bq` otomatis dapat versi terbaru pada scaffold berikutnya.
 - **`--init-jx`**: scaffold `Makefile` + `compose.yaml` + `Dockerfile` (modern secret mount) + `.github/workflows/trigger-ci.yml` dari `cicd/cicd.json`. Auto-panggil `--init-secrets` bila git remote GitHub terdeteksi.
 - **`--init-legacy`**: scaffold `Makefile` + `compose.yaml` untuk pola **legacy** (Dockerfile pakai `ARG GITHUB_USER/GITHUB_TOKEN` — bukan BuildKit secret). Makefile auto-ambil `gh auth token` untuk local dev. **Dockerfile tidak di-overwrite** — cocok untuk repo lama yang belum bisa migrasi ke secret mount.
 - **`--gh-action-init`**: bootstrap standar `.github/workflows/trigger-ci.yml` sebagai **satu-satunya** workflow — hapus semua workflow YAML lain di `.github/workflows/`, tulis ulang trigger-ci.yml, lalu set webhook secrets (`WEBHOOK_TRIGGER_URL`, `WEBHOOK_TRIGGER_TOKEN`).
@@ -409,6 +410,76 @@ Build options:
 - **Git** (opsional; wajib untuk auto-detect & mode local)
 - **GitHub CLI (`gh`)** — wajib untuk `--clone`, `--remote`, `--gh-auth`, `--init-secrets`, `--gh-action-init`
 - **kubectl** — opsional; hanya untuk `--init-secrets` / `--gh-action-init` (fetch token otomatis dari cluster)
+
+---
+
+## 📄 Template Terpusat (Gist)
+
+Sejak `v0.1.14`, template scaffolding hidup di **gist publik**, bukan hard-coded di package:
+
+- **URL gist:** https://gist.github.com/mamatnurahmat/35cc4c36e7c7c2d236a1b5149cdbcfd9
+- **Raw base:** `https://gist.githubusercontent.com/mamatnurahmat/<gist-id>/raw/<filename>`
+- **6 file:** `Makefile.modern`, `compose.yaml.modern`, `Dockerfile.modern`, `Makefile.legacy`, `compose.yaml.legacy`, `trigger-ci.yml`
+
+**Alur load:**
+```
+load_template(name)
+   ├── 1. cache ~/.build-q/templates/<file>  (TTL 3600s, fresh?)  ─► pakai
+   ├── 2. fetch dari gist raw URL                                ─► refresh cache + pakai
+   ├── 3. cache lama (expired)                                   ─► pakai (dengan warning)
+   └── 4. bundled snapshot di build_q/templates.py               ─► pakai (warning)
+```
+
+### Cara update template
+
+**Update HARUS via gist**, jangan edit `build_q/templates.py`. `_BUNDLED_*` di file itu hanya snapshot offline-fallback.
+
+```bash
+# Clone gist untuk edit local
+gh gist clone 35cc4c36e7c7c2d236a1b5149cdbcfd9 build-q-templates
+cd build-q-templates
+
+# Edit file yang ingin diubah (mis. Makefile.modern)
+vim Makefile.modern
+
+# Commit + push (gist adalah git repo — otomatis publish)
+git commit -am "fix: adjust Makefile.modern IMAGE_TAG logic"
+git push
+
+# Verifikasi raw URL sudah kepakai
+curl -s https://gist.githubusercontent.com/mamatnurahmat/35cc4c36e7c7c2d236a1b5149cdbcfd9/raw/Makefile.modern | head
+```
+
+### Force refresh cache di sisi user
+
+Kalau user ingin ambil template terbaru sebelum TTL expired:
+```bash
+rm -rf ~/.build-q/templates      # hapus cache — next scaffold auto-fetch
+# atau override TTL per-invocation:
+BUILD_Q_GIST_TTL=0 bq --init-jx
+```
+
+### Override gist source (advanced)
+
+Untuk fork/private mirror, override via env vars:
+```bash
+export BUILD_Q_GIST_USER=your-org
+export BUILD_Q_GIST_ID=abcd1234...
+export BUILD_Q_GIST_TTL=7200      # 2 jam
+export BUILD_Q_GIST_TIMEOUT=15    # 15 detik
+bq --init-jx
+```
+
+### Sinkronisasi bundled fallback (maintainer only)
+
+Saat rilis `bq` baru, refresh `_BUNDLED_*` di `build_q/templates.py` agar offline user tetap dapat template terkini:
+```bash
+GID=35cc4c36e7c7c2d236a1b5149cdbcfd9
+for f in Makefile.modern compose.yaml.modern Dockerfile.modern Makefile.legacy compose.yaml.legacy trigger-ci.yml; do
+  curl -s "https://gist.githubusercontent.com/mamatnurahmat/$GID/raw/$f" > "/tmp/$f"
+done
+# lalu paste isi ke masing-masing _BUNDLED_* di build_q/templates.py
+```
 
 ---
 

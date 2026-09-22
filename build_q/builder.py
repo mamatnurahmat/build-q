@@ -389,9 +389,7 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
 
     Returns True if any file was written.
     """
-    from .templates import (
-        COMPOSE_TPL, DOCKERFILE_TPL, MAKEFILE_TPL, TRIGGER_CI_TPL, render,
-    )
+    from .templates import load_template, render
 
     try:
         cicd = load_local_cicd(cicd_path)
@@ -413,16 +411,16 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
         "ORG_REGISTRY": registry,
     }
 
-    print(f"📦 Scaffolding from {cicd_path}:")
+    print(f"📦 Scaffolding from {cicd_path} (templates dari gist mamatnurahmat/35cc4c36e7c7c2d236a1b5149cdbcfd9):")
     for k, v in ctx.items():
         print(f"   {k:12} = {v}")
     print()
 
     files = [
-        (Path("Makefile"), render(MAKEFILE_TPL, ctx)),
-        (Path("compose.yaml"), render(COMPOSE_TPL, ctx)),
-        (Path("Dockerfile"), render(DOCKERFILE_TPL, ctx)),
-        (Path(".github/workflows/trigger-ci.yml"), TRIGGER_CI_TPL),
+        (Path("Makefile"), render(load_template("makefile"), ctx)),
+        (Path("compose.yaml"), render(load_template("compose"), ctx)),
+        (Path("Dockerfile"), render(load_template("dockerfile"), ctx)),
+        (Path(".github/workflows/trigger-ci.yml"), load_template("trigger_ci")),
     ]
 
     written = 0
@@ -462,7 +460,7 @@ def init_gh_action(token: Optional[str] = None) -> bool:
     - Tulis ulang trigger-ci.yml dari TRIGGER_CI_TPL
     - Set WEBHOOK_TRIGGER_URL + WEBHOOK_TRIGGER_TOKEN via `gh secret set`
     """
-    from .templates import TRIGGER_CI_TPL
+    from .templates import load_template
 
     workflows_dir = Path(".github/workflows")
     workflows_dir.mkdir(parents=True, exist_ok=True)
@@ -482,11 +480,11 @@ def init_gh_action(token: Optional[str] = None) -> bool:
     else:
         print(f"ℹ️  Tidak ada workflow lain untuk dihapus di {workflows_dir}.")
 
-    # 2. Tulis ulang trigger-ci.yml (selalu overwrite — ini file "standar")
+    # 2. Tulis ulang trigger-ci.yml (selalu overwrite — file standar dari gist)
     if trigger_path.exists():
         print(f"♻️  Overwrite existing {trigger_path}")
-    trigger_path.write_text(TRIGGER_CI_TPL)
-    print(f"✅ Wrote {trigger_path}")
+    trigger_path.write_text(load_template("trigger_ci"))
+    print(f"✅ Wrote {trigger_path} (dari central gist)")
 
     # 3. Set webhook secrets (butuh git remote origin)
     repo = detect_github_repo()
@@ -518,7 +516,7 @@ def init_legacy(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
 
     Returns True jika ada file yang ditulis.
     """
-    from .templates import COMPOSE_LEGACY_TPL, MAKEFILE_LEGACY_TPL, render
+    from .templates import load_template, render
 
     try:
         cicd = load_local_cicd(cicd_path)
@@ -537,14 +535,14 @@ def init_legacy(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
         "ORG_REGISTRY": registry,
     }
 
-    print(f"📦 Scaffolding legacy (netrc via build-args) from {cicd_path}:")
+    print(f"📦 Scaffolding legacy (netrc via build-args) from {cicd_path} (templates dari central gist):")
     for k, v in ctx.items():
         print(f"   {k:12} = {v}")
     print()
 
     files = [
-        (Path("Makefile"), render(MAKEFILE_LEGACY_TPL, ctx)),
-        (Path("compose.yaml"), render(COMPOSE_LEGACY_TPL, ctx)),
+        (Path("Makefile"), render(load_template("makefile_legacy"), ctx)),
+        (Path("compose.yaml"), render(load_template("compose_legacy"), ctx)),
     ]
 
     written = 0
