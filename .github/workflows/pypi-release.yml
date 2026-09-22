@@ -1,0 +1,81 @@
+name: Release to PyPI
+
+# Trigger otomatis saat push tag `v*` (mis. `git tag v0.1.12 && git push origin v0.1.12`)
+# atau bisa dijalankan manual dari tab Actions (workflow_dispatch).
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versi rilis (opsional, hanya untuk log; source of truth: pyproject.toml)'
+        required: false
+        type: string
+
+concurrency:
+  group: pypi-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build & publish to PyPI
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify tag matches pyproject.toml version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          PYPROJECT_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          INIT_VERSION=$(grep -m1 '__version__' build_q/__init__.py | sed 's/.*"\(.*\)".*/\1/')
+          echo "🏷️  Tag             : $TAG"
+          echo "📄 pyproject.toml : $PYPROJECT_VERSION"
+          echo "🐍 __init__.py    : $INIT_VERSION"
+          if [ "$TAG" != "$PYPROJECT_VERSION" ] || [ "$TAG" != "$INIT_VERSION" ]; then
+            echo "::error::Tag ($TAG) tidak cocok dengan version di pyproject.toml ($PYPROJECT_VERSION) atau build_q/__init__.py ($INIT_VERSION). Bump dulu dengan 'python3 scripts/bump_version.py $TAG', commit, lalu re-tag."
+            exit 1
+          fi
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade build twine
+
+      - name: Build sdist + wheel
+        run: python -m build
+
+      - name: Check artifacts
+        run: |
+          ls -lh dist/
+          python -m twine check dist/*
+
+      - name: Publish to PyPI
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          TWINE_NON_INTERACTIVE: '1'
+        run: python -m twine upload --skip-existing dist/*
+
+      - name: Summary
+        if: success()
+        run: |
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | sed 's/.*"\(.*\)".*/\1/')
+          {
+            echo "## ✅ Released build-q $VERSION"
+            echo ""
+            echo "- PyPI: https://pypi.org/project/build-q/$VERSION/"
+            echo "- Install: \`pipx install build-q==$VERSION\`"
+            echo "- Upgrade: \`pipx upgrade build-q\`"
+          } >> "$GITHUB_STEP_SUMMARY"
