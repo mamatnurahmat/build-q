@@ -202,10 +202,20 @@ CLUSTER      ?= {{CLUSTER}}
 DEPLOYMENT   ?= {{DEPLOYMENT}}
 NODETYPE     ?= {{NODETYPE}}
 
+# GitHub creds untuk private Go module (github.com/Qoin-Digital-Indonesia/*).
+# Compose secrets: netrc mount `$HOME/.netrc` — target `netrc` di bawah
+# auto-generate file itu supaya build jalan di Tekton CI (yang tidak punya
+# .netrc secara default) dan di local dev tanpa perlu manual setup.
+#
+#   CI Tekton  : GIT_USER + GIT_TOKEN dari secret `tekton-git` (auto-inject).
+#   Local dev  : fallback ke `git config user.name` + `gh auth token`.
+GITHUB_USER  ?= $(or $(GIT_USER),$(shell git config user.name 2>/dev/null),qoin-bot)
+GITHUB_TOKEN ?= $(or $(GIT_TOKEN),$(shell gh auth token 2>/dev/null))
+
 export DOCKER_BUILDKIT := 1
 export COMPOSE_DOCKER_CLI_BUILD := 1
 
-.PHONY: help develop staging sandbox production build release run
+.PHONY: help develop staging sandbox production build release run netrc
 
 ## Show help
 help:
@@ -238,8 +248,21 @@ production:
 	@$(MAKE) build ENV=production
 	@$(MAKE) release ENV=production
 
+## Auto-generate $HOME/.netrc dari GITHUB_USER + GITHUB_TOKEN.
+## Dipakai compose secret + Dockerfile `RUN --mount=type=secret,id=netrc,...`.
+## Wajib di CI (Tekton runner tidak punya netrc); no-op di local kalau sudah ada.
+netrc:
+	@if [ -z "$(GITHUB_TOKEN)" ]; then \
+		echo ">> ❌ GITHUB_TOKEN kosong. CI: pastikan secret tekton-git di-mount. Local: 'gh auth login' atau export GITHUB_TOKEN=<token>"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$$HOME/.netrc" ]; then \
+		echo ">> ℹ️  Generate $$HOME/.netrc dari GITHUB_USER + GITHUB_TOKEN"; \
+		printf "machine github.com login %s password %s\n" "$(GITHUB_USER)" "$(GITHUB_TOKEN)" > "$$HOME/.netrc" && chmod 600 "$$HOME/.netrc"; \
+	fi
+
 ## Build image (BuildKit + secret mount from ~/.netrc)
-build:
+build: netrc
 	@echo ">> Build $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
 	ORG_REGISTRY=$(ORG_REGISTRY) \
 	IMAGE_NAME=$(IMAGE_NAME) \

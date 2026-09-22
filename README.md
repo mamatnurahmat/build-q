@@ -470,6 +470,19 @@ export BUILD_Q_GIST_TIMEOUT=15    # 15 detik
 bq --init-jx
 ```
 
+### Pipeline Tekton pakai gist yang SAMA (Opsi B strict)
+
+Sejak `~/jenkins-x/pipeline` versi terbaru, Tekton pipeline **overlay** Makefile/compose/Dockerfile dari gist ini SEBELUM `make build`. Hasilnya BYTE-IDENTICAL dengan `bq --init-jx` — jadi tidak ada drift antara build lokal `bq --compose` dan build pipeline JX.
+
+Alur di pipeline (step `sync-scaffold` di `.lighthouse/triggers.yaml`):
+1. Early-skip: `docker manifest inspect` — kalau image sudah ada, skip semuanya.
+2. Validate: `cicd/cicd.json` wajib ada (fail-fast kalau tidak).
+3. Auto-detect mode: `ARG GITHUB_USER/TOKEN` di Dockerfile → legacy (Dockerfile tidak di-overlay). Else → modern (semua 3 file di-overlay).
+4. Fetch dari gist raw URL, render placeholder pakai `sed s|{{KEY}}|VALUE|g` dengan 7 keys (IMAGE, PROJECT, PORT, CLUSTER, DEPLOYMENT, NODETYPE, ORG_REGISTRY) — sama persis dengan `render()` di `build_q/templates.py`.
+5. `make build && make release` (fail-fast, tanpa `|| echo WARN`).
+
+**BREAKING:** repo yang customize `Makefile` / `compose.yaml` / `Dockerfile` (modern mode) akan **di-overlay tiap build**. Custom target Makefile HILANG. Kalau perlu kustomisasi, edit di gist saja (semua repo dapat perubahan otomatis).
+
 ### Sinkronisasi bundled fallback (maintainer only)
 
 Saat rilis `bq` baru, refresh `_BUNDLED_*` di `build_q/templates.py` agar offline user tetap dapat template terkini:
