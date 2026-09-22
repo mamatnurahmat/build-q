@@ -89,32 +89,39 @@ def get_local_tag_or_commit() -> str:
 
 
 def _env_from_ref(ref: Optional[str]) -> str:
-    """Map a git ref (branch or tag) to a build ENV: develop|staging|production.
+    """Map a git ref (branch or tag) to a build ENV.
 
-    Rules — konsisten dengan konvensi Jenkins X / templates di build-q:
-      • Tag `v*` (semver release)          → production
-      • Branch `main` / `master`           → production
-      • Branch `staging` / `sandbox`       → staging
-      • Branch `develop` / `development`   → develop
-      • Ref lain / kosong                  → develop (safe default)
+    **INLINE dengan pipeline Tekton** di ~/jenkins-x/pipeline (lighthouse
+    triggers.yaml + webhook-server.py). Aturan case shell yang di-mirror:
 
-    Digunakan oleh `build_command` (BRANCH build-arg untuk buildx) dan
-    `run_compose` (ENV=<env> untuk `make build && make release`), sehingga
-    `bq` / `bq --clone` / `bq --compose` memilih environment yang benar
-    dari nama branch atau tag tanpa perlu flag tambahan.
+        v* | refs/tags/v*  → production     (IMAGE_TAG = basename ref, mis. v1.2.3)
+        develop            → develop        (IMAGE_TAG = short SHA)
+        staging            → staging        (IMAGE_TAG = short SHA)
+        sandbox            → sandbox        (IMAGE_TAG = short SHA)
+        else / kosong      → staging        (fallback default, cocokan Tekton `*)`)
+
+    Perhatikan:
+      • `main`/`master` masuk ke fallback (`*)` di Tekton → `staging`, bukan
+        production. Push ke main TIDAK memicu production; tag `v*` yang memicu.
+      • `development` (alias develop) juga masuk fallback → `staging` di
+        Tekton. bq mengikuti; kalau developer memang mau `develop`, pakai
+        branch bernama `develop` (bukan `development`) atau override via
+        `--build-arg BRANCH=develop`.
+
+    Override manual: `bq --build-arg BRANCH=<env>` (untuk buildx).
     """
     if not ref:
-        return "develop"
-    if ref.startswith("v"):
-        return "production"
-    r = ref.lower()
-    if r in ("develop", "development"):
-        return "develop"
-    if r in ("staging", "sandbox"):
         return "staging"
-    if r in ("main", "master"):
+    r = ref.lower()
+    if r.startswith("v") or r.startswith("refs/tags/v"):
         return "production"
-    return "develop"
+    if r == "develop":
+        return "develop"
+    if r == "staging":
+        return "staging"
+    if r == "sandbox":
+        return "sandbox"
+    return "staging"
 
 
 def build_command(

@@ -225,17 +225,20 @@ Helper terpusat `_env_from_ref(ref)` menyimpulkan environment dari nama branch/t
 - Sebagai `--build-arg BRANCH=<env>` di `build_command` (buildx path — local, `--clone`, `--remote`).
 - Sebagai `ENV=<env>` argument ke `make build && make release` di `run_compose` (mode `--compose`).
 
-Aturan:
+**INLINE dengan Tekton pipeline** di `~/jenkins-x/pipeline` (lighthouse
+`triggers.yaml` + `webhook-server.py`). Aturan case shell yang di-mirror
+exact di `_env_from_ref()`:
 
-| Ref (branch/tag) | ENV |
-| ------------------ | ----- |
-| `v1.2.3`, `v*` (semver tag) | `production` |
-| `main`, `master` | `production` |
-| `staging`, `sandbox` | `staging` |
-| `develop`, `development` | `develop` |
-| lainnya / kosong | `develop` (safe default) |
+| Ref (branch/tag) | ENV | IMAGE_TAG |
+| ------------------ | ----- | --------- |
+| `v1.2.3`, `refs/tags/v*` | `production` | basename ref (`v1.2.3`) |
+| `develop` | `develop` | short SHA |
+| `staging` | `staging` | short SHA |
+| `sandbox` | `sandbox` | short SHA |
+| `main`, `master`, unknown, kosong | `staging` (Tekton fallback `*)`) | short SHA |
 
-Override manual tetap dihormati: `--build-arg BRANCH=custom` menang atas mapping otomatis.
+Catatan penting: push ke `main`/`master` **tidak** memicu production di JX;
+tag `v*` yang memicu. Override manual: `--build-arg BRANCH=custom` menang.
 
 ### 7.4 Default Secret `netrc`
 

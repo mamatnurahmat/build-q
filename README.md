@@ -114,17 +114,17 @@ Kalau muncul error `authentication required` saat push → login ke Docker Hub /
 - **Git auto-detection**: nama repo & ref (branch/tag/short-SHA) dari Git.
 - **Mode sumber kode**: build lokal, `--clone` (via `gh` CLI), atau `--remote` (Buildx Git context).
 - **Registry idempotency**: cek image di registry sebelum build → skip bila sudah ada (bypass `--rebuild`).
-- **Smart env mapping (ref → env)**: `bq` (dan `bq --clone` / `bq --compose`) menyimpulkan environment otomatis dari nama ref (branch/tag). Nilai ini dipakai sebagai `--build-arg BRANCH=` (buildx) dan `ENV=` (compose):
+- **Smart env mapping (ref → env)** — **INLINE dengan pipeline Tekton** di `~/jenkins-x/pipeline` (lighthouse `triggers.yaml` + `webhook-server.py`). `bq` (`bq --clone` / `bq --compose`) menyimpulkan environment otomatis dari nama ref, sama persis dengan case shell di pipeline. Nilai dipakai sebagai `--build-arg BRANCH=` (buildx) dan `ENV=` (compose):
 
-  | Ref (branch/tag) | ENV | Alasan |
-  |------------------|-----|--------|
-  | `v1.2.3`, `v0.x.y` (semver tag) | `production` | konvensi rilis semver |
-  | `main`, `master` | `production` | branch rilis utama |
-  | `staging`, `sandbox` | `staging` | pra-prod |
-  | `develop`, `development` | `develop` | dev environment |
-  | `feature/foo`, `hotfix-x`, dll | `develop` | safe default |
+  | Ref (branch/tag) | ENV | IMAGE_TAG di pipeline |
+  |------------------|-----|----------------------|
+  | `v1.2.3`, `refs/tags/v*` | `production` | `v1.2.3` (basename ref) |
+  | `develop` | `develop` | short SHA |
+  | `staging` | `staging` | short SHA |
+  | `sandbox` | `sandbox` | short SHA |
+  | `main`, `master`, unknown, kosong | **`staging`** (fallback Tekton `*)`) | short SHA |
 
-  Override manual: `--build-arg BRANCH=custom` (buildx).
+  Perhatikan: push ke `main`/`master` **TIDAK** memicu production di JX — tag `v*` yang memicu. Override manual: `--build-arg BRANCH=custom` (buildx).
 - **Default netrc secret**: `--secret id=netrc,src=$HOME/.netrc` otomatis.
 - **Resource limit default**: memory & CPU aman untuk laptop.
 - **CI/CD alignment**: baca `PORT/PORT2/PROJECT/IMAGE` dari `cicd/cicd.json`.

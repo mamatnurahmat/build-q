@@ -174,10 +174,15 @@ _BUNDLED_MAKEFILE = """\
 # Usage:
 #   make develop                 Build image develop
 #   make staging                 Build + push staging
+#   make sandbox                 Build + push sandbox
 #   make production              Build + push production
-#   make build ENV=<env>         Build only
+#   make build ENV=<env>         Build only  (env: develop|staging|sandbox|production)
 #   make release ENV=<env>       Push only
 #   make run ENV=<env>           Run locally
+#
+# ENV values MATCH pipeline Tekton (~/jenkins-x/pipeline/lighthouse-config/
+# .lighthouse/jenkins-x/triggers.yaml) — jangan pakai nilai lain agar
+# .env.<env> yang di-COPY Dockerfile konsisten dengan yang dipakai runtime JX.
 #
 # Image tag resolution:
 #   HEAD di tag git (v1.2.3)  →  v1.2.3
@@ -200,7 +205,7 @@ NODETYPE     ?= {{NODETYPE}}
 export DOCKER_BUILDKIT := 1
 export COMPOSE_DOCKER_CLI_BUILD := 1
 
-.PHONY: help develop staging production build release run
+.PHONY: help develop staging sandbox production build release run
 
 ## Show help
 help:
@@ -209,19 +214,25 @@ help:
 	@echo "=================================================="
 	@echo "  make develop            Build image develop"
 	@echo "  make staging            Build + push staging"
+	@echo "  make sandbox            Build + push sandbox"
 	@echo "  make production         Build + push production"
-	@echo "  make build ENV=<env>    Build image"
+	@echo "  make build ENV=<env>    Build image (env: develop|staging|sandbox|production)"
 	@echo "  make release ENV=<env>  Push image"
 	@echo "  make run ENV=<env>      Run container locally"
 	@echo ""
 
-## Full flow shortcuts
+## Full flow shortcuts (ENV values MATCH pipeline Tekton triggers.yaml)
 develop:
 	@$(MAKE) build ENV=develop
+	@$(MAKE) release ENV=develop
 
 staging:
 	@$(MAKE) build ENV=staging
 	@$(MAKE) release ENV=staging
+
+sandbox:
+	@$(MAKE) build ENV=sandbox
+	@$(MAKE) release ENV=sandbox
 
 production:
 	@$(MAKE) build ENV=production
@@ -230,34 +241,34 @@ production:
 ## Build image (BuildKit + secret mount from ~/.netrc)
 build:
 	@echo ">> Build $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
-	ORG_REGISTRY=$(ORG_REGISTRY) \\
-	IMAGE_NAME=$(IMAGE_NAME) \\
-	IMAGE_TAG=$(IMAGE_TAG) \\
-	BUILD_ENV=$(ENV) \\
-	PORT=$(PORT) \\
-	PROJECT=$(PROJECT) \\
-	CLUSTER=$(CLUSTER) \\
-	DEPLOYMENT=$(DEPLOYMENT) \\
-	NODETYPE=$(NODETYPE) \\
+	ORG_REGISTRY=$(ORG_REGISTRY) \
+	IMAGE_NAME=$(IMAGE_NAME) \
+	IMAGE_TAG=$(IMAGE_TAG) \
+	BUILD_ENV=$(ENV) \
+	PORT=$(PORT) \
+	PROJECT=$(PROJECT) \
+	CLUSTER=$(CLUSTER) \
+	DEPLOYMENT=$(DEPLOYMENT) \
+	NODETYPE=$(NODETYPE) \
 	docker compose build
 
 ## Push image to registry
 release:
 	@echo ">> Push $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
-	ORG_REGISTRY=$(ORG_REGISTRY) \\
-	IMAGE_NAME=$(IMAGE_NAME) \\
-	IMAGE_TAG=$(IMAGE_TAG) \\
-	BUILD_ENV=$(ENV) \\
+	ORG_REGISTRY=$(ORG_REGISTRY) \
+	IMAGE_NAME=$(IMAGE_NAME) \
+	IMAGE_TAG=$(IMAGE_TAG) \
+	BUILD_ENV=$(ENV) \
 	docker compose push
 
 ## Run container locally
 run:
 	@echo ">> Run $(ENV): $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
-	ORG_REGISTRY=$(ORG_REGISTRY) \\
-	IMAGE_NAME=$(IMAGE_NAME) \\
-	IMAGE_TAG=$(IMAGE_TAG) \\
-	BUILD_ENV=$(ENV) \\
-	PORT=$(PORT) \\
+	ORG_REGISTRY=$(ORG_REGISTRY) \
+	IMAGE_NAME=$(IMAGE_NAME) \
+	IMAGE_TAG=$(IMAGE_TAG) \
+	BUILD_ENV=$(ENV) \
+	PORT=$(PORT) \
 	docker compose up
 """
 
@@ -320,13 +331,13 @@ RUN mkdir -p /go/src/${PROJECT}
 WORKDIR /go/src/${PROJECT}
 
 COPY go.mod go.sum ./
-RUN --mount=type=secret,id=netrc,target=/root/.netrc \\
+RUN --mount=type=secret,id=netrc,target=/root/.netrc \
     GOPRIVATE=github.com/Qoin-Digital-Indonesia/* go mod download && go mod tidy
 
 COPY . .
 COPY .env.${BRANCH} .env
 
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \\
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -a -installsuffix cgo -o /go/bin/${PROJECT} server.go
 
 # ------------------------------------------------------------
@@ -336,8 +347,8 @@ ARG PORT
 ARG PROJECT
 
 ENV TIMEZONE=Asia/Jakarta
-RUN apk --no-cache add tzdata ca-certificates && \\
-    cp /usr/share/zoneinfo/${TIMEZONE} /etc/localtime && \\
+RUN apk --no-cache add tzdata ca-certificates && \
+    cp /usr/share/zoneinfo/${TIMEZONE} /etc/localtime && \
     echo "${TIMEZONE}" > /etc/timezone
 
 EXPOSE ${PORT}
@@ -346,8 +357,8 @@ COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /go/bin/${PROJECT} .
 COPY .env.${BRANCH} .env
 
-RUN printf "#!/bin/sh\\n\\nwhile true; do\\n\\techo \\"[INFO] Starting Service at \\$(date)\\"\\n\\t(./${PROJECT} >> ./history.log || echo \\"[ERROR] Restarting Service at \\$(date)\\")\\ndone" > run.sh && \\
-    printf "#!/bin/sh\\n./run.sh & tail -F ./history.log" > up.sh && \\
+RUN printf "#!/bin/sh\n\nwhile true; do\n\techo \"[INFO] Starting Service at \$(date)\"\n\t(./${PROJECT} >> ./history.log || echo \"[ERROR] Restarting Service at \$(date)\")\ndone" > run.sh && \
+    printf "#!/bin/sh\n./run.sh & tail -F ./history.log" > up.sh && \
     chmod +x up.sh run.sh
 
 CMD ["./up.sh"]
@@ -407,7 +418,7 @@ GITHUB_TOKEN ?= $(or $(GIT_TOKEN),$(shell gh auth token 2>/dev/null))
 export DOCKER_BUILDKIT := 1
 export COMPOSE_DOCKER_CLI_BUILD := 1
 
-.PHONY: help staging production build release run down check-env netrc
+.PHONY: help develop staging sandbox production build release run down check-env netrc
 
 ## Tampilkan bantuan
 help:
@@ -415,24 +426,38 @@ help:
 	@echo "$(IMAGE_NAME) — generic Docker build/release (legacy netrc)"
 	@echo "=========================================================="
 	@echo ""
-	@echo "Usage: make <target> ENV=<env>  (env: staging | production)"
+	@echo "Usage: make <target> ENV=<env>  (env: develop | staging | sandbox | production)"
 	@echo ""
+	@echo "  make build ENV=develop       Build image develop"
 	@echo "  make build ENV=staging       Build image staging"
+	@echo "  make build ENV=sandbox       Build image sandbox"
 	@echo "  make build ENV=production    Build image production"
-	@echo "  make release ENV=staging     Push image staging"
-	@echo "  make release ENV=production  Push image production"
-	@echo "  make run ENV=staging         Build + jalankan container"
+	@echo "  make release ENV=<env>       Push image"
+	@echo "  make run ENV=<env>           Build + jalankan container"
 	@echo "  make down                    Stop container"
 	@echo "  make help                    Bantuan ini"
+	@echo ""
+	@echo "ENV MATCH pipeline Tekton (~/jenkins-x/pipeline). Nilai selain 4"
+	@echo "di atas otomatis fallback ke 'staging' oleh runtime JX."
 	@echo ""
 	@echo "CI/CD: override COMPOSE_FILE"
 	@echo "  make build ENV=staging COMPOSE_FILE=build.compose"
 	@echo ""
 
+## Full flow: develop (build + release)
+develop:
+	@$(MAKE) build ENV=develop
+	@$(MAKE) release ENV=develop
+
 ## Full flow: staging (build + release)
 staging:
 	@$(MAKE) build ENV=staging
 	@$(MAKE) release ENV=staging
+
+## Full flow: sandbox (build + release)
+sandbox:
+	@$(MAKE) build ENV=sandbox
+	@$(MAKE) release ENV=sandbox
 
 ## Full flow: production (build + release)
 production:
@@ -441,39 +466,39 @@ production:
 
 ## Validasi file .env.{ENV} (warning only)
 check-env:
-	@if [ ! -f "$(ENV_FILE)" ]; then \\
-		echo ">> ⚠️  $(ENV_FILE) tidak ditemukan (pakai default Dockerfile)"; \\
+	@if [ ! -f "$(ENV_FILE)" ]; then \
+		echo ">> ⚠️  $(ENV_FILE) tidak ditemukan (pakai default Dockerfile)"; \
 	fi
 
 ## Auto-generate $HOME/.netrc bila belum ada (dipakai compose secret + Dockerfile --mount=type=secret,id=netrc)
 netrc:
-	@if [ -z "$(GITHUB_TOKEN)" ]; then \\
-		echo ">> ❌ GITHUB_TOKEN kosong. Jalankan 'gh auth login' atau export GITHUB_TOKEN=<token>"; \\
-		exit 1; \\
+	@if [ -z "$(GITHUB_TOKEN)" ]; then \
+		echo ">> ❌ GITHUB_TOKEN kosong. Jalankan 'gh auth login' atau export GITHUB_TOKEN=<token>"; \
+		exit 1; \
 	fi
-	@if [ ! -f "$$HOME/.netrc" ]; then \\
-		echo ">> ℹ️  Generate $$HOME/.netrc dari GITHUB_USER + GITHUB_TOKEN (needed by CI runner)"; \\
-		printf "machine github.com login %s password %s\\n" "$(GITHUB_USER)" "$(GITHUB_TOKEN)" > "$$HOME/.netrc" && chmod 600 "$$HOME/.netrc"; \\
+	@if [ ! -f "$$HOME/.netrc" ]; then \
+		echo ">> ℹ️  Generate $$HOME/.netrc dari GITHUB_USER + GITHUB_TOKEN (needed by CI runner)"; \
+		printf "machine github.com login %s password %s\n" "$(GITHUB_USER)" "$(GITHUB_TOKEN)" > "$$HOME/.netrc" && chmod 600 "$$HOME/.netrc"; \
 	fi
 
 ## Build image Docker
 build: netrc
 	@echo ">> Build $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) (compose: $(COMPOSE_FILE))"
-	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) PORT=$(PORT) \\
-	GITHUB_USER=$(GITHUB_USER) GITHUB_TOKEN=$(GITHUB_TOKEN) \\
+	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) PORT=$(PORT) \
+	GITHUB_USER=$(GITHUB_USER) GITHUB_TOKEN=$(GITHUB_TOKEN) \
 		docker compose -f $(COMPOSE_FILE) build
 
 ## Build + tag + push image ke registry
 release:
 	@echo ">> Push $(ENV) image: $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)"
 	@docker tag $(ORG_REGISTRY)/$(IMAGE_NAME):latest $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || true
-	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) \\
+	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) \
 		docker compose -f $(COMPOSE_FILE) push
 
 ## Build + jalankan container
 run: check-env
 	@echo ">> Run $(ENV): $(ORG_REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) on port $(PORT)"
-	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) PORT=$(PORT) \\
+	IMAGE_TAG=$(IMAGE_TAG) ORG_REGISTRY=$(ORG_REGISTRY) IMAGE_NAME=$(IMAGE_NAME) BUILD_ENV=$(ENV) PORT=$(PORT) \
 		docker compose -f $(COMPOSE_FILE) up -d
 
 ## Stop container
@@ -588,10 +613,10 @@ jobs:
           fi
 
           echo "==> POST ${WEBHOOK_URL}"
-          RESP=$(curl -s -w "\\n%{http_code}" -X POST "${WEBHOOK_URL}" \\
-            -H "Authorization: Bearer ${WEBHOOK_TOKEN}" \\
-            -H "Content-Type: application/json" \\
-            -d "{\\"repo\\":\\"${REPO}\\",\\"ref\\":\\"${REF}\\"}")
+          RESP=$(curl -s -w "\n%{http_code}" -X POST "${WEBHOOK_URL}" \
+            -H "Authorization: Bearer ${WEBHOOK_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"repo\":\"${REPO}\",\"ref\":\"${REF}\"}")
 
           HTTP_CODE=$(echo "$RESP" | tail -1)
           BODY=$(echo "$RESP" | sed '$d')
