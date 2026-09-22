@@ -114,7 +114,17 @@ Kalau muncul error `authentication required` saat push → login ke Docker Hub /
 - **Git auto-detection**: nama repo & ref (branch/tag/short-SHA) dari Git.
 - **Mode sumber kode**: build lokal, `--clone` (via `gh` CLI), atau `--remote` (Buildx Git context).
 - **Registry idempotency**: cek image di registry sebelum build → skip bila sudah ada (bypass `--rebuild`).
-- **Smart branch build-arg**: `BRANCH=production` untuk tag `v*`, else `BRANCH=develop`.
+- **Smart env mapping (ref → env)**: `bq` (dan `bq --clone` / `bq --compose`) menyimpulkan environment otomatis dari nama ref (branch/tag). Nilai ini dipakai sebagai `--build-arg BRANCH=` (buildx) dan `ENV=` (compose):
+
+  | Ref (branch/tag) | ENV | Alasan |
+  |------------------|-----|--------|
+  | `v1.2.3`, `v0.x.y` (semver tag) | `production` | konvensi rilis semver |
+  | `main`, `master` | `production` | branch rilis utama |
+  | `staging`, `sandbox` | `staging` | pra-prod |
+  | `develop`, `development` | `develop` | dev environment |
+  | `feature/foo`, `hotfix-x`, dll | `develop` | safe default |
+
+  Override manual: `--build-arg BRANCH=custom` (buildx).
 - **Default netrc secret**: `--secret id=netrc,src=$HOME/.netrc` otomatis.
 - **Resource limit default**: memory & CPU aman untuk laptop.
 - **CI/CD alignment**: baca `PORT/PORT2/PROJECT/IMAGE` dari `cicd/cicd.json`.
@@ -319,13 +329,22 @@ bq --init-secrets foo-service --token xxxx               # skip kubectl
 
 ### 12. Mode `--compose` (build via `make build && make release`)
 
-Untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`):
+Untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`). `ENV=` disimpulkan dari ref — lihat tabel **Smart env mapping** di atas:
 
 ```bash
-bq --compose                       # jalankan `make build ENV=develop && make release ENV=develop`
-bq --compose my-service v1.2.3     # ENV=production (karena ref diawali `v`)
-bq --compose --dry-run             # preview command
+# auto-detect: repo & ref dari git di direktori aktif
+bq --compose                                # branch `develop` → ENV=develop
+bq --compose my-service staging             # ENV=staging
+bq --compose my-service v1.2.3              # ENV=production
+bq --compose my-service main                # ENV=production
+bq --compose --dry-run                      # preview command
+
+# gabung dengan --clone (clone dulu, cd, lalu make build+release)
+bq --clone Qoin-Digital-Indonesia/foo staging --compose   # ENV=staging
+bq --clone Qoin-Digital-Indonesia/foo v1.2.3 --compose    # ENV=production
 ```
+
+**Registry idempotency di `--compose`:** tag yang di-probe mengikuti aturan Makefile — `git describe --tags --exact-match || git rev-parse --short HEAD`. Jadi kalau HEAD di tag `v1.2.3`, `bq` cek `registry/image:v1.2.3` (bukan short commit) — sama dengan tag yang di-push `make release`, sehingga early skip berfungsi benar.
 
 ### 13. Contoh full (customize secret, platform, build-arg)
 

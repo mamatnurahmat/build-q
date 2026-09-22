@@ -8,14 +8,17 @@
 ---
 
 ## 1. Overview
+
 `build-q` (dibaca *bq*, singkatan **Build-Quick**) adalah CLI Python zero-dependency yang menyederhanakan operasi `docker buildx build` di mesin lokal & remote. Tool ini menjembatani perintah Docker manual yang panjang dengan pipeline CI/CD produksi (Jenkins X): developer cukup menjalankan `bq` di dalam repo, dan seluruh flag (secret, build-arg, resource limit, tag image, registry) di-assemble otomatis dari Git + `cicd/cicd.json` + config global.
 
 Selain build, `bq` menyediakan **scaffolding CI/CD** (`--init-jx`, `--init-legacy`), **bootstrap GitHub Actions trigger** (`--gh-action-init`), **setup webhook secrets** (`--init-secrets`), **migrasi Dockerfile legacy** (`--fix-dockerfile`), **auto-init Docker Buildx builder** (`--init`), dan mode **compose** (`--compose`) untuk build via `make build && make release`.
 
 ## 2. Problem Statement
+
 Developer sering perlu me-reproduksi build image Docker yang identik dengan CI/CD pipeline (secret `.netrc`, build-arg `BRANCH/PORT/PROJECT`, platform, memory/CPU limit, tag berbasis commit) di laptop untuk debugging atau hotfix. Menyusun `docker buildx build` panjang secara manual rawan salah ketik, tidak konsisten antar developer, dan tidak sinkron dengan pipeline resmi. Repo baru juga sering butuh boilerplate CI/CD (Makefile, compose, Dockerfile, GitHub Actions workflow) — copy-paste dari template lain rawan drift.
 
 ## 3. Goals
+
 - **Simplicity**: satu perintah pendek (`bq`) menghasilkan build yang setara pipeline.
 - **Convention over configuration**: repo, ref (branch/tag), image name, dan commit hash di-detect otomatis dari Git dan `cicd/cicd.json`.
 - **Portability**: hanya butuh Python 3.7+ standard library (tanpa dependency eksternal).
@@ -24,12 +27,14 @@ Developer sering perlu me-reproduksi build image Docker yang identik dengan CI/C
 - **Beginner-friendly**: satu perintah untuk bootstrap CI/CD baru (`--init-jx`) atau memperbaiki repo legacy (`--fix-dockerfile` + `--init-legacy`).
 
 ## 4. Non-goals
+
 - Bukan pengganti pipeline CI/CD (Jenkins X / GitHub Actions). Fokus di build lokal / ad-hoc.
 - Tidak melakukan deploy ke Kubernetes/ArgoCD (di luar scope).
 - Tidak mengelola login Docker/registry (asumsi user sudah `docker login`).
 - Tidak mengelola credential GitHub (delegasi ke `gh` CLI).
 
 ## 5. Personas
+
 - **Backend engineer** yang ingin uji build image sebelum push ke pipeline.
 - **DevOps** yang perlu rebuild patch tag `v*` untuk hotfix produksi tanpa memicu pipeline.
 - **On-call engineer** yang perlu build image dari repo remote tanpa clone lokal (mode `--remote`).
@@ -199,46 +204,72 @@ flowchart TD
 ## 7. Key Features
 
 ### 7.1 Git Auto-detection
+
 Bila `<repo>` / `<ref>` tidak diberikan, CLI membaca dari Git lokal:
+
 - `repo` ← nama dari `git remote get-url origin` (fallback: nama direktori).
 - `ref` ← `git rev-parse --abbrev-ref HEAD` (fallback: tag `git describe --tags --exact-match`, lalu short SHA jika detached HEAD).
 
 ### 7.2 CI/CD Config Integration (`cicd/cicd.json`)
+
 Membaca field:
+
 - `IMAGE` → nama image.
 - `PORT`, `PORT2`, `PROJECT` → dipetakan otomatis ke `--build-arg`.
 - `CLUSTER`, `DEPLOYMENT`, `NODETYPE` → dipakai `--init-jx` sebagai konteks template.
 
-### 7.3 Smart Branch Build Arg
-- Tag diawali `v*` → `--build-arg BRANCH=production`.
-- Lainnya → `--build-arg BRANCH=develop`.
-- Bisa di-override via `--build-arg BRANCH=xxx`.
+### 7.3 Smart Ref → ENV Mapping
+
+Helper terpusat `_env_from_ref(ref)` menyimpulkan environment dari nama branch/tag. Nilainya dipakai:
+
+- Sebagai `--build-arg BRANCH=<env>` di `build_command` (buildx path — local, `--clone`, `--remote`).
+- Sebagai `ENV=<env>` argument ke `make build && make release` di `run_compose` (mode `--compose`).
+
+Aturan:
+
+| Ref (branch/tag) | ENV |
+| ------------------ | ----- |
+| `v1.2.3`, `v*` (semver tag) | `production` |
+| `main`, `master` | `production` |
+| `staging`, `sandbox` | `staging` |
+| `develop`, `development` | `develop` |
+| lainnya / kosong | `develop` (safe default) |
+
+Override manual tetap dihormati: `--build-arg BRANCH=custom` menang atas mapping otomatis.
 
 ### 7.4 Default Secret `netrc`
+
 Selalu menambahkan `--secret id=netrc,src=$HOME/.netrc` (untuk dependency privat), kecuali user sudah menyertakan secret dengan id yang sama.
 
 ### 7.5 Registry Idempotency Check (Early Skip)
+
 `docker buildx imagetools inspect {tag}` dijalankan **paling awal** di `run_build` (dan `run_compose`) — sebelum `ensure_builder` dan validasi `cicd.json`. Bila image ready → cetak `✅ Image ready: {tag}` dan `exit 0` tanpa side effect apa pun. Bypass via `--no-image-check` / `--rebuild`.
 
 ### 7.6 Mode Sumber Kode
+
 - **Local (default)**: build dari direktori kerja saat ini.
 - **`--clone <owner/repo>`**: clone via `gh` CLI ke direktori kerja, lalu build. `--clean` menghapus direktori clone setelah selesai. Pre-clone image check memakai commit SHA dari `gh api` — kalau image ready, tidak jadi clone.
 - **`--remote`**: build langsung dari Git context (`git_url#ref`) — tidak clone lokal. `cicd.json` diambil via `gh api contents`. Commit hash via `gh api commits/{ref}`.
   - **SSH fallback**: bila `SSH_AUTH_SOCK` kosong, otomatis pindah ke HTTPS + `GIT_AUTH_TOKEN` secret (via `gh auth token`) supaya Buildx Git context tetap jalan tanpa `ssh-agent`.
 
 ### 7.7 Resource Limits
+
 Default aman untuk laptop: `--memory 4g`, `--cpu-period 100000`, `--cpu-quota 200000` (dapat di-override via `~/.build-q/.env`).
 
 ### 7.8 Auto Tag
+
 Bila `--tag` tidak diberikan: `{REGISTRY_URL}/{IMAGE}:{short_commit}` (7 karakter). Rumus identik antara `_predict_image_tag()` (untuk early check) dan `build_command()` (untuk eksekusi).
 
 ### 7.9 Dry Run
+
 `--dry-run` mencetak command yang akan dijalankan tanpa eksekusi. Early image check di-skip pada dry-run supaya user selalu melihat command lengkapnya.
 
 ### 7.10 Konfigurasi Terpusat
+
 File `~/.build-q/.env`:
+
 | Variable | Default |
-|----------|---------|
+| ---------- | --------- |
 | `BUILDER_NAME` | `mybuilder` |
 | `REGISTRY_URL` | `registry.example.com` |
 | `DEFAULT_MEMORY` | `4g` |
@@ -254,13 +285,17 @@ File `~/.build-q/.env`:
 Perintah bantuan: `bq --init` (buat file + init Buildx builder), `bq --config` (tampilkan aktif).
 
 ### 7.11 Auto-init Docker Buildx Builder
+
 `bq --init` (dan `run_build` sebagai safety net *setelah* early image check) memanggil `ensure_builder(name)` yang:
+
 - `docker buildx inspect <name>` — cek eksistensi.
 - Jika ada tetapi stdout memuat `Error:` (mis. endpoint Colima yang hilang) → `docker buildx rm -f` lalu re-create.
 - Jika belum ada → `docker buildx create --name <name> --use [--bootstrap]`.
 
 ### 7.12 Scaffolding CI/CD Modern (`--init-jx`)
+
 Generate 4 file dari `cicd/cicd.json`:
+
 - `Makefile` — target `develop/staging/production/build/release/run`, BuildKit enabled.
 - `compose.yaml` — service dengan `secrets: netrc` mount dari `$HOME/.netrc`.
 - `Dockerfile` — multi-stage Go dengan `--mount=type=secret,id=netrc` (pola aman).
@@ -269,12 +304,16 @@ Generate 4 file dari `cicd/cicd.json`:
 Placeholder `{{IMAGE}}/{{PROJECT}}/{{PORT}}/{{CLUSTER}}/{{DEPLOYMENT}}/{{NODETYPE}}/{{ORG_REGISTRY}}` disubstitusi dari `cicd.json` + config. Otomatis panggil `--init-secrets` bila `git remote origin` mengarah ke GitHub.
 
 ### 7.13 Scaffolding CI/CD Legacy (`--init-legacy`)
+
 Untuk repo lama yang Dockerfile-nya masih pakai `ARG GITHUB_USER/GITHUB_TOKEN` (bukan BuildKit secret). Generate 2 file — **Dockerfile TIDAK ditimpa**:
+
 - `Makefile` — auto-ambil `gh auth token` untuk `GITHUB_TOKEN` di local dev; support override `GIT_TOKEN` dari CI (mis. Tekton).
 - `compose.yaml` — hybrid: mendukung Dockerfile legacy (build-arg) *dan* modern (secret mount).
 
 ### 7.14 Bootstrap Trigger CI Standar (`--gh-action-init`)
+
 Menegakkan `trigger-ci.yml` sebagai **satu-satunya** workflow di `.github/workflows/`:
+
 1. Hapus semua `*.yml`/`*.yaml` lain di `.github/workflows/` (workflow lama).
 2. Tulis ulang `trigger-ci.yml` dari template.
 3. Set `WEBHOOK_TRIGGER_URL` + `WEBHOOK_TRIGGER_TOKEN` via `gh secret set`.
@@ -282,14 +321,18 @@ Menegakkan `trigger-ci.yml` sebagai **satu-satunya** workflow di `.github/workfl
 Bisa dipakai berdiri sendiri di repo existing tanpa touch Makefile/Dockerfile.
 
 ### 7.15 GitHub Actions Webhook Secrets (`--init-secrets`)
+
 Set dua secret di target repo:
+
 - `WEBHOOK_TRIGGER_URL` — dari config `WEBHOOK_TRIGGER_URL`.
 - `WEBHOOK_TRIGGER_TOKEN` — fetch otomatis via `kubectl get secret <JX_TOKEN_SECRET> -n <JX_KUBE_NAMESPACE>` lalu `base64 -d`.
 
 Auto-detect target repo dari `git remote get-url origin` (parse `owner/repo`). Override manual via positional `bq --init-secrets <owner>/<repo>` atau `--token <VALUE>` untuk skip kubectl.
 
 ### 7.16 Migrasi Dockerfile Legacy (`--fix-dockerfile`)
+
 Transformasi Dockerfile lama menjadi modern. Selain migrasi netrc, mencakup pembersihan directive deprecated:
+
 - Normalisasi `FROM ... as ...` → `FROM ... AS ...`.
 - Hapus `ARG GITHUB_USER` / `ARG GITHUB_TOKEN`.
 - Rewrite `RUN sh -c '...'` dan `RUN echo ...` yang mem-build netrc dari ARG → `RUN --mount=type=secret,id=netrc,target=/root/.netrc \ ...`.
@@ -299,20 +342,29 @@ Transformasi Dockerfile lama menjadi modern. Selain migrasi netrc, mencakup pemb
 - Backup ke `<path>.bak`.
 
 ### 7.17 GitHub Auth Injection (`--gh-auth`)
+
 Untuk Dockerfile legacy yang belum dimigrasi: inject `--build-arg GITHUB_USER=$(gh api user --jq .login)` dan `--build-arg GITHUB_TOKEN=$(gh auth token)`. Token di-mask di log output (`GITHUB_TOKEN=***`); nilai asli diteruskan ke `docker buildx`.
 
 ### 7.18 GitHub Org Shorthand
+
 Bila `GITHUB_ORG` di-set, positional `repo` yang tidak mengandung `/` atau scheme akan di-expand: `bq foo staging --remote` → `bq Qoin-Digital-Indonesia/foo staging --remote`.
 
 ### 7.19 Compose Mode (`--compose`)
-Alternatif eksekusi build: jalankan `make build ENV=<env> && make release ENV=<env>` (bukan `docker buildx`). Cocok untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`). `ENV=production` bila `ref` diawali `v`, else `develop`. Ikut early image check.
+
+Alternatif eksekusi build: jalankan `make build ENV=<env> && make release ENV=<env>` (bukan `docker buildx`). Cocok untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`).
+
+- `ENV=<env>` disimpulkan lewat `_env_from_ref(ref)` — lihat §7.3 (mendukung `develop`/`staging`/`production` sesuai nama branch/tag).
+- Tag prediction memakai `get_local_tag_or_commit()` yang paritas dengan Makefile (`git describe --tags --exact-match || git rev-parse --short HEAD`), sehingga early registry check mencocokkan tag yang akan di-push `make release`.
+- Bisa digabung dengan `--clone`: `bq --clone owner/repo staging --compose` → clone → cd → `make build/release ENV=staging`.
 
 ---
 
 ## 8. CLI Contract
+
 ```
 bq [<repo> [<ref>]] [OPTIONS]
 ```
+
 Flag penting: `--local`, `--remote`, `--clone <owner/repo>`, `--clean`, `--compose`, `--cicd <path>`, `--context <dir>`, `-f/--dockerfile`, `-t/--tag`, `--push/--no-push`, `--image-check/--no-image-check/--rebuild`, `--platform`, `--build-arg`, `--secret`, `--gh-auth`, `--dry-run`, `--init`, `--force`, `--config`, `--init-jx`, `--init-legacy`, `--gh-action-init`, `--init-secrets`, `--fix-dockerfile [PATH]`, `--token`, `--version`.
 
 Default: `--push=True`, `--image-check=True`, `--platform=linux/amd64`, secret `netrc` otomatis.
@@ -342,6 +394,7 @@ flowchart TB
 Distribusi via `pyproject.toml` (setuptools) → dua entry point script: `build-q` & `bq`.
 
 ## 10. Technical Requirements
+
 - Python 3.7+ (standard library only).
 - Docker Engine + Buildx plugin.
 - Git (opsional; wajib untuk auto-detect & mode local).
@@ -349,7 +402,9 @@ Distribusi via `pyproject.toml` (setuptools) → dua entry point script: `build-
 - `kubectl` (opsional; hanya untuk fetch token webhook otomatis).
 
 ## 11. Release Process
+
 `Makefile` menyediakan `make build` dan `make release [V=x.y.z]`:
+
 1. `scripts/bump_version.py` bump patch version di `pyproject.toml` + `build_q/__init__.py`.
 2. Build sdist + wheel via `python3 -m build` (fallback: `pipx run --spec build pyproject-build`).
 3. Install lokal editable via `pipx install -e . --force`.
@@ -374,16 +429,19 @@ sequenceDiagram
 ```
 
 ## 12. Success Metrics
+
 - **Adoption**: jumlah repo di organisasi yang punya `cicd/cicd.json` kompatibel dan memakai `bq` untuk build lokal.
 - **Konsistensi**: image hasil `bq` bit-identical dengan hasil pipeline untuk commit yang sama.
 - **Time-to-image**: waktu build ulang berkurang (dengan early `--image-check` skip build redundan tanpa bootstrap builder).
 - **Bootstrap time**: repo baru dari nol → CI/CD siap dalam < 2 menit (`bq --init-jx` + `git push`).
 
 ## 13. Changelog Ringkas
+
 - **0.1.11** — bug fix: early image check di `run_build`/`run_compose` (dipanggil sebelum `ensure_builder` & sebelum wajib `cicd.json`). Repo tanpa `cicd/cicd.json` sekarang bisa memanfaatkan skip idempotency.
 - **0.1.10** — `--init-jx`, `--init-secrets`, `--fix-dockerfile`, `--gh-auth`, `--init-legacy`, `--gh-action-init`, `--compose`, remote SSH → HTTPS fallback, ekspansi `--fix-dockerfile` (standalone netrc + `MAINTAINER` + legacy `ENV`).
 
 ## 14. Future Roadmap
+
 - Multi-registry profile (per-project).
 - Integrasi konteks Kubernetes (langsung deploy hasil build ke cluster lokal / kind).
 - Caching layer buildx yang lebih pintar (mount cache antar build).

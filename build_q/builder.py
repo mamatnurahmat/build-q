@@ -67,6 +67,56 @@ def get_local_commit_short() -> str:
         return "unknown"
 
 
+def get_local_tag_or_commit() -> str:
+    """Return exact git tag if HEAD sits on a tag, else short commit hash.
+
+    Mirrors the Makefile IMAGE_TAG rule used by templates:
+        git describe --tags --exact-match  ||  git rev-parse --short HEAD
+    Kept in sync so the registry idempotency check on `--compose` probes
+    exactly the tag `make release` will push.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "describe", "--tags", "--exact-match"],
+            capture_output=True, text=True, check=True,
+        )
+        tag = result.stdout.strip()
+        if tag:
+            return tag
+    except subprocess.CalledProcessError:
+        pass
+    return get_local_commit_short()
+
+
+def _env_from_ref(ref: Optional[str]) -> str:
+    """Map a git ref (branch or tag) to a build ENV: develop|staging|production.
+
+    Rules — konsisten dengan konvensi Jenkins X / templates di build-q:
+      • Tag `v*` (semver release)          → production
+      • Branch `main` / `master`           → production
+      • Branch `staging` / `sandbox`       → staging
+      • Branch `develop` / `development`   → develop
+      • Ref lain / kosong                  → develop (safe default)
+
+    Digunakan oleh `build_command` (BRANCH build-arg untuk buildx) dan
+    `run_compose` (ENV=<env> untuk `make build && make release`), sehingga
+    `bq` / `bq --clone` / `bq --compose` memilih environment yang benar
+    dari nama branch atau tag tanpa perlu flag tambahan.
+    """
+    if not ref:
+        return "develop"
+    if ref.startswith("v"):
+        return "production"
+    r = ref.lower()
+    if r in ("develop", "development"):
+        return "develop"
+    if r in ("staging", "sandbox"):
+        return "staging"
+    if r in ("main", "master"):
+        return "production"
+    return "develop"
+
+
 def build_command(
     repo: str,
     ref: str,
@@ -132,11 +182,13 @@ def build_command(
     for secret in all_secrets:
         cmd += ["--secret", secret]
 
-    # Default build arguments
-    # BRANCH logic: production if ref starts with v*, else develop
-    branch_val = "production" if ref.startswith("v") else "develop"
-    
-    # Check if BRANCH is already in extra_build_args
+    # Default build arguments — BRANCH via _env_from_ref so both:
+    #   - build-arg BRANCH   (dipakai Dockerfile untuk `.env.${BRANCH}`)
+    #   - and the compose `ENV=` in run_compose
+    # menyimpulkan environment yang sama dari ref (branch atau tag).
+    branch_val = _env_from_ref(ref)
+
+    # Check if BRANCH is already in extra_build_args (user override wins)
     extra_args_list = list(extra_build_args) if extra_build_args else []
     if not any(arg.startswith("BRANCH=") for arg in extra_args_list):
         cmd += ["--build-arg", f"BRANCH={branch_val}"]
@@ -788,6 +840,28 @@ def run_build(
 
     return result.returncode
 
+def _predict_compose_image_tag(
+    repo: str,
+    tag: Optional[str],
+    cicd: Dict[str, Any],
+    config: Dict[str, Any],
+) -> str:
+    """Compose-mode tag predictor — mirrors the Makefile IMAGE_TAG rule.
+
+    Berbeda dengan `_predict_image_tag` (buildx mode, selalu short commit),
+    di sini pakai `git describe --tags --exact-match || short commit` supaya
+    early registry check di `--compose` probe tag yang sama dengan yang
+    akan di-push `make release`.
+    """
+    if tag:
+        return str(tag)
+    registry_url = config.get("registry", {}).get("url", "")
+    image_name = cicd.get("IMAGE", repo)
+    ref_id = get_local_tag_or_commit()
+    base = f"{image_name}:{ref_id}"
+    return f"{registry_url}/{base}" if registry_url else base
+
+
 def run_compose(
     repo: str,
     ref: str,
@@ -809,7 +883,7 @@ def run_compose(
         except FileNotFoundError:
             cicd = {}
 
-    predicted_tag = _predict_image_tag(repo, tag, cicd, config)
+    predicted_tag = _predict_compose_image_tag(repo, tag, cicd, config)
 
     if image_check and not dry_run:
         print(f"\n🔍 Checking registry for existing image: {predicted_tag} ...")
@@ -819,11 +893,12 @@ def run_compose(
             return 0
         print("   Image not found. Proceeding with compose build.")
 
-    env_name = "production" if ref.startswith("v") else "develop"
+    env_name = _env_from_ref(ref)
+    print(f"🌱 ENV = {env_name}  (dari ref: {ref})")
 
     cmds = [
         ["make", "build", f"ENV={env_name}"],
-        ["make", "release", f"ENV={env_name}"]
+        ["make", "release", f"ENV={env_name}"],
     ]
 
     for cmd in cmds:
