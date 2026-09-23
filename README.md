@@ -197,7 +197,7 @@ bq --config       # tampilkan konfigurasi aktif
 | `JX_KUBE_CONTEXT` | (kosong = current) | kubectl context untuk fetch token |
 | `JX_KUBE_NAMESPACE` | `jenkins-x` | Namespace secret |
 | `JX_TOKEN_SECRET` | `webhook-trigger-token` | Nama k8s secret berisi token |
-| `GH_CLI` | `true` | `true` = pakai `gh` CLI (default, tidak ada perubahan). `false` = jalur native (REST + `git`) |
+| `GH_CLI` | `false` (sejak v0.1.22) | `false` = jalur native (REST + `git`). `true` = fallback ke `gh` CLI (legacy) |
 | `GITHUB_USER` | (kosong) | Username GitHub. Dipakai bila `GH_CLI=false`; bila kosong, di-fetch dari `/user` |
 | `GITHUB_TOKEN` | (kosong) | Personal Access Token — WAJIB bila `GH_CLI=false`. Scope: `repo`, `read:user`, `actions:write` (untuk `--init-secrets`) |
 | `DOCKERHUB_USER` | (kosong) | Username DockerHub (persiapan future `docker login` auto) |
@@ -206,7 +206,7 @@ bq --config       # tampilkan konfigurasi aktif
 | `GITOPS_REPO` | `Qoin-Digital-Indonesia/gitops` | Repo GitOps untuk suggestion `gitops-set-image` |
 | `GITOPS_BRANCH` | `main` | Branch target di repo GitOps |
 | `GITOPS_INFRA` | `cce` | `cce` (Huawei CCE) atau `k8s` (SLS). Override per-run: `--infra` |
-| `NS_SUFFIX` | `qoin` | Fallback: `ns = <env>-<suffix>` bila `--ns` tidak diberikan |
+| `NS_SUFFIX` | `qoin` | Fallback global: `ns = <env>-<suffix>` bila `--ns` tidak diberikan **dan** `cicd.PROJECT` kosong. Sejak v0.1.22 `cicd.PROJECT` menang. |
 
 #### Toggle native (tanpa `gh` CLI)
 
@@ -254,6 +254,45 @@ Flag override runtime:
 | `--gitops-path PATH` | (auto) | Bypass template — path YAML eksplisit |
 
 Suggestion **hanya print**, tidak mengeksekusi. Cocok untuk review sebelum apply.
+
+#### 🔎 `bq --check` — verifikasi kesiapan repo (sejak v0.1.22)
+
+Cek repo remote tanpa clone: apakah artifact CI/CD, image registry, dan file GitOps sudah sesuai ekspektasi.
+
+```bash
+bq --check ngenwal-be-saasidentityserver4client-manager staging --remote
+```
+
+Output:
+
+```
+🔍 Checking Qoin-Digital-Indonesia/ngenwal-…-manager @ staging
+
+📦 Repository access:
+   ✅ ref 'staging' → e82836bcad4c
+
+🧩 CICD config:
+   ✅ cicd/cicd.json (212 bytes)
+        • IMAGE      = ngenwal-…-manager
+        • PROJECT    = ngenwal
+        • PORT       = 6770
+
+🧱 Init artifacts (jx-init):
+   ✅ Makefile
+   ✅ compose.yaml
+   ✅ Dockerfile
+   ✅ .github/workflows/trigger-ci.yml
+
+📦 Registry:
+   ⚠️  loyaltolpi/ngenwal-…:e82836b — NOT BUILT
+
+🎯 GitOps:
+   ✅ Qoin-Digital-Indonesia/gitops@main:cce/staging-ngenwal/ngenwal-…_deployment.yaml
+
+📊 Summary: 2/2 wajib lulus, 1 warning
+```
+
+Exit code `0` bila semua wajib lulus (repo/ref + cicd config), `1` bila ada yang miss. Warning (missing artifact / image belum ada) tidak menggagalkan.
 
 Contoh minimal untuk Qoin:
 

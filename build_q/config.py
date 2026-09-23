@@ -65,7 +65,7 @@ def load_config() -> Dict[str, Any]:
             "k8s_secret": os.getenv("JX_TOKEN_SECRET", "webhook-trigger-token"),
         },
         "github": {
-            "use_cli": _parse_bool(os.getenv("GH_CLI", "true"), default=True),
+            "use_cli": _parse_bool(os.getenv("GH_CLI", "false"), default=False),
             "user": os.getenv("GITHUB_USER", ""),
             "token": os.getenv("GITHUB_TOKEN", ""),
             "api_base": os.getenv("GITHUB_API_BASE", "https://api.github.com"),
@@ -91,9 +91,9 @@ def _parse_bool(value: str, default: bool = False) -> bool:
 
 
 def use_gh_cli() -> bool:
-    """Toggle: when true (default) keep existing `gh` subprocess flow.
+    """Toggle: when false (default sejak v0.1.22) use native REST + git.
 
-    Set GH_CLI=false in ~/.build-q/.env to route via native REST/git.
+    Set GH_CLI=true in ~/.build-q/.env to fall back to `gh` CLI (legacy).
     """
     return load_config()["github"]["use_cli"]
 
@@ -143,11 +143,13 @@ JX_KUBE_NAMESPACE=jenkins-x
 JX_TOKEN_SECRET=webhook-trigger-token
 
 # GitHub access
-# GH_CLI=true (default) → keep existing `gh` CLI flow (no change).
-# GH_CLI=false          → use native REST + `git`. Requires GITHUB_TOKEN below.
-GH_CLI=true
-# Personal Access Token (classic or fine-grained) used when GH_CLI=false.
-# Needs: repo (contents:read, actions:write for secrets), read:user.
+# GH_CLI=false (default sejak v0.1.22) → jalur native (urllib + git).
+#                Wajib GITHUB_TOKEN di bawah, tidak butuh `gh` CLI.
+# GH_CLI=true  → tetap pakai `gh` CLI (perilaku lama).
+GH_CLI=false
+# Personal Access Token (classic atau fine-grained). WAJIB bila GH_CLI=false.
+# Scope minimum: repo (contents:read), read:user, actions:write (untuk --init-secrets).
+# Generate: https://github.com/settings/tokens
 GITHUB_USER=
 GITHUB_TOKEN=
 

@@ -32,7 +32,11 @@ def compute_rollout(
     from .builder import _env_from_ref  # lazy: avoid circular import
 
     env = _env_from_ref(ref)
-    ns_suffix = config["gitops"]["ns_suffix"]
+    ns_suffix_global = config["gitops"]["ns_suffix"]
+    # Per-repo project (cicd.PROJECT) menang atas NS_SUFFIX global. Alasan:
+    # NS_SUFFIX di ~/.build-q/.env satu nilai untuk semua repo, sedangkan
+    # ns cluster real mengikuti PROJECT di cicd.json (ngenwal, qoin, payout, dst).
+    ns_suffix = cicd.get("PROJECT") or ns_suffix_global
     dh_org = config["dockerhub"]["org"] or config["registry"]["url"]
 
     ns_from_fallback = ns is None

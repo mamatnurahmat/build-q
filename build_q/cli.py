@@ -194,6 +194,12 @@ Config file: ~/.build-q/.env
         metavar="VALUE",
         help="Webhook trigger token (skip kubectl fetch, used with --init-secrets)",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verifikasi kesiapan repo di remote (tanpa clone): repo/ref, cicd.json, "
+             "artifact jx-init, image registry, deployment GitOps. Butuh --remote.",
+    )
 
     # Positional args (optional — auto-detected from git when --local is used)
     parser.add_argument("repo", nargs="?", help="Repository / service name")
@@ -340,6 +346,29 @@ Config file: ~/.build-q/.env
         if args.init_secrets:
             ok = init_secrets(repo=args.repo, token=args.token)
             sys.exit(0 if ok else 1)
+
+        if args.check:
+            if not args.repo or not args.ref:
+                print("❌ Usage: bq --check <repo> <ref> --remote", file=sys.stderr)
+                sys.exit(2)
+            from .check import run_check
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            expanded = _expand_repo(args.repo, default_org)
+            api_repo = expanded
+            if api_repo.endswith(".git"):
+                api_repo = api_repo[:-4]
+            if "github.com/" in api_repo:
+                api_repo = api_repo.split("github.com/")[-1]
+            if api_repo.startswith("git@github.com:"):
+                api_repo = api_repo.split("git@github.com:")[-1]
+            rc = run_check(
+                api_repo, args.ref,
+                cicd_path=args.cicd,
+                ns=args.ns,
+                infra=args.infra,
+            )
+            sys.exit(rc)
 
         if args.config:
             config = load_config()
