@@ -200,6 +200,13 @@ bq --config       # tampilkan konfigurasi aktif
 | `GH_CLI` | `true` | `true` = pakai `gh` CLI (default, tidak ada perubahan). `false` = jalur native (REST + `git`) |
 | `GITHUB_USER` | (kosong) | Username GitHub. Dipakai bila `GH_CLI=false`; bila kosong, di-fetch dari `/user` |
 | `GITHUB_TOKEN` | (kosong) | Personal Access Token — WAJIB bila `GH_CLI=false`. Scope: `repo`, `read:user`, `actions:write` (untuk `--init-secrets`) |
+| `DOCKERHUB_USER` | (kosong) | Username DockerHub (persiapan future `docker login` auto) |
+| `DOCKERHUB_ORG` | (kosong) | Prefix image untuk rollout suggestion (mis. `loyaltolpi`). Fallback ke `REGISTRY_URL` bila kosong |
+| `DOCKERHUB_TOKEN` | (kosong) | PAT DockerHub (untuk pemakaian manual) |
+| `GITOPS_REPO` | `Qoin-Digital-Indonesia/gitops` | Repo GitOps untuk suggestion `gitops-set-image` |
+| `GITOPS_BRANCH` | `main` | Branch target di repo GitOps |
+| `GITOPS_INFRA` | `cce` | `cce` (Huawei CCE) atau `k8s` (SLS). Override per-run: `--infra` |
+| `NS_SUFFIX` | `qoin` | Fallback: `ns = <env>-<suffix>` bila `--ns` tidak diberikan |
 
 #### Toggle native (tanpa `gh` CLI)
 
@@ -214,6 +221,39 @@ GITHUB_TOKEN=ghp_xxx
 Fitur yang dialihkan: fetch `cicd.json`, resolve commit SHA, ambil auth token, `--gh-auth`, `--clone`, `--init-secrets`. Untuk `--init-secrets` di mode native, install extra: `pip install pynacl` (dibutuhkan enkripsi libsodium sebelum PUT ke API).
 
 > Bila `~/.build-q/.env` sudah ada dari versi sebelumnya, tambahkan tiga baris di atas secara manual — atau jalankan `bq --init --force` untuk regenerate (perhatikan config lain akan direset ke default).
+
+#### 🚀 Rollout suggestions pasca-build
+
+Sejak `v0.1.18`, setelah build sukses (atau `--dry-run`), `bq` menampilkan dua perintah siap copy-paste yang membungkus tools eksternal [`set-image`](~/.agents/bin/set-image) (imperative — `kubectl set image` + `rollout status`) dan [`gitops-set-image`](~/.agents/bin/gitops-set-image) (declarative — patch YAML di repo GitOps lalu push).
+
+Contoh output:
+
+```
+✅ Build completed successfully.
+
+📤 Rollout suggestions (copy-paste ke terminal):
+
+   # 1) Hot-patch cluster (imperative, cepat)
+   set-image staging-qoin qoinhub-mono-webadmin 76e23f3
+
+   # 2) Via GitOps (declarative, ArgoCD sync)
+   gitops-set-image Qoin-Digital-Indonesia/gitops main \
+     cce/staging-qoin/qoinhub-mono-webadmin_deployment.yaml \
+     loyaltolpi/qoinhub-mono-webadmin:76e23f3
+
+   ℹ️  ns fallback: staging-qoin — override dengan --ns <name>
+   Tip: --ns <name>  |  --infra {cce|k8s}  |  --gitops-path <path>
+```
+
+Flag override runtime:
+
+| Flag | Default | Keterangan |
+|---|---|---|
+| `--ns NAME` | `<env>-<NS_SUFFIX>` | Namespace target. `env` dihitung dari branch (`staging`→`staging`, `main`→`staging` fallback, tag `v*`→`production`) |
+| `--infra {cce,k8s}` | `GITOPS_INFRA` di `.env` | Path template jadi `{infra}/{ns}/{app}_deployment.yaml` |
+| `--gitops-path PATH` | (auto) | Bypass template — path YAML eksplisit |
+
+Suggestion **hanya print**, tidak mengeksekusi. Cocok untuk review sebelum apply.
 
 Contoh minimal untuk Qoin:
 

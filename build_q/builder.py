@@ -781,6 +781,9 @@ def run_build(
     secrets: Optional[List[str]] = None,
     dry_run: bool = False,
     image_check: bool = True,
+    rollout_ns: Optional[str] = None,
+    rollout_infra: Optional[str] = None,
+    rollout_path: Optional[str] = None,
 ) -> int:
     """Load config, build the command, and execute it.
 
@@ -844,15 +847,35 @@ def run_build(
 
     if dry_run:
         print("\n🔍 Dry-run mode — command not executed.")
+        _print_rollout_suggestion(
+            cicd, repo, ref, image_tag, config, rollout_ns, rollout_infra, rollout_path,
+        )
         return 0
 
     result = subprocess.run(cmd)
     if result.returncode == 0:
         print("\n✅ Build completed successfully.")
+        _print_rollout_suggestion(
+            cicd, repo, ref, image_tag, config, rollout_ns, rollout_infra, rollout_path,
+        )
     else:
         print(f"\n❌ Build failed (exit code {result.returncode}).", file=sys.stderr)
 
     return result.returncode
+
+
+def _print_rollout_suggestion(cicd, repo, ref, image_tag, config,
+                              ns, infra, gitops_path) -> None:
+    """Print copy-paste rollout suggestions. Swallow errors — never break the build."""
+    try:
+        from .rollout import compute_rollout, render_suggestion
+        rollout = compute_rollout(
+            cicd=cicd, repo=repo, ref=ref, image_tag=image_tag,
+            config=config, ns=ns, infra=infra, gitops_path=gitops_path,
+        )
+        print(render_suggestion(rollout))
+    except Exception as e:
+        print(f"⚠️  Could not render rollout suggestion: {e}", file=sys.stderr)
 
 def _predict_compose_image_tag(
     repo: str,
@@ -885,6 +908,9 @@ def run_compose(
     tag: Optional[str] = None,
     dry_run: bool = False,
     image_check: bool = True,
+    rollout_ns: Optional[str] = None,
+    rollout_infra: Optional[str] = None,
+    rollout_path: Optional[str] = None,
 ) -> int:
     """Run make build and make release instead of docker buildx."""
     config = load_config()
@@ -928,4 +954,7 @@ def run_compose(
     if not dry_run:
         print("\n✅ Compose completed successfully.")
 
+    _print_rollout_suggestion(
+        cicd, repo, ref, predicted_tag, config, rollout_ns, rollout_infra, rollout_path,
+    )
     return 0

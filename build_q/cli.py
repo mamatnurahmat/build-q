@@ -276,6 +276,23 @@ Config file: ~/.build-q/.env
     )
     parser.add_argument("--dry-run", action="store_true", help="Print command without executing")
 
+    # ── Rollout suggestion overrides (dipakai pasca-build sukses) ────────────
+    parser.add_argument(
+        "--ns",
+        metavar="NAME",
+        help="Namespace target untuk rollout suggestion (default: <env>-<NS_SUFFIX>)",
+    )
+    parser.add_argument(
+        "--infra",
+        choices=["cce", "k8s"],
+        help="Infra GitOps: cce (Huawei) atau k8s (SLS). Default dari GITOPS_INFRA di .env",
+    )
+    parser.add_argument(
+        "--gitops-path",
+        metavar="PATH",
+        help="Override path YAML lengkap (bypass template {infra}/{ns}/{app}_deployment.yaml)",
+    )
+
     args = parser.parse_args()
 
     try:
@@ -543,6 +560,9 @@ Config file: ~/.build-q/.env
                     tag=args.tag,
                     dry_run=args.dry_run,
                     image_check=args.image_check,
+                    rollout_ns=args.ns,
+                    rollout_infra=args.infra,
+                    rollout_path=args.gitops_path,
                 )
             else:
                 rc = run_build(
@@ -559,6 +579,9 @@ Config file: ~/.build-q/.env
                     secrets=args.secret,
                     dry_run=args.dry_run,
                     image_check=args.image_check,
+                    rollout_ns=args.ns,
+                    rollout_infra=args.infra,
+                    rollout_path=args.gitops_path,
                 )
             sys.exit(rc)
         finally:

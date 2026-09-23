@@ -70,6 +70,17 @@ def load_config() -> Dict[str, Any]:
             "token": os.getenv("GITHUB_TOKEN", ""),
             "api_base": os.getenv("GITHUB_API_BASE", "https://api.github.com"),
         },
+        "dockerhub": {
+            "user": os.getenv("DOCKERHUB_USER", ""),
+            "org": os.getenv("DOCKERHUB_ORG", ""),
+            "token": os.getenv("DOCKERHUB_TOKEN", ""),
+        },
+        "gitops": {
+            "repo": os.getenv("GITOPS_REPO", "Qoin-Digital-Indonesia/gitops"),
+            "branch": os.getenv("GITOPS_BRANCH", "main"),
+            "infra": os.getenv("GITOPS_INFRA", "cce"),
+            "ns_suffix": os.getenv("NS_SUFFIX", "qoin"),
+        },
     }
 
 
@@ -139,6 +150,23 @@ GH_CLI=true
 # Needs: repo (contents:read, actions:write for secrets), read:user.
 GITHUB_USER=
 GITHUB_TOKEN=
+
+# DockerHub — dipakai untuk suggestion image prefix + docker login manual.
+# DOCKERHUB_ORG (mis. loyaltolpi) menjadi prefix image saat generate suggestion.
+# Fallback ke REGISTRY_URL di atas bila DOCKERHUB_ORG kosong.
+DOCKERHUB_USER=
+DOCKERHUB_ORG=
+DOCKERHUB_TOKEN=
+
+# GitOps rollout suggestions — dipakai pasca-build sukses untuk generate
+# perintah `set-image` dan `gitops-set-image` siap copy-paste.
+GITOPS_REPO=Qoin-Digital-Indonesia/gitops
+GITOPS_BRANCH=main
+# GITOPS_INFRA: cce (Huawei CCE) | k8s (SLS). Bisa di-override per-run: --infra
+GITOPS_INFRA=cce
+# NS_SUFFIX: bila --ns tidak diberikan, ns = <env>-<suffix>
+# (env dihitung dari branch: main→production, staging→staging, develop→develop)
+NS_SUFFIX=qoin
 """
     ENV_FILE.write_text(default)
     ENV_FILE.chmod(0o600)
