@@ -332,7 +332,7 @@ secrets:
 """
 
 
-_BUNDLED_DOCKERFILE = """\
+_BUNDLED_DOCKERFILE = r"""
 # syntax=docker/dockerfile:1.4
 # ============================================================
 # Multi-stage Go build with BuildKit secret mount

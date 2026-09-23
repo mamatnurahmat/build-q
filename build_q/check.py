@@ -3,8 +3,9 @@
 Cek via native REST (butuh GH_CLI=false + GITHUB_TOKEN):
   1. Repo & ref dapat diakses (SHA resolvable)
   2. Config cicd (cicd.json atau cicd/cicd.json)
-  3. Artifact jx-init: Makefile, compose.yaml, Dockerfile, .github/workflows/trigger-ci.yml
-  4. Image di registry (loyaltolpi/<image>:<tag>)
+  3. Artifact jx-init: exist + isi MATCH template terkini (Makefile, compose.yaml,
+     Dockerfile, .github/workflows/trigger-ci.yml)
+  4. Image di registry (loyaltolpi/<image>:<tag>) — tag-aware sejak v0.1.23
   5. File deployment GitOps ({infra}/<ns>/<deployment>_deployment.yaml)
 
 Output: baris pass/miss per cek + ringkasan.
@@ -17,21 +18,44 @@ from typing import Any, Dict, List, Optional, Tuple
 from .config import cicd_candidates, load_config
 from .github_api import GitHubAPIError, get_commit_sha, get_contents_raw
 
-# Artifact yang diharapkan hadir pasca `bq --init-jx` (source of truth: templates.py).
+# Pair (path, template_name) — template rendering identik dengan `bq --init-jx`
+# (source of truth: builder.init_jx). trigger_ci tanpa render (static).
 _INIT_ARTIFACTS = [
-    "Makefile",
-    "compose.yaml",
-    "Dockerfile",
-    ".github/workflows/trigger-ci.yml",
+    ("Makefile", "makefile"),
+    ("compose.yaml", "compose"),
+    ("Dockerfile", "dockerfile"),
+    (".github/workflows/trigger-ci.yml", "trigger_ci"),
 ]
 
 
-def _exists(api_repo: str, path: str, ref: str) -> bool:
+def _exists(api_repo: str, path: str, ref: str) -> Optional[bytes]:
     try:
-        data = get_contents_raw(api_repo, path, ref)
-        return bool(data)
+        return get_contents_raw(api_repo, path, ref)
     except GitHubAPIError:
-        return False
+        return None
+
+
+def _normalize(text: str) -> str:
+    """Normalize whitespace so trivial format drift tidak dianggap mismatch."""
+    lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
+    while lines and lines[-1] == "":
+        lines.pop()
+    return "\n".join(lines) + "\n"
+
+
+def _init_ctx_from_cicd(cicd: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
+    """Context untuk render template — identik dengan builder.init_jx."""
+    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+    image = cicd.get("IMAGE") or ""
+    return {
+        "IMAGE": image,
+        "PROJECT": cicd.get("PROJECT", "qoin"),
+        "PORT": cicd.get("PORT", "8080"),
+        "CLUSTER": cicd.get("CLUSTER", "qoin"),
+        "DEPLOYMENT": cicd.get("DEPLOYMENT", image),
+        "NODETYPE": cicd.get("NODETYPE", "back"),
+        "ORG_REGISTRY": registry,
+    }
 
 
 def run_check(
@@ -92,16 +116,30 @@ def run_check(
     else:
         results.append(("cicd config", True, cicd_found_path))
 
-    # 3) jx-init artifacts (recommended, bukan blocker)
+    # 3) jx-init artifacts — exist + isi MATCH template terkini
     print("\n🧱 Init artifacts (jx-init):")
-    for path in _INIT_ARTIFACTS:
-        ok = _exists(api_repo, path, ref)
-        icon = "✅" if ok else "⚠️ "
-        print(f"   {icon} {path}")
-        if not ok:
+    from .templates import load_template, render
+    ctx = _init_ctx_from_cicd(cicd_data, config)
+    for path, tpl_name in _INIT_ARTIFACTS:
+        raw = _exists(api_repo, path, ref)
+        if raw is None:
+            print(f"   ⚠️  {path} — MISSING")
             warnings.append(f"missing: {path}")
+            continue
+        try:
+            tpl = load_template(tpl_name)
+        except Exception as e:
+            print(f"   ⚠️  {path} — exists (template compare skipped: {e})")
+            continue
+        expected = render(tpl, ctx) if tpl_name != "trigger_ci" else tpl
+        actual = raw.decode("utf-8", errors="replace")
+        if _normalize(actual) == _normalize(expected):
+            print(f"   ✅ {path} — MATCH template terkini")
+        else:
+            print(f"   ⚠️  {path} — exists tapi OUTDATED (diff vs template)")
+            warnings.append(f"outdated: {path} — regenerate dgn `bq --init-jx --force`")
 
-    # 4) Registry image (best-effort; butuh docker manifest inspect / DockerHub API)
+    # 4) Registry image — tag-aware (sejak v0.1.23)
     print("\n📦 Registry:")
     dh_org = config["dockerhub"]["org"] or config["registry"]["url"]
     image_name = cicd_data.get("IMAGE") or api_repo.split("/")[-1]
@@ -109,9 +147,8 @@ def run_check(
         print("   ⚠️  DOCKERHUB_ORG / REGISTRY_URL kosong — skip cek image")
     else:
         from .builder import check_image_exists
-        # Untuk cek image kita butuh tag. Di --remote flow kita tidak clone,
-        # jadi pakai short SHA saja (mirror _predict_image_tag di buildx mode).
-        tag_id = sha[:7]
+        from .cli import _ref_id_for_image_tag  # tag-first jika ref cocok v\d…
+        tag_id = _ref_id_for_image_tag(ref, sha)
         image_ref = f"{dh_org}/{image_name}:{tag_id}"
         exists = check_image_exists(image_ref)
         icon = "✅" if exists else "⚠️ "
