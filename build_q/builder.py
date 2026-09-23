@@ -206,6 +206,17 @@ def build_command(
         if val:
             cmd += ["--build-arg", f"{key}={val}"]
 
+    # Auto-inject GITHUB_USER/GITHUB_TOKEN dari env (INLINE dengan compose.yaml
+    # yang mem-forward ${GIT_USER:-${GITHUB_USER:-…}} + ${GIT_TOKEN:-${GITHUB_TOKEN:-…}}).
+    # Dockerfile Go/.NET Qoin butuh ini untuk `netrc` (private repo qoinhubhelper).
+    # User override via --build-arg tetap menang.
+    for key in ("GITHUB_USER", "GITHUB_TOKEN"):
+        if any(a.startswith(f"{key}=") for a in extra_args_list):
+            continue
+        val = os.environ.get(key) or os.environ.get(f"GIT_{key.split('_', 1)[1]}", "")
+        if val:
+            cmd += ["--build-arg", f"{key}={val}"]
+
     # Extra --build-arg from CLI
     for arg in extra_args_list:
         cmd += ["--build-arg", arg]
