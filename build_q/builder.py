@@ -210,13 +210,15 @@ def build_command(
     for arg in extra_args_list:
         cmd += ["--build-arg", arg]
 
-    # Tag
+    # Tag — pakai `git describe --tags --exact-match || short commit`, INLINE
+    # dengan Makefile IMAGE_TAG rule dan `_predict_compose_image_tag`. Dengan ini
+    # `bq` default dan `bq --compose` menghasilkan tag yang identik.
     if tag:
         image_tag = str(tag)
     else:
         image_name = cicd.get("IMAGE", repo)
-        commit = get_local_commit_short()
-        image_tag = f"{registry_url}/{image_name}:{commit}" if registry_url else f"{image_name}:{commit}"
+        ref_id = get_local_tag_or_commit()
+        image_tag = f"{registry_url}/{image_name}:{ref_id}" if registry_url else f"{image_name}:{ref_id}"
 
     cmd += ["-t", image_tag]
 
@@ -754,15 +756,16 @@ def _predict_image_tag(
 ) -> str:
     """Compute the image tag we'll build/push, using the same rule as `build_command`.
 
-    Kept in sync so the pre-build registry check probes the exact tag that would
-    be produced. Falls back to the repo name when cicd.IMAGE is missing.
+    Mirrors the Makefile IMAGE_TAG rule (`git describe --tags --exact-match
+    || short commit`) so the pre-build registry check probes the exact tag
+    `docker buildx build` will push — dan konsisten dengan `--compose`.
     """
     if tag:
         return str(tag)
     registry_url = config.get("registry", {}).get("url", "")
     image_name = cicd.get("IMAGE", repo)
-    commit = get_local_commit_short()
-    base = f"{image_name}:{commit}"
+    ref_id = get_local_tag_or_commit()
+    base = f"{image_name}:{ref_id}"
     return f"{registry_url}/{base}" if registry_url else base
 
 
