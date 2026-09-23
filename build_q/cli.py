@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 
@@ -37,6 +38,23 @@ def _expand_repo(name: str, default_org: str) -> str:
     if "/" in name or "://" in name or name.startswith("git@"):
         return name
     return f"{default_org}/{name}"
+
+
+_TAG_LIKE = re.compile(r"^v\d")
+
+
+def _ref_id_for_image_tag(ref: str, sha: str) -> str:
+    """Identifier untuk image tag saat kita belum clone repo.
+
+    Mirror-kan aturan Makefile `IMAGE_TAG` yang jalan pasca-clone:
+        git describe --tags --exact-match || git rev-parse --short HEAD
+    Bila `ref` cocok pola tag versi (v1.0.1, v2.3.0-rc1, dsb), post-clone
+    `git describe` akan mengembalikan `ref` — jadi kita pakai `ref` sebagai
+    identifier. Selain itu (branch), fallback ke short SHA.
+    """
+    if ref and _TAG_LIKE.match(ref):
+        return ref
+    return sha[:7]
 
 
 # ── GitHub dispatchers ─────────────────────────────────────────────────────────
@@ -419,16 +437,16 @@ Config file: ~/.build-q/.env
             
             repo_name = api_repo.split("/")[-1]
             if not args.tag:
-                commit_hash = "unknown"
+                ref_id = "unknown"
                 try:
                     sha = _github_commit_sha(api_repo, ref)
                     if sha:
-                        commit_hash = sha[:7]
+                        ref_id = _ref_id_for_image_tag(ref, sha)
                 except Exception:
                     pass
                 registry_url = config.get("registry", {}).get("url", "")
                 image_name = cicd_data.get("IMAGE", repo_name)
-                args.tag = f"{registry_url}/{image_name}:{commit_hash}" if registry_url else f"{image_name}:{commit_hash}"
+                args.tag = f"{registry_url}/{image_name}:{ref_id}" if registry_url else f"{image_name}:{ref_id}"
                 print(f"🏷️ Auto-generated tag for remote: {args.tag}")
             
             repo = repo_name
@@ -464,7 +482,8 @@ Config file: ~/.build-q/.env
                     api_repo = f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else args.clone
                     
                     try:
-                        commit_hash = _github_commit_sha(api_repo, ref)[:7]
+                        sha = _github_commit_sha(api_repo, ref)
+                        ref_id = _ref_id_for_image_tag(ref, sha)
 
                         clone_dir = api_repo.split("/")[-1]
                         image_name = repo if repo else clone_dir
@@ -482,7 +501,7 @@ Config file: ~/.build-q/.env
                             except json.JSONDecodeError:
                                 pass
 
-                        preview_tag = f"{registry_url}/{image_name}:{commit_hash}" if registry_url else f"{image_name}:{commit_hash}"
+                        preview_tag = f"{registry_url}/{image_name}:{ref_id}" if registry_url else f"{image_name}:{ref_id}"
 
                     except (subprocess.CalledProcessError, GitHubAPIError):
                         print("⚠️ Could not fetch remote info, skipping pre-clone check.", file=sys.stderr)
