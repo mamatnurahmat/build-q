@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import load_config, load_local_cicd
+from .config import load_config, load_local_cicd, use_gh_cli
 
 
 class BuildError(Exception):
@@ -377,14 +377,23 @@ def init_secrets(
         ("WEBHOOK_TRIGGER_URL", url, url),
         ("WEBHOOK_TRIGGER_TOKEN", token, "***"),
     ]
+    use_cli = use_gh_cli()
     for name, value, display in entries:
-        result = subprocess.run(
-            ["gh", "secret", "set", name, "--repo", repo, "--body", value],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            print(f"   ❌ {name}: {result.stderr.strip()}", file=sys.stderr)
-            return False
+        if use_cli:
+            result = subprocess.run(
+                ["gh", "secret", "set", name, "--repo", repo, "--body", value],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                print(f"   ❌ {name}: {result.stderr.strip()}", file=sys.stderr)
+                return False
+        else:
+            from .github_api import GitHubAPIError, set_secret
+            try:
+                set_secret(repo, name, value)
+            except GitHubAPIError as e:
+                print(f"   ❌ {name}: {e}", file=sys.stderr)
+                return False
         print(f"   ✅ {name} = {display}")
     print(f"\n✅ GitHub Actions secrets configured on {repo}.")
     return True

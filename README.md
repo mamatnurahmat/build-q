@@ -197,6 +197,23 @@ bq --config       # tampilkan konfigurasi aktif
 | `JX_KUBE_CONTEXT` | (kosong = current) | kubectl context untuk fetch token |
 | `JX_KUBE_NAMESPACE` | `jenkins-x` | Namespace secret |
 | `JX_TOKEN_SECRET` | `webhook-trigger-token` | Nama k8s secret berisi token |
+| `GH_CLI` | `true` | `true` = pakai `gh` CLI (default, tidak ada perubahan). `false` = jalur native (REST + `git`) |
+| `GITHUB_USER` | (kosong) | Username GitHub. Dipakai bila `GH_CLI=false`; bila kosong, di-fetch dari `/user` |
+| `GITHUB_TOKEN` | (kosong) | Personal Access Token — WAJIB bila `GH_CLI=false`. Scope: `repo`, `read:user`, `actions:write` (untuk `--init-secrets`) |
+
+#### Toggle native (tanpa `gh` CLI)
+
+Default `GH_CLI=true` — `bq` tetap memakai `gh` CLI persis seperti sebelumnya, tidak ada breaking change. Untuk mengaktifkan jalur native (stdlib `urllib` + `git`):
+
+```env
+GH_CLI=false
+GITHUB_USER=your-login
+GITHUB_TOKEN=ghp_xxx
+```
+
+Fitur yang dialihkan: fetch `cicd.json`, resolve commit SHA, ambil auth token, `--gh-auth`, `--clone`, `--init-secrets`. Untuk `--init-secrets` di mode native, install extra: `pip install pynacl` (dibutuhkan enkripsi libsodium sebelum PUT ke API).
+
+> Bila `~/.build-q/.env` sudah ada dari versi sebelumnya, tambahkan tiga baris di atas secara manual — atau jalankan `bq --init --force` untuk regenerate (perhatikan config lain akan direset ke default).
 
 Contoh minimal untuk Qoin:
 

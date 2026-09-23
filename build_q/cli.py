@@ -26,7 +26,8 @@ from .builder import (
     BuildError, ensure_builder, fix_dockerfile, get_git_info,
     init_gh_action, init_jx, init_legacy, init_secrets, run_build, run_compose,
 )
-from .config import init_config, load_config, ENV_FILE
+from .config import ENV_FILE, cicd_candidates, init_config, load_config, use_gh_cli
+from .github_api import GitHubAPIError
 
 
 def _expand_repo(name: str, default_org: str) -> str:
@@ -36,6 +37,71 @@ def _expand_repo(name: str, default_org: str) -> str:
     if "/" in name or "://" in name or name.startswith("git@"):
         return name
     return f"{default_org}/{name}"
+
+
+# ── GitHub dispatchers ─────────────────────────────────────────────────────────
+# When GH_CLI=true (default) the existing `gh` subprocess path runs untouched.
+# When GH_CLI=false these helpers route to build_q.github_api (native REST/git).
+
+def _github_contents(api_repo: str, path: str, ref: str) -> str | None:
+    """Return raw file contents at `ref`, or None on any failure."""
+    if use_gh_cli():
+        res = subprocess.run(
+            ["gh", "api", f"repos/{api_repo}/contents/{path}?ref={ref}",
+             "-H", "Accept: application/vnd.github.v3.raw"],
+            capture_output=True, text=True,
+        )
+        return res.stdout if res.returncode == 0 and res.stdout else None
+    from . import github_api
+    try:
+        return github_api.get_contents_raw(api_repo, path, ref).decode("utf-8")
+    except GitHubAPIError:
+        return None
+
+
+def _github_commit_sha(api_repo: str, ref: str) -> str:
+    """Resolve `ref` to a commit SHA. Raises CalledProcessError or GitHubAPIError."""
+    if use_gh_cli():
+        res = subprocess.run(
+            ["gh", "api", f"repos/{api_repo}/commits/{ref}", "--jq", ".sha"],
+            capture_output=True, text=True, check=True,
+        )
+        return res.stdout.strip()
+    from . import github_api
+    return github_api.get_commit_sha(api_repo, ref)
+
+
+def _github_auth_token() -> str:
+    """Return a GitHub token. Raises CalledProcessError/FileNotFoundError/GitHubAPIError."""
+    if use_gh_cli():
+        return subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    from . import github_api
+    return github_api.get_auth_token()
+
+
+def _github_user_login() -> str:
+    """Return authenticated user login. Raises CalledProcessError/FileNotFoundError/GitHubAPIError."""
+    if use_gh_cli():
+        return subprocess.run(
+            ["gh", "api", "user", "--jq", ".login"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+    from . import github_api
+    return github_api.get_user_login()
+
+
+def _github_clone(clone_arg: str, ref: str) -> None:
+    """Clone a repo into the current directory. Raises CalledProcessError/FileNotFoundError/GitHubAPIError."""
+    if use_gh_cli():
+        subprocess.run(
+            ["gh", "repo", "clone", clone_arg, "--", "--branch", ref, "--single-branch"],
+            check=True,
+        )
+        return
+    from . import github_api
+    github_api.clone(clone_arg, ref, single_branch=True)
 
 
 def main() -> None:
@@ -284,16 +350,20 @@ Config file: ~/.build-q/.env
             if api_repo.startswith("git@github.com:"):
                 api_repo = api_repo.split("git@github.com:")[-1]
                 
-            print(f"🔍 Fetching {args.cicd} from remote {api_repo}@{ref} ...")
+            candidates = cicd_candidates(args.cicd)
+            print(f"🔍 Fetching {' | '.join(candidates)} from remote {api_repo}@{ref} ...")
+            cicd_data = None
             try:
-                cicd_res = subprocess.run(
-                    ["gh", "api", f"repos/{api_repo}/contents/{args.cicd}?ref={ref}", "-H", "Accept: application/vnd.github.v3.raw"],
-                    capture_output=True, text=True
-                )
-                if cicd_res.returncode == 0 and cicd_res.stdout:
-                    cicd_data = json.loads(cicd_res.stdout)
-                else:
-                    print(f"⚠️ Warning: Could not fetch {args.cicd} from remote. Using empty defaults.")
+                for cand in candidates:
+                    cicd_raw = _github_contents(api_repo, cand, ref)
+                    if cicd_raw:
+                        cicd_data = json.loads(cicd_raw)
+                        if cand != args.cicd:
+                            print(f"   ↪ fell back to {cand}")
+                        args.cicd = cand
+                        break
+                if cicd_data is None:
+                    print(f"⚠️ Warning: Could not fetch cicd config from remote (tried: {', '.join(candidates)}). Using empty defaults.")
                     cicd_data = {}
             except Exception as e:
                 print(f"⚠️ Warning: Error fetching remote cicd.json: {e}. Using empty defaults.")
@@ -310,15 +380,12 @@ Config file: ~/.build-q/.env
             # Fall back to HTTPS + GIT_AUTH_TOKEN secret when the agent isn't reachable.
             if git_url.startswith("git@") and not os.environ.get("SSH_AUTH_SOCK"):
                 try:
-                    gh_token = subprocess.run(
-                        ["gh", "auth", "token"],
-                        capture_output=True, text=True, check=True,
-                    ).stdout.strip()
-                except (subprocess.CalledProcessError, FileNotFoundError):
+                    gh_token = _github_auth_token()
+                except (subprocess.CalledProcessError, FileNotFoundError, GitHubAPIError):
                     print(
-                        "❌ SSH_AUTH_SOCK is not set and `gh auth token` failed.\n"
-                        "   Either start ssh-agent (`eval $(ssh-agent) && ssh-add`)\n"
-                        "   or authenticate with `gh auth login`, then retry.",
+                        "❌ SSH_AUTH_SOCK is not set and GitHub token lookup failed.\n"
+                        "   Either start ssh-agent (`eval $(ssh-agent) && ssh-add`),\n"
+                        "   run `gh auth login`, or set GITHUB_TOKEN in ~/.build-q/.env, then retry.",
                         file=sys.stderr,
                     )
                     sys.exit(1)
@@ -337,12 +404,9 @@ Config file: ~/.build-q/.env
             if not args.tag:
                 commit_hash = "unknown"
                 try:
-                    sha_res = subprocess.run(
-                        ["gh", "api", f"repos/{api_repo}/commits/{ref}", "--jq", ".sha"],
-                        capture_output=True, text=True, check=True
-                    )
-                    if sha_res.returncode == 0 and sha_res.stdout.strip():
-                        commit_hash = sha_res.stdout.strip()[:7]
+                    sha = _github_commit_sha(api_repo, ref)
+                    if sha:
+                        commit_hash = sha[:7]
                 except Exception:
                     pass
                 registry_url = config.get("registry", {}).get("url", "")
@@ -383,31 +447,28 @@ Config file: ~/.build-q/.env
                     api_repo = f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else args.clone
                     
                     try:
-                        sha_res = subprocess.run(
-                            ["gh", "api", f"repos/{api_repo}/commits/{ref}", "--jq", ".sha"],
-                            capture_output=True, text=True, check=True
-                        )
-                        commit_hash = sha_res.stdout.strip()[:7]
-                        
-                        cicd_res = subprocess.run(
-                            ["gh", "api", f"repos/{api_repo}/contents/{args.cicd}?ref={ref}", "-H", "Accept: application/vnd.github.v3.raw"],
-                            capture_output=True, text=True
-                        )
-                        
+                        commit_hash = _github_commit_sha(api_repo, ref)[:7]
+
                         clone_dir = api_repo.split("/")[-1]
                         image_name = repo if repo else clone_dir
-                        
-                        if cicd_res.returncode == 0 and cicd_res.stdout:
+
+                        for cand in cicd_candidates(args.cicd):
+                            cicd_raw = _github_contents(api_repo, cand, ref)
+                            if not cicd_raw:
+                                continue
                             try:
-                                cicd_data = json.loads(cicd_res.stdout)
+                                cicd_data = json.loads(cicd_raw)
                                 image_name = cicd_data.get("IMAGE", image_name)
+                                if cand != args.cicd:
+                                    args.cicd = cand
+                                break
                             except json.JSONDecodeError:
                                 pass
-                                
+
                         preview_tag = f"{registry_url}/{image_name}:{commit_hash}" if registry_url else f"{image_name}:{commit_hash}"
-                        
-                    except subprocess.CalledProcessError:
-                        print("⚠️ Could not fetch remote info via gh api, skipping pre-clone check.", file=sys.stderr)
+
+                    except (subprocess.CalledProcessError, GitHubAPIError):
+                        print("⚠️ Could not fetch remote info, skipping pre-clone check.", file=sys.stderr)
                 
                 if preview_tag:
                     from .builder import check_image_exists
@@ -419,17 +480,17 @@ Config file: ~/.build-q/.env
             
             print(f"📥 Cloning repository {args.clone} (branch: {ref}) ...")
             try:
-                subprocess.run(
-                    ["gh", "repo", "clone", args.clone, "--", "--branch", ref, "--single-branch"],
-                    check=True
-                )
+                _github_clone(args.clone, ref)
             except subprocess.CalledProcessError as e:
                 print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
                 sys.exit(1)
             except FileNotFoundError:
-                print("❌ GitHub CLI ('gh') is not installed or not in PATH.", file=sys.stderr)
+                print("❌ Required CLI not found (`gh` or `git`). Install one, or toggle GH_CLI.", file=sys.stderr)
                 sys.exit(1)
-            
+            except GitHubAPIError as e:
+                print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
+                sys.exit(1)
+
             clone_dir = args.clone.split("/")[-1]
             print(f"📁 Changing directory to {clone_dir} ...")
             os.chdir(clone_dir)
@@ -453,19 +514,16 @@ Config file: ~/.build-q/.env
 
         if args.gh_auth:
             try:
-                gh_user = subprocess.run(
-                    ["gh", "api", "user", "--jq", ".login"],
-                    capture_output=True, text=True, check=True
-                ).stdout.strip()
-                gh_token = subprocess.run(
-                    ["gh", "auth", "token"],
-                    capture_output=True, text=True, check=True
-                ).stdout.strip()
+                gh_user = _github_user_login()
+                gh_token = _github_auth_token()
             except FileNotFoundError:
-                print("❌ 'gh' CLI not found. Install: brew install gh", file=sys.stderr)
+                print("❌ 'gh' CLI not found. Install (brew install gh) or set GH_CLI=false + GITHUB_TOKEN.", file=sys.stderr)
                 sys.exit(1)
             except subprocess.CalledProcessError as e:
                 print(f"❌ Failed to fetch gh credentials: {e.stderr.strip()}", file=sys.stderr)
+                sys.exit(1)
+            except GitHubAPIError as e:
+                print(f"❌ Failed to fetch GitHub credentials: {e}", file=sys.stderr)
                 sys.exit(1)
 
             args.build_args = list(args.build_args or [])
