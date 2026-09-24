@@ -184,4 +184,9 @@ def run_check(
         for w in warnings:
             print(f"   ⚠️  {w}")
 
+    if any(w.startswith("outdated:") for w in warnings):
+        short_repo = api_repo.split("/")[-1]
+        print("\n💡 One-shot fix (buat branch + PR + set secrets):")
+        print(f"   bq --pr-fix {short_repo} {ref}")
+
     return 0 if passed == total_required else 1

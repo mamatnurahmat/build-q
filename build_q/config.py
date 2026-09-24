@@ -60,9 +60,14 @@ def load_config() -> Dict[str, Any]:
         },
         "webhook": {
             "trigger_url": os.getenv("WEBHOOK_TRIGGER_URL", "https://cicd-hw.qoin.id/trigger"),
+            "trigger_token": os.getenv("WEBHOOK_TRIGGER_TOKEN", ""),
             "k8s_context": os.getenv("JX_KUBE_CONTEXT", ""),
             "k8s_namespace": os.getenv("JX_KUBE_NAMESPACE", "jenkins-x"),
             "k8s_secret": os.getenv("JX_TOKEN_SECRET", "webhook-trigger-token"),
+        },
+        "pr_fix": {
+            "branch_prefix": os.getenv("PR_FIX_BRANCH_PREFIX", "fix/jx-init-"),
+            "base_workdir": os.getenv("PR_FIX_BASE_WORKDIR", "/tmp"),
         },
         "github": {
             "use_cli": _parse_bool(os.getenv("GH_CLI", "false"), default=False),
@@ -104,6 +109,37 @@ def get_github_credentials() -> Dict[str, str]:
     return {"user": cfg["user"], "token": cfg["token"]}
 
 
+def save_env_value(key: str, value: str) -> None:
+    """Persist a single KEY=VALUE to ~/.build-q/.env (in-place update or append).
+
+    Kalau `.env` belum ada, dibuat dulu via init_config(silent=True). Bila `key`
+    sudah ada, baris di-update; kalau belum, di-append. Juga memutakhirkan
+    os.environ agar run selanjutnya di proses ini langsung ambil nilai baru.
+    """
+    ensure_config_dir()
+    if not ENV_FILE.exists():
+        init_config(silent=True)
+    lines = ENV_FILE.read_text().splitlines()
+    found = False
+    new_lines = []
+    for line in lines:
+        stripped = line.lstrip()
+        if not stripped.startswith("#") and "=" in stripped:
+            k = stripped.split("=", 1)[0].strip()
+            if k == key:
+                new_lines.append(f"{key}={value}")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        if new_lines and new_lines[-1] != "":
+            new_lines.append("")
+        new_lines.append(f"{key}={value}")
+    ENV_FILE.write_text("\n".join(new_lines) + "\n")
+    ENV_FILE.chmod(0o600)
+    os.environ[key] = value
+
+
 def init_config(force: bool = False, silent: bool = False) -> None:
     """Create default config file at ~/.build-q/.env."""
     ensure_config_dir()
@@ -141,6 +177,13 @@ WEBHOOK_TRIGGER_URL=https://cicd-hw.qoin.id/trigger
 JX_KUBE_CONTEXT=
 JX_KUBE_NAMESPACE=jenkins-x
 JX_TOKEN_SECRET=webhook-trigger-token
+# WEBHOOK_TRIGGER_TOKEN: auto-fetched dari k8s pada `bq --pr-fix` preflight
+# (sekali saja; disimpan di sini untuk run selanjutnya).
+WEBHOOK_TRIGGER_TOKEN=
+
+# `bq --pr-fix` options
+PR_FIX_BRANCH_PREFIX=fix/jx-init-
+PR_FIX_BASE_WORKDIR=/tmp
 
 # GitHub access
 # GH_CLI=false (default sejak v0.1.22) → jalur native (urllib + git).

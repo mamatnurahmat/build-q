@@ -294,6 +294,33 @@ Output:
 
 Exit code `0` bila semua wajib lulus (repo/ref + cicd config), `1` bila ada yang miss. Warning (missing artifact / image belum ada) tidak menggagalkan.
 
+Bila ditemukan artifact OUTDATED, `--check` mencetak suggestion `bq --pr-fix …` di akhir output.
+
+#### 🩹 `bq --pr-fix <repo> <ref>` — one-shot fix (sejak v0.1.24)
+
+Untuk repo yang init-nya OUTDATED (deteksi via `--check`), satu perintah menyelesaikan seluruh siklus fix:
+
+```bash
+bq --pr-fix ngenwal-be-snapconvert-manager master
+# Preflight → clone → branch fix/jx-init-<ts> → regenerate 4 file →
+# commit → push → set 2 repo secrets → open PR → cleanup
+```
+
+**Prasyarat di `~/.build-q/.env`:**
+- `GH_CLI=false` + `GITHUB_TOKEN` (scope: `repo`, `actions:write`, `read:user`)
+- `WEBHOOK_TRIGGER_URL` + `WEBHOOK_TRIGGER_TOKEN` (auto-fetched dari k8s pada preflight bila kosong; disimpan untuk run selanjutnya)
+- Package `pynacl` (untuk enkripsi repo secret): `pip install pynacl`
+
+**Flag override:**
+
+| Flag | Default | Keterangan |
+|---|---|---|
+| `--pr-branch NAME` | `fix/jx-init-<timestamp>` | Nama branch fix eksplisit |
+| `--keep-workdir` | (delete) | Jangan hapus `/tmp/bq-pr-fix-…` setelah selesai |
+| `--dry-run` | (execute) | Stop sebelum push/set-secret/open-PR. Workdir dipertahankan untuk inspeksi. |
+
+**Deduplikasi:** bila PR untuk branch fix sudah ada (open), print URL PR eksisting alih-alih buat baru.
+
 Contoh minimal untuk Qoin:
 
 ```env

@@ -141,3 +141,22 @@ def set_secret(repo: str, name: str, value: str) -> None:
 def get_auth_token() -> str:
     """Public accessor mirroring `gh auth token` semantics."""
     return _token()
+
+
+def list_open_prs(repo: str, head: str) -> list:
+    """Return list of open PRs where head branch matches `head` (short name)."""
+    # GitHub filter format for cross-fork PRs uses `<owner>:<branch>`; for same-repo,
+    # just the branch name works.
+    data = _request("GET", f"/repos/{repo}/pulls?state=open&head={quote(head)}")
+    return data or []
+
+
+def create_pull_request(repo: str, *, base: str, head: str, title: str, body: str) -> dict:
+    """Open a PR from `head` → `base` on `repo`. Returns the API response dict."""
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "head": head,
+        "base": base,
+    }).encode("utf-8")
+    return _request("POST", f"/repos/{repo}/pulls", body=payload)
