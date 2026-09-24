@@ -192,7 +192,11 @@ PR_FIX_BASE_WORKDIR=/tmp
 # GH_CLI=true  → tetap pakai `gh` CLI (perilaku lama).
 GH_CLI=false
 # Personal Access Token (classic atau fine-grained). WAJIB bila GH_CLI=false.
-# Scope minimum: repo (contents:read), read:user, actions:write (untuk --init-secrets).
+# Scope minimum:
+#   - repo             (contents:read/write, PR)
+#   - workflow         (WAJIB untuk `bq --pr-fix` — update .github/workflows/*)
+#   - read:user
+# Untuk --init-secrets: actions:write (biasanya include di scope repo).
 # Generate: https://github.com/settings/tokens
 GITHUB_USER=
 GITHUB_TOKEN=

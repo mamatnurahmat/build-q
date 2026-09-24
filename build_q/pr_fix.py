@@ -220,7 +220,20 @@ def run_pr_fix(
     try:
         _sh(["git", "push", "origin", branch_name], cwd=str(repo_dir))
     except subprocess.CalledProcessError as e:
-        print(f"   ❌ Push gagal: {e.stderr}", file=sys.stderr)
+        err = (e.stderr or "").strip()
+        print(f"   ❌ Push gagal: {err}", file=sys.stderr)
+        if "workflow" in err and "scope" in err:
+            print(
+                "\n💡 GITHUB_TOKEN kurang scope `workflow` (dibutuhkan untuk update file di\n"
+                "   .github/workflows/). Perbaikan:\n"
+                "     1) Buka https://github.com/settings/tokens → edit token Anda\n"
+                "     2) Centang scope: workflow (dan pastikan repo, read:user, admin:public_key opsional)\n"
+                "     3) Regenerate → copy → update GITHUB_TOKEN di ~/.build-q/.env\n"
+                f"     4) Retry: bq --pr-fix {api_repo.split('/')[-1]} {ref}\n"
+                "   Alternatif: hapus trigger-ci.yml dari commit (--pr-branch <name> + edit manual),\n"
+                "   lalu update workflow via GitHub UI (butuh browser).",
+                file=sys.stderr,
+            )
         return 2
 
     # Secrets

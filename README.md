@@ -307,7 +307,7 @@ bq --pr-fix ngenwal-be-snapconvert-manager master
 ```
 
 **Prasyarat di `~/.build-q/.env`:**
-- `GH_CLI=false` + `GITHUB_TOKEN` (scope: `repo`, `actions:write`, `read:user`)
+- `GH_CLI=false` + `GITHUB_TOKEN` (scope: `repo`, **`workflow`**, `actions:write`, `read:user`). Tanpa `workflow`, push ke branch yang mengubah `.github/workflows/*` akan ditolak GitHub.
 - `WEBHOOK_TRIGGER_URL` + `WEBHOOK_TRIGGER_TOKEN` (auto-fetched dari k8s pada preflight bila kosong; disimpan untuk run selanjutnya)
 - Package `pynacl` (untuk enkripsi repo secret): `pip install pynacl`
 
