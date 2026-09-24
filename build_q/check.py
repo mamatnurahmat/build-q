@@ -15,17 +15,9 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._common import INIT_ARTIFACTS, fetch_cicd_data, init_ctx_from_cicd, normalize_text
 from .config import cicd_candidates, load_config
 from .github_api import GitHubAPIError, get_commit_sha, get_contents_raw
-
-# Pair (path, template_name) — template rendering identik dengan `bq --init-jx`
-# (source of truth: builder.init_jx). trigger_ci tanpa render (static).
-_INIT_ARTIFACTS = [
-    ("Makefile", "makefile"),
-    ("compose.yaml", "compose"),
-    ("Dockerfile", "dockerfile"),
-    (".github/workflows/trigger-ci.yml", "trigger_ci"),
-]
 
 
 def _exists(api_repo: str, path: str, ref: str) -> Optional[bytes]:
@@ -33,29 +25,6 @@ def _exists(api_repo: str, path: str, ref: str) -> Optional[bytes]:
         return get_contents_raw(api_repo, path, ref)
     except GitHubAPIError:
         return None
-
-
-def _normalize(text: str) -> str:
-    """Normalize whitespace so trivial format drift tidak dianggap mismatch."""
-    lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines) + "\n"
-
-
-def _init_ctx_from_cicd(cicd: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, str]:
-    """Context untuk render template — identik dengan builder.init_jx."""
-    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
-    image = cicd.get("IMAGE") or ""
-    return {
-        "IMAGE": image,
-        "PROJECT": cicd.get("PROJECT", "qoin"),
-        "PORT": cicd.get("PORT", "8080"),
-        "CLUSTER": cicd.get("CLUSTER", "qoin"),
-        "DEPLOYMENT": cicd.get("DEPLOYMENT", image),
-        "NODETYPE": cicd.get("NODETYPE", "back"),
-        "ORG_REGISTRY": registry,
-    }
 
 
 def run_check(
@@ -89,38 +58,23 @@ def run_check(
 
     # 2) cicd config
     print("\n🧩 CICD config:")
-    cicd_data: Dict[str, Any] = {}
-    cicd_found_path: Optional[str] = None
-    for cand in cicd_candidates(cicd_path):
-        raw = None
-        try:
-            raw = get_contents_raw(api_repo, cand, ref)
-        except GitHubAPIError:
-            pass
-        if raw:
-            try:
-                cicd_data = json.loads(raw)
-                cicd_found_path = cand
-                print(f"   ✅ {cand} ({len(raw)} bytes)")
-                for k in ("IMAGE", "PROJECT", "DEPLOYMENT", "PORT", "CLUSTER", "NODETYPE"):
-                    v = cicd_data.get(k)
-                    if v:
-                        print(f"        • {k:11}= {v}")
-                break
-            except json.JSONDecodeError as e:
-                results.append((f"{cand} parse", False, str(e)[:80]))
-                print(f"   ❌ {cand} — JSON invalid: {e}")
+    cicd_data, cicd_found_path, cicd_raw = fetch_cicd_data(api_repo, ref, cicd_path)
     if cicd_found_path is None:
         results.append(("cicd config", False, f"none of {cicd_candidates(cicd_path)}"))
         print(f"   ❌ tidak ditemukan (tried: {', '.join(cicd_candidates(cicd_path))})")
     else:
+        print(f"   ✅ {cicd_found_path} ({len(cicd_raw)} bytes)")
+        for k in ("IMAGE", "PROJECT", "DEPLOYMENT", "PORT", "CLUSTER", "NODETYPE"):
+            v = cicd_data.get(k)
+            if v:
+                print(f"        • {k:11}= {v}")
         results.append(("cicd config", True, cicd_found_path))
 
     # 3) jx-init artifacts — exist + isi MATCH template terkini
     print("\n🧱 Init artifacts (jx-init):")
     from .templates import load_template, render
-    ctx = _init_ctx_from_cicd(cicd_data, config)
-    for path, tpl_name in _INIT_ARTIFACTS:
+    ctx = init_ctx_from_cicd(cicd_data, config)
+    for path, tpl_name in INIT_ARTIFACTS:
         raw = _exists(api_repo, path, ref)
         if raw is None:
             print(f"   ⚠️  {path} — MISSING")
@@ -133,7 +87,7 @@ def run_check(
             continue
         expected = render(tpl, ctx) if tpl_name != "trigger_ci" else tpl
         actual = raw.decode("utf-8", errors="replace")
-        if _normalize(actual) == _normalize(expected):
+        if normalize_text(actual) == normalize_text(expected):
             print(f"   ✅ {path} — MATCH template terkini")
         else:
             print(f"   ⚠️  {path} — exists tapi OUTDATED (diff vs template)")

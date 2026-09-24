@@ -14,36 +14,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import github_api
+from ._common import INIT_ARTIFACTS, fetch_cicd_data, init_ctx_from_cicd, normalize_text
 from .config import cicd_candidates, load_config, save_env_value
-
-
-_ARTIFACTS: List[Tuple[str, str]] = [
-    ("Makefile", "makefile"),
-    ("compose.yaml", "compose"),
-    ("Dockerfile", "dockerfile"),
-    (".github/workflows/trigger-ci.yml", "trigger_ci"),
-]
-
-
-def _normalize(text: str) -> str:
-    lines = [ln.rstrip() for ln in text.replace("\r\n", "\n").split("\n")]
-    while lines and lines[-1] == "":
-        lines.pop()
-    return "\n".join(lines) + "\n"
-
-
-def _init_ctx(cicd: Dict, config: Dict) -> Dict[str, str]:
-    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
-    image = cicd.get("IMAGE") or ""
-    return {
-        "IMAGE": image,
-        "PROJECT": cicd.get("PROJECT", "qoin"),
-        "PORT": cicd.get("PORT", "8080"),
-        "CLUSTER": cicd.get("CLUSTER", "qoin"),
-        "DEPLOYMENT": cicd.get("DEPLOYMENT", image),
-        "NODETYPE": cicd.get("NODETYPE", "back"),
-        "ORG_REGISTRY": registry,
-    }
 
 
 def _preflight(config: Dict) -> Optional[str]:
@@ -130,20 +102,11 @@ def run_pr_fix(
 
     # Fetch cicd (native REST)
     print(f"\n📡 Fetching cicd config from {api_repo}@{ref} ...")
-    cicd: Dict = {}
-    cicd_found: Optional[str] = None
-    for cand in cicd_candidates(cicd_path):
-        try:
-            raw = github_api.get_contents_raw(api_repo, cand, ref)
-            cicd = json.loads(raw)
-            cicd_found = cand
-            print(f"   ✅ {cand} — IMAGE={cicd.get('IMAGE')} PROJECT={cicd.get('PROJECT')} PORT={cicd.get('PORT')}")
-            break
-        except github_api.GitHubAPIError:
-            continue
+    cicd, cicd_found, _ = fetch_cicd_data(api_repo, ref, cicd_path)
     if not cicd:
         print(f"   ❌ Tidak ada cicd config valid (tried: {', '.join(cicd_candidates(cicd_path))})", file=sys.stderr)
         return 1
+    print(f"   ✅ {cicd_found} — IMAGE={cicd.get('IMAGE')} PROJECT={cicd.get('PROJECT')} PORT={cicd.get('PORT')}")
 
     # Prepare workdir + clone
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -173,15 +136,15 @@ def run_pr_fix(
 
     # Render + write artifacts
     from .templates import load_template, render
-    ctx = _init_ctx(cicd, config)
+    ctx = init_ctx_from_cicd(cicd, config)
     print(f"\n📝 Regenerating artifacts (ctx: IMAGE={ctx['IMAGE']} PROJECT={ctx['PROJECT']} PORT={ctx['PORT']}):")
     changes: List[str] = []
-    for path_str, tpl_name in _ARTIFACTS:
+    for path_str, tpl_name in INIT_ARTIFACTS:
         tpl = load_template(tpl_name)
         new_content = render(tpl, ctx) if tpl_name != "trigger_ci" else tpl
         target = repo_dir / path_str
         current = target.read_text() if target.exists() else ""
-        if _normalize(current) == _normalize(new_content):
+        if normalize_text(current) == normalize_text(new_content):
             print(f"   ⏭  {path_str} (already up-to-date)")
             continue
         target.parent.mkdir(parents=True, exist_ok=True)

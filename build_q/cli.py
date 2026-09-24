@@ -28,7 +28,7 @@ from .builder import (
     init_gh_action, init_jx, init_legacy, init_secrets, run_build, run_compose,
 )
 from .config import ENV_FILE, cicd_candidates, init_config, load_config, use_gh_cli
-from .github_api import GitHubAPIError
+from .github_api import GitHubAPIError, normalize_repo
 
 
 def _expand_repo(name: str, default_org: str) -> str:
@@ -369,14 +369,7 @@ Config file: ~/.build-q/.env
             from .pr_fix import run_pr_fix
             config = load_config()
             default_org = config.get("git", {}).get("org", "")
-            expanded = _expand_repo(args.repo, default_org)
-            api_repo = expanded
-            if api_repo.endswith(".git"):
-                api_repo = api_repo[:-4]
-            if "github.com/" in api_repo:
-                api_repo = api_repo.split("github.com/")[-1]
-            if api_repo.startswith("git@github.com:"):
-                api_repo = api_repo.split("git@github.com:")[-1]
+            api_repo = normalize_repo(_expand_repo(args.repo, default_org))
             rc = run_pr_fix(
                 api_repo, args.ref,
                 cicd_path=args.cicd,
@@ -393,14 +386,7 @@ Config file: ~/.build-q/.env
             from .check import run_check
             config = load_config()
             default_org = config.get("git", {}).get("org", "")
-            expanded = _expand_repo(args.repo, default_org)
-            api_repo = expanded
-            if api_repo.endswith(".git"):
-                api_repo = api_repo[:-4]
-            if "github.com/" in api_repo:
-                api_repo = api_repo.split("github.com/")[-1]
-            if api_repo.startswith("git@github.com:"):
-                api_repo = api_repo.split("git@github.com:")[-1]
+            api_repo = normalize_repo(_expand_repo(args.repo, default_org))
             rc = run_check(
                 api_repo, args.ref,
                 cicd_path=args.cicd,
@@ -445,14 +431,8 @@ Config file: ~/.build-q/.env
                 print(f"🏷️ Expanded '{repo}' → '{expanded}' using GITHUB_ORG")
                 repo = expanded
 
-            api_repo = repo
-            if api_repo.endswith(".git"):
-                api_repo = api_repo[:-4]
-            if "github.com/" in api_repo:
-                api_repo = api_repo.split("github.com/")[-1]
-            if api_repo.startswith("git@github.com:"):
-                api_repo = api_repo.split("git@github.com:")[-1]
-                
+            api_repo = normalize_repo(repo)
+
             candidates = cicd_candidates(args.cicd)
             print(f"🔍 Fetching {' | '.join(candidates)} from remote {api_repo}@{ref} ...")
             cicd_data = None
@@ -543,12 +523,9 @@ Config file: ~/.build-q/.env
                     config = load_config()
                     registry_url = config.get("registry", {}).get("url", "")
                     
-                    api_repo = args.clone
-                    if api_repo.endswith(".git"):
-                        api_repo = api_repo[:-4]
-                    parts = api_repo.replace(":", "/").split("/")
-                    api_repo = f"{parts[-2]}/{parts[-1]}" if len(parts) >= 2 else args.clone
-                    
+                    api_repo = normalize_repo(args.clone)
+
+
                     try:
                         sha = _github_commit_sha(api_repo, ref)
                         ref_id = _ref_id_for_image_tag(ref, sha)

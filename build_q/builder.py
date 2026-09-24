@@ -445,11 +445,11 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
         print(f"   {k:12} = {v}")
     print()
 
+    from ._common import INIT_ARTIFACTS
     files = [
-        (Path("Makefile"), render(load_template("makefile"), ctx)),
-        (Path("compose.yaml"), render(load_template("compose"), ctx)),
-        (Path("Dockerfile"), render(load_template("dockerfile"), ctx)),
-        (Path(".github/workflows/trigger-ci.yml"), load_template("trigger_ci")),
+        (Path(path),
+         load_template(tpl) if tpl == "trigger_ci" else render(load_template(tpl), ctx))
+        for path, tpl in INIT_ARTIFACTS
     ]
 
     written = 0

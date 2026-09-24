@@ -92,7 +92,7 @@ def clone(repo: str, ref: str, *, single_branch: bool = True) -> None:
 
     `repo` may be `owner/name`, `owner/name.git`, or a full URL.
     """
-    api_repo = _normalize_repo(repo)
+    api_repo = normalize_repo(repo)
     token = _token()
     url = f"https://x-access-token:{token}@github.com/{api_repo}.git"
     cmd = ["git", "clone"]
@@ -103,7 +103,7 @@ def clone(repo: str, ref: str, *, single_branch: bool = True) -> None:
     subprocess.run(cmd, check=True)
 
 
-def _normalize_repo(repo: str) -> str:
+def normalize_repo(repo: str) -> str:
     """Reduce any of the input forms to `owner/name` (no .git suffix)."""
     r = repo.strip()
     if r.endswith(".git"):
