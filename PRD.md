@@ -1,6 +1,6 @@
 # PRD: build-q (bq) — Simplified Docker Buildx CLI
 
-- **Version**: 0.1.11
+- **Version**: 0.1.27
 - **Status**: Released (PyPI: [`build-q`](https://pypi.org/project/build-q/))
 - **Owner**: ngen contributors
 - **Entry points**: `build-q`, `bq`
@@ -11,7 +11,9 @@
 
 `build-q` (dibaca *bq*, singkatan **Build-Quick**) adalah CLI Python zero-dependency yang menyederhanakan operasi `docker buildx build` di mesin lokal & remote. Tool ini menjembatani perintah Docker manual yang panjang dengan pipeline CI/CD produksi (Jenkins X): developer cukup menjalankan `bq` di dalam repo, dan seluruh flag (secret, build-arg, resource limit, tag image, registry) di-assemble otomatis dari Git + `cicd/cicd.json` + config global.
 
-Selain build, `bq` menyediakan **scaffolding CI/CD** (`--init-jx`, `--init-legacy`), **bootstrap GitHub Actions trigger** (`--gh-action-init`), **setup webhook secrets** (`--init-secrets`), **migrasi Dockerfile legacy** (`--fix-dockerfile`), **auto-init Docker Buildx builder** (`--init`), dan mode **compose** (`--compose`) untuk build via `make build && make release`.
+Selain build, `bq` menyediakan **scaffolding CI/CD** (`--init-jx`, `--init-legacy`), **bootstrap GitHub Actions trigger** (`--gh-action-init`), **setup webhook secrets** (`--init-secrets`), **migrasi Dockerfile legacy** (`--fix-dockerfile`), **auto-init Docker Buildx builder** (`--init`), mode **compose** (`--compose`) untuk build via `make build && make release`, **rollout suggestions** pasca-build (`set-image` / `gitops-set-image`), **verifikasi kesiapan repo tanpa clone** (`--check`), dan **one-shot fix** repo dgn template OUTDATED (`--pr-fix`: branch + push + PR + secrets).
+
+Sejak **v0.1.17** semua operasi GitHub berjalan **native** (Python `urllib` + `git`) via `build_q/github_api.py` — tanpa dependensi `gh` CLI. Sejak **v0.1.22** default `GH_CLI=false` (jalur native aktif untuk install baru); pengguna lama tetap bekerja dengan setting existing.
 
 ## 2. Problem Statement
 
@@ -31,7 +33,7 @@ Developer sering perlu me-reproduksi build image Docker yang identik dengan CI/C
 - Bukan pengganti pipeline CI/CD (Jenkins X / GitHub Actions). Fokus di build lokal / ad-hoc.
 - Tidak melakukan deploy ke Kubernetes/ArgoCD (di luar scope).
 - Tidak mengelola login Docker/registry (asumsi user sudah `docker login`).
-- Tidak mengelola credential GitHub (delegasi ke `gh` CLI).
+- ~~Tidak mengelola credential GitHub (delegasi ke `gh` CLI).~~ **Diperbarui v0.1.17+:** kini `bq` mengelola credential GitHub sendiri via `GITHUB_TOKEN` di `~/.build-q/.env` (jalur native), tidak butuh `gh` CLI. Toggle `GH_CLI=true` (legacy) masih tersedia untuk backward compat.
 
 ## 5. Personas
 
@@ -357,8 +359,41 @@ Bila `GITHUB_ORG` di-set, positional `repo` yang tidak mengandung `/` atau schem
 Alternatif eksekusi build: jalankan `make build ENV=<env> && make release ENV=<env>` (bukan `docker buildx`). Cocok untuk repo yang alur build-nya sudah pakai Makefile + docker compose (mis. hasil `--init-jx` / `--init-legacy`).
 
 - `ENV=<env>` disimpulkan lewat `_env_from_ref(ref)` — lihat §7.3 (mendukung `develop`/`staging`/`production` sesuai nama branch/tag).
-- Tag prediction memakai `get_local_tag_or_commit()` yang paritas dengan Makefile (`git describe --tags --exact-match || git rev-parse --short HEAD`), sehingga early registry check mencocokkan tag yang akan di-push `make release`.
+- Tag prediction memakai `get_local_tag_or_commit()` yang paritas dengan Makefile (`git describe --tags --exact-match || git rev-parse --short HEAD`), sehingga early registry check mencocokkan tag yang akan di-push `make release`. Sejak v0.1.19 `bq` default (buildx) juga INLINE dengan aturan tag-first ini.
 - Bisa digabung dengan `--clone`: `bq --clone owner/repo staging --compose` → clone → cd → `make build/release ENV=staging`.
+
+### 7.20 Native GitHub REST + Git (`GH_CLI=false`, default sejak v0.1.22)
+
+Menggantikan pemakaian `gh` CLI dengan `urllib` + `git` biasa. Cred disimpan di `~/.build-q/.env` (`GITHUB_TOKEN`, `GITHUB_USER`).
+
+- `build_q/github_api.py` — stdlib wrapper: `get_contents_raw`, `get_commit_sha`, `get_user_login`, `get_auth_token`, `clone`, `set_secret` (butuh `pynacl`), `create_pull_request`, `list_open_prs`.
+- Toggle `GH_CLI=true` masih tersedia untuk fallback ke `gh` CLI (deprecated, rencana hapus v0.2.0).
+- Scope PAT minimum: `repo` + `workflow` + `read:user` (workflow wajib untuk `--pr-fix` yang menyentuh `.github/workflows/*`).
+
+### 7.21 Rollout Suggestions Pasca-Build
+
+Setelah build sukses (atau `--dry-run`), `bq` cetak 2 perintah siap copy-paste yang membungkus tools eksternal `set-image` (imperative `kubectl set image` + `rollout status --watch`) dan `gitops-set-image` (declarative patch YAML di repo GitOps + push).
+
+- Path template GitOps: `{infra}/{ns}/{deployment}_deployment.yaml`. `infra=cce` (Huawei) default, `k8s` untuk SLS. Override: `--infra {cce,k8s}` atau `--gitops-path`.
+- Namespace fallback: `--ns` > `<env>-<cicd.PROJECT>` > `<env>-<NS_SUFFIX>`. Sejak v0.1.22 `cicd.PROJECT` menang atas `NS_SUFFIX` global.
+- Prefix image: `DOCKERHUB_ORG` bila di-set, else `REGISTRY_URL`.
+- Suggestion hanya PRINT — tidak eksekusi.
+
+### 7.22 Verifikasi Kesiapan Repo (`--check`)
+
+`bq --check <repo> <ref> --remote` — cek tanpa clone: repo/ref accessible, cicd config valid, artifact `init-jx` exist **dan match template terkini** (byte compare setelah normalize), image di registry (tag-aware sejak v0.1.23), dan file deployment GitOps.
+
+- Exit 0 bila wajib lulus (repo/ref + cicd), 1 bila miss.
+- Warning `outdated:*` → suggestion `bq --pr-fix <repo> <ref>` otomatis dicetak.
+
+### 7.23 One-Shot Fix (`--pr-fix`)
+
+`bq --pr-fix <repo> <ref>` — 11 langkah otomatis: preflight → clone shallow → branch `fix/jx-init-<ts>` → regenerate 4 artifact via template + cicd ctx → commit → push → set 2 repo secrets (`WEBHOOK_TRIGGER_URL/TOKEN`) via libsodium → open PR ke `ref` → cleanup.
+
+- Preflight: `GITHUB_TOKEN` (scope `workflow`), `WEBHOOK_TRIGGER_TOKEN` (auto-fetch dari k8s bila kosong, disimpan ke `.env`), `pynacl`.
+- Flag: `--pr-branch NAME`, `--keep-workdir`, `--dry-run` (skip push/secrets/PR).
+- Deduplikasi: bila PR untuk branch fix sudah open, print URL eksisting.
+- Default `JX_KUBE_CONTEXT=hw-dev` (sejak v0.1.25).
 
 ---
 
@@ -368,7 +403,7 @@ Alternatif eksekusi build: jalankan `make build ENV=<env> && make release ENV=<e
 bq [<repo> [<ref>]] [OPTIONS]
 ```
 
-Flag penting: `--local`, `--remote`, `--clone <owner/repo>`, `--clean`, `--compose`, `--cicd <path>`, `--context <dir>`, `-f/--dockerfile`, `-t/--tag`, `--push/--no-push`, `--image-check/--no-image-check/--rebuild`, `--platform`, `--build-arg`, `--secret`, `--gh-auth`, `--dry-run`, `--init`, `--force`, `--config`, `--init-jx`, `--init-legacy`, `--gh-action-init`, `--init-secrets`, `--fix-dockerfile [PATH]`, `--token`, `--version`.
+Flag penting: `--local`, `--remote`, `--clone <owner/repo>`, `--clean`, `--compose`, `--cicd <path>`, `--context <dir>`, `-f/--dockerfile`, `-t/--tag`, `--push/--no-push`, `--image-check/--no-image-check/--rebuild`, `--platform`, `--build-arg`, `--secret`, `--gh-auth`, `--dry-run`, `--init`, `--force`, `--config`, `--init-jx`, `--init-legacy`, `--gh-action-init`, `--init-secrets`, `--fix-dockerfile [PATH]`, `--token`, `--version`. **Sejak v0.1.18+:** `--ns <name>`, `--infra {cce,k8s}`, `--gitops-path <path>` (rollout overrides). **Sejak v0.1.22+:** `--check`. **Sejak v0.1.24+:** `--pr-fix`, `--pr-branch <name>`, `--keep-workdir`.
 
 Default: `--push=True`, `--image-check=True`, `--platform=linux/amd64`, secret `netrc` otomatis.
 
@@ -377,21 +412,28 @@ Default: `--push=True`, `--image-check=True`, `--platform=linux/amd64`, secret `
 ```mermaid
 flowchart TB
     User["👤 User / AI Agent"] --> CLI
-    subgraph Package["build_q/ (Python 3.7+, stdlib only)"]
+    subgraph Package["build_q/ (Python 3.7+, stdlib only; pynacl opt untuk set_secret)"]
       CLI["cli.py<br/>argparse + orchestration"]
-      Builder["builder.py<br/>build_command, run_build,<br/>run_compose, ensure_builder,<br/>check_image_exists,<br/>_predict_image_tag,<br/>init_jx, init_legacy,<br/>init_gh_action, init_secrets,<br/>fix_dockerfile"]
-      Config["config.py<br/>load_config, init_config,<br/>load_local_cicd,<br/>~/.build-q/.env loader"]
-      Templates["templates.py<br/>MAKEFILE_TPL, COMPOSE_TPL,<br/>DOCKERFILE_TPL, TRIGGER_CI_TPL,<br/>MAKEFILE_LEGACY_TPL,<br/>COMPOSE_LEGACY_TPL"]
-      CLI --> Builder
-      CLI --> Config
-      Builder --> Config
-      Builder --> Templates
+      Builder["builder.py<br/>build_command, run_build,<br/>run_compose, init_jx, init_legacy,<br/>init_gh_action, init_secrets"]
+      Check["check.py<br/>run_check (7 sub-cek)"]
+      PRFix["pr_fix.py<br/>run_pr_fix (11 langkah)"]
+      Rollout["rollout.py<br/>compute + render suggestion"]
+      GhApi["github_api.py<br/>REST + libsodium set_secret,<br/>create_pull_request"]
+      Common["_common.py<br/>INIT_ARTIFACTS, fetch_cicd_data,<br/>init_ctx, normalize_text"]
+      Config["config.py<br/>load_config, save_env_value,<br/>~/.build-q/.env loader"]
+      Templates["templates.py"]
+      CLI --> Builder & Check & PRFix
+      Check & PRFix --> Common & GhApi & Templates
+      Builder --> Common & Templates & Rollout
+      Builder & Check & PRFix --> Config
+      GhApi --> Config
     end
     Builder --> Docker["docker buildx"]
-    Builder --> Gh["gh CLI"]
-    Builder --> Kubectl["kubectl (opsional)"]
+    Builder & CLI --> Gh["gh CLI (legacy, GH_CLI=true)"]
+    Builder & PRFix --> Kubectl["kubectl (opsional)"]
     Builder --> Registry[("Docker Registry")]
-    CLI --> Git["git"]
+    CLI & GhApi & PRFix --> Git["git"]
+    GhApi & PRFix --> GitHub[("GitHub REST API")]
 ```
 
 Distribusi via `pyproject.toml` (setuptools) → dua entry point script: `build-q` & `bq`.
@@ -401,8 +443,9 @@ Distribusi via `pyproject.toml` (setuptools) → dua entry point script: `build-
 - Python 3.7+ (standard library only).
 - Docker Engine + Buildx plugin.
 - Git (opsional; wajib untuk auto-detect & mode local).
-- GitHub CLI `gh` (wajib untuk `--clone`, `--remote`, `--gh-auth`, `--init-secrets`, `--gh-action-init`).
-- `kubectl` (opsional; hanya untuk fetch token webhook otomatis).
+- GitHub credential: `GITHUB_TOKEN` di `~/.build-q/.env` (scope: `repo`, `workflow`, `read:user`). GitHub CLI `gh` opsional (mode legacy `GH_CLI=true`; default sejak v0.1.22: `GH_CLI=false` = native REST).
+- `kubectl` (opsional; untuk fetch webhook token otomatis pada `--pr-fix` preflight; default context `hw-dev`).
+- `pynacl` (opsional; wajib untuk `--pr-fix` dan `--init-secrets` di mode native — enkripsi libsodium repo secret).
 
 ## 11. Release Process
 
@@ -440,6 +483,17 @@ sequenceDiagram
 
 ## 13. Changelog Ringkas
 
+- **0.1.27** — DRY refactor Fase 1: modul baru `_common.py` (`INIT_ARTIFACTS`, `fetch_cicd_data`, `init_ctx_from_cicd`, `normalize_text`); `github_api.normalize_repo` public; hapus 4× normalisasi repo inline + 2× cicd fetch loop di check/pr_fix + duplikat helper `_normalize`/`_init_ctx`. Zero-behavior-change (~165 LOC reduksi). PRD di-sync ke v0.1.27.
+- **0.1.26** — UX fix: `--pr-fix` push gagal karena token kurang scope `workflow` → pesan 4-langkah perbaikan konkret + update template `.env`.
+- **0.1.25** — Default `JX_KUBE_CONTEXT=hw-dev` (cluster JX Qoin) + error preflight informatif.
+- **0.1.24** — `bq --pr-fix <repo> <ref>`: 11-langkah one-shot fix (branch + regenerate 4 artifact + push + set 2 repo secrets + open PR); modul baru `pr_fix.py`; `github_api.create_pull_request` + `list_open_prs`; `config.save_env_value`.
+- **0.1.23** — `--check` tag-aware (`:v2.2.1` bukan `:280022c`) + init artifact MATCH template terkini (deteksi OUTDATED via render + normalize compare). Bonus: `_BUNDLED_DOCKERFILE` → raw string (fix SyntaxWarning + `\n` literal untuk `printf`).
+- **0.1.22** — Fitur `bq --check`, default `GH_CLI=false`, ns fallback prefer `cicd.PROJECT` atas `NS_SUFFIX` global.
+- **0.1.21** — Fix: `bq` default (buildx) auto-inject `GITHUB_USER/GITHUB_TOKEN` build-arg (INLINE dgn compose.yaml).
+- **0.1.20** — Fix: pre-clone/pre-remote tag prediction hormati git tag ref (v1.0.1 → `:v1.0.1`, bukan `:64a92b4`).
+- **0.1.19** — Fix: `bq` default (buildx) sinkron dgn `--compose` — kedua mode pakai `get_local_tag_or_commit()` (tag-first).
+- **0.1.18** — Rollout suggestion pasca-build: `set-image` (imperative) + `gitops-set-image` (declarative GitOps). Flag `--ns`, `--infra`, `--gitops-path`. Config baru: `DOCKERHUB_*`, `GITOPS_*`, `NS_SUFFIX`. Modul `rollout.py`.
+- **0.1.17** — Toggle `GH_CLI` + jalur native REST + git (`build_q/github_api.py`, stdlib `urllib`); `--init-secrets` native via `pynacl` + libsodium; cred `GITHUB_USER/TOKEN` di `~/.build-q/.env`. Fallback `cicd/cicd.json` → `cicd.json` root.
 - **0.1.11** — bug fix: early image check di `run_build`/`run_compose` (dipanggil sebelum `ensure_builder` & sebelum wajib `cicd.json`). Repo tanpa `cicd/cicd.json` sekarang bisa memanfaatkan skip idempotency.
 - **0.1.10** — `--init-jx`, `--init-secrets`, `--fix-dockerfile`, `--gh-auth`, `--init-legacy`, `--gh-action-init`, `--compose`, remote SSH → HTTPS fallback, ekspansi `--fix-dockerfile` (standalone netrc + `MAINTAINER` + legacy `ENV`).
 
