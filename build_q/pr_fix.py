@@ -140,9 +140,15 @@ def run_pr_fix(
     print(f"\n📝 Regenerating artifacts (ctx: IMAGE={ctx['IMAGE']} PROJECT={ctx['PROJECT']} PORT={ctx['PORT']}):")
     changes: List[str] = []
     for path_str, tpl_name in INIT_ARTIFACTS:
+        target = repo_dir / path_str
+        # Preserve Dockerfile bila sudah ada — bisa jadi hasil kustomisasi
+        # (multi-stage khusus, base image lain, tambah RUN). Regenerasi bakal
+        # menimpa kerja tim.
+        if path_str == "Dockerfile" and target.exists():
+            print(f"   ⏭  {path_str} (preserved — sudah ada, tidak di-overwrite)")
+            continue
         tpl = load_template(tpl_name)
         new_content = render(tpl, ctx) if tpl_name != "trigger_ci" else tpl
-        target = repo_dir / path_str
         current = target.read_text() if target.exists() else ""
         if normalize_text(current) == normalize_text(new_content):
             print(f"   ⏭  {path_str} (already up-to-date)")
