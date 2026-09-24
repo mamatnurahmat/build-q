@@ -65,15 +65,22 @@ def _preflight(config: Dict) -> Optional[str]:
 
     webhook = config["webhook"]
     if not webhook["trigger_token"]:
-        print("🔐 WEBHOOK_TRIGGER_TOKEN kosong — auto-fetch dari k8s ...")
+        ctx = webhook["k8s_context"] or "(current)"
+        ns = webhook["k8s_namespace"]
+        secret = webhook["k8s_secret"]
+        print(f"🔐 WEBHOOK_TRIGGER_TOKEN kosong — auto-fetch dari k8s "
+              f"(ctx={ctx}, ns={ns}, secret={secret}) ...")
         from .builder import _fetch_jx_token
         token = _fetch_jx_token(
             webhook["k8s_context"], webhook["k8s_namespace"], webhook["k8s_secret"]
         )
         if not token:
             return (
-                "Gagal fetch webhook token dari k8s. Set manual di ~/.build-q/.env: "
-                "WEBHOOK_TRIGGER_TOKEN=<value>"
+                f"Gagal fetch webhook token dari k8s (ctx={ctx}, ns={ns}, secret={secret}).\n"
+                "   Pilihan perbaikan:\n"
+                "     a) Set kubectl context yg punya jenkins-x: kubectl config use-context hw-dev\n"
+                "     b) Ubah JX_KUBE_CONTEXT di ~/.build-q/.env (default: hw-dev)\n"
+                "     c) Set token manual: WEBHOOK_TRIGGER_TOKEN=<value> di ~/.build-q/.env"
             )
         save_env_value("WEBHOOK_TRIGGER_TOKEN", token)
         print(f"   ✅ tersimpan ke ~/.build-q/.env (len={len(token)})")

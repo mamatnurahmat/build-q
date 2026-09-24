@@ -61,7 +61,7 @@ def load_config() -> Dict[str, Any]:
         "webhook": {
             "trigger_url": os.getenv("WEBHOOK_TRIGGER_URL", "https://cicd-hw.qoin.id/trigger"),
             "trigger_token": os.getenv("WEBHOOK_TRIGGER_TOKEN", ""),
-            "k8s_context": os.getenv("JX_KUBE_CONTEXT", ""),
+            "k8s_context": os.getenv("JX_KUBE_CONTEXT", "hw-dev"),
             "k8s_namespace": os.getenv("JX_KUBE_NAMESPACE", "jenkins-x"),
             "k8s_secret": os.getenv("JX_TOKEN_SECRET", "webhook-trigger-token"),
         },
@@ -173,8 +173,9 @@ GITHUB_ORG=
 # Jenkins X webhook trigger — used by `bq --init-secrets` to configure GitHub Actions
 WEBHOOK_TRIGGER_URL=https://cicd-hw.qoin.id/trigger
 # Optional: kubectl context/namespace/secret for fetching the trigger token.
-# Leave JX_KUBE_CONTEXT empty to use current kubectl context.
-JX_KUBE_CONTEXT=
+# Default JX_KUBE_CONTEXT=hw-dev (cluster Jenkins X Qoin). Kosongkan untuk pakai
+# current kubectl context.
+JX_KUBE_CONTEXT=hw-dev
 JX_KUBE_NAMESPACE=jenkins-x
 JX_TOKEN_SECRET=webhook-trigger-token
 # WEBHOOK_TRIGGER_TOKEN: auto-fetched dari k8s pada `bq --pr-fix` preflight
