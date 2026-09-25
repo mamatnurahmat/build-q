@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{APP}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: {{APP}}
+    env: {{ENV}}
+    project: {{PROJECT}}
+    role: {{ROLE}}
+spec:
+  replicas: {{REPLICAS}}
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: {{APP}}
+      env: {{ENV}}
+      project: {{PROJECT}}
+      role: {{ROLE}}
+  template:
+    metadata:
+      labels:
+        app: {{APP}}
+        env: {{ENV}}
+        project: {{PROJECT}}
+        role: {{ROLE}}
+    spec:
+      imagePullSecrets:
+        - name: {{IMAGE_PULL_SECRET}}
+      nodeSelector:
+        cce.cloud.com/cce-nodepool: {{NODEPOOL}}
+      containers:
+        - name: {{APP}}
+          image: {{IMAGE_FULL}}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: {{PORT}}
+              protocol: TCP
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: {{DOTNET_ENV}}
+            - name: DOTNET_ENVIRONMENT
+              value: {{DOTNET_ENV}}
+          volumeMounts:
+            - name: tz-config
+              mountPath: /etc/localtime
+            - name: file-config-volume
+              mountPath: /app/appsettings.{{DOTNET_ENV}}.json
+              subPath: appsettings.{{DOTNET_ENV}}.json
+              readOnly: true
+      volumes:
+        - name: tz-config
+          hostPath:
+            path: /usr/share/zoneinfo/Asia/Jakarta
+            type: ""
+        - name: file-config-volume
+          secret:
+            secretName: file-config-{{APP}}-{{ENV}}
+            defaultMode: 420

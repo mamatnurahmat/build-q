@@ -185,6 +185,46 @@ flowchart LR
     Write --> Next(["bq --no-push --rebuild<br/>untuk test build"])
 ```
 
+### 6.8 `--bootstrap-k8s` Flow (bootstrap manifest K8s ke GitOps)
+
+```mermaid
+flowchart TD
+    A["bq --bootstrap-k8s <repo> <ref><br/>--gitops-repo r --gitops-branch b<br/>--path-yaml p"] --> B{"Preflight<br/>GH_CLI=false<br/>GITHUB_TOKEN"}
+    B -- OK --> C["Derive env dari ref<br/>+ namespace dari path-yaml<br/>(atau --namespace override)"]
+    B -- missing --> Z1(["Abort"])
+    C --> D["Fetch cicd/cicd.json<br/>via REST (native)"]
+    D --> E{"Detect stack<br/>(probe berurutan)"}
+    E -- "appsettings.Env.json" --> F1["stack=dotnet"]
+    E -- ".env.env / .env" --> F2["stack=default"]
+    E -- ".env.example" --> F3["stack=default<br/>⚠️ template"]
+    E -- none --> Z2(["Abort: no config"])
+    F1 & F2 & F3 --> G["Build render ctx<br/>APP, ENV, NS, PROJECT, ROLE,<br/>NODEPOOL, IMAGE_FULL, PORT,<br/>IMAGE_PULL_SECRET, CONFIG_B64"]
+    G --> H["Clone gitops shallow @ base branch"]
+    H --> I["Create branch bootstrap/app-env-ts"]
+    I --> J["Render 3 YAML dari templates gist:<br/>Secret + Deployment + Service"]
+    J --> K["Update kustomization.yaml<br/>append 2 entries (idempotent)"]
+    K --> L{"--apply-secret?"}
+    L -- yes + non-prod + missing --> M["kubectl apply Secret"]
+    L -- yes + production --> M2["SKIP (guardrail)"]
+    L -- yes + already exists --> M3["SKIP (idempotent)"]
+    L -- no --> N
+    M & M2 & M3 --> N{"--force-recreate-deploy?"}
+    N -- yes + drift + non-prod --> O["kubectl delete deploy<br/>→ ArgoCD selfHeal re-create"]
+    N -- no / no drift / prod --> P
+    O --> P{"Git diff?"}
+    P -- empty --> Q1(["already up-to-date<br/>exit 0"])
+    P -- has changes --> Q2["Commit + Push + Open PR"]
+    Q2 --> R(["Return PR URL"])
+```
+
+**Standar file yang di-generate ke `{path-yaml}/`:**
+- `file-config/{app}-{env}.yaml` — Secret data `.env` (default) atau `appsettings.{Env}.json` (dotnet)
+- `{app}_deployment.yaml` — 4-tuple labels, RollingUpdate, imagePullSecrets, nodeSelector, tz-config
+- `{app}_services.yaml` — ClusterIP, targetPort `http`
+- `kustomization.yaml` — append entries
+
+**Selector consistency guarantee:** `spec.selector.matchLabels`, `spec.template.metadata.labels`, dan Service `spec.selector` dirender dari placeholder `{{APP}}` tunggal → tidak mungkin mismatch by construction.
+
 ### 6.7 Onboarding Journey (Pemula, 5 menit pertama)
 
 ```mermaid
@@ -395,6 +435,76 @@ Setelah build sukses (atau `--dry-run`), `bq` cetak 2 perintah siap copy-paste y
 - Deduplikasi: bila PR untuk branch fix sudah open, print URL eksisting.
 - Default `JX_KUBE_CONTEXT=hw-dev` (sejak v0.1.25).
 
+### 7.24 Bootstrap Manifest K8s ke GitOps (`--bootstrap-k8s`, sejak v0.1.29)
+
+`bq --bootstrap-k8s <repo> <ref> --gitops-repo <r> --gitops-branch <b> --path-yaml <p>` — one-shot bootstrap Kubernetes manifest ke repo GitOps sesuai standar Qoin CCE. Flow lengkap ada di §6.8.
+
+**Yang di-generate ke `{path-yaml}/`:**
+- `file-config/{app}-{env}.yaml` — Secret (data key `.env` untuk go/node/rust, `appsettings.{Env}.json` untuk dotnet), base64 dari config file source
+- `{app}_deployment.yaml` — Deployment: labels 4-tuple `{app,env,project,role}` (selector immutable — match template.labels), `imagePullSecrets: [{name: regcred}]`, `nodeSelector: cce.cloud.com/cce-nodepool: <nodepool>`, `imagePullPolicy: Always`, `RollingUpdate` strategy, tz-config volume `/etc/localtime`, secret volume mount ke `/app/.env` atau `/app/appsettings.{Env}.json`
+- `{app}_services.yaml` — Service ClusterIP, `targetPort: http` (named port), selector 1-tuple `{app: X}` (subset match — cocok dengan pod 4-tuple)
+- `kustomization.yaml` — append 2 entries di `resources:` (idempotent — skip bila sudah ada)
+
+**Stack auto-detect (probe berurutan di source repo `{repo}@{ref}`):**
+1. `appsettings.{DotnetEnv}.json` → dotnet
+2. `.env.{env}` → default
+3. `.env` → default
+4. `.env.example` → default (⚠️ template — value dummy)
+
+Override: `--stack {dotnet|default}`.
+
+**Env derivation dari `<ref>`:**
+- `develop` → develop / Development
+- `staging` → staging / Staging
+- `sandbox` → sandbox / Sandbox
+- `main` / `master` / tag `v*` → production / Production
+
+Override: `--env NAME` (contoh cross-env: `--env staging` walau source ref `main`).
+
+**Nodepool derivation:** `{namespace}-{manager|service}` — manager kalau `cicd.NODETYPE=front`, service kalau `back`. Override: `--nodepool NAME` (mis. `production-nodepool-service` untuk cluster hw-pro-q yang pakai pattern berbeda).
+
+**Namespace decoupling (cross-env):** default `namespace` diambil dari segmen terakhir `--path-yaml` (mis. `cce/develop-qoin` → `develop-qoin`). Override: `--namespace NAME` — berguna saat gitops folder di `cce/staging-qoin/` tapi apply real ke `production-qoin` di cluster prod.
+
+**Opsional side-effects ke cluster (opt-in):**
+- `--apply-secret` + `--kube-context CTX` → kubectl apply Secret bila belum ada. **Guardrail production:** refuse (`env=production` → PR-only, wajib review). Idempotent — skip bila sudah ada.
+- `--force-recreate-deploy` + `--kube-context CTX` → cek `spec.selector.matchLabels` cluster vs rendered; kalau drift → `kubectl delete deploy` (ArgoCD selfHeal akan re-create dari GitOps spec baru). K8s `spec.selector` IMMUTABLE, tanpa recreate apply akan reject. **Guardrail production:** refuse (production wajib manual blue-green/canary).
+
+**Idempotency guarantee:**
+- Secret sudah ada → skip apply
+- YAML content sama dengan origin → 0 git diff → skip commit
+- Kustomization entry sudah include → skip update
+- Selector match / Deployment belum ada → skip recreate
+- 0 diff sama sekali → print "already up-to-date" + exit 0 tanpa PR
+
+**Selector consistency by construction:** template pakai placeholder `{{APP}}` tunggal untuk `spec.selector.matchLabels`, `spec.template.metadata.labels`, dan Service `spec.selector`. Satu render → tidak mungkin drift.
+
+**Failure mode terobservasi (dari incident nyata):**
+| Symptom | Cause | Mitigation |
+|---|---|---|
+| `ImagePullBackOff` (`unexpected media type text/html`) | Docker Hub rate-limit anon pull | Template include `imagePullSecrets: regcred` sejak v0.1.29 |
+| `spec.selector: field is immutable` | Old deploy 1-tuple, new 4-tuple | `--force-recreate-deploy` (non-prod) |
+| Pod crash `Env X required` | `.env.example` = template placeholder | Patch Secret manual + rollout restart |
+| PR konflik `kustomization.yaml` | PR paralel merge duluan | Close & re-run (idempotent dari HEAD baru) |
+
+**Flag lengkap:**
+
+| Flag | Default | Keterangan |
+|---|---|---|
+| `--gitops-repo OWNER/REPO` | wajib | Target repo GitOps |
+| `--gitops-branch BRANCH` | wajib | Base branch untuk PR |
+| `--path-yaml PATH` | wajib | Folder tujuan (mis. `cce/develop-qoin`) |
+| `--namespace NAME` | dari path-yaml | Override K8s namespace |
+| `--nodepool NAME` | `{ns}-{svc\|manager}` | Override CCE nodepool selector |
+| `--env NAME` | dari ref | Override env label |
+| `--stack {dotnet,default}` | auto | Paksa stack |
+| `--replicas N` | 2 | Replicas Deployment |
+| `--image-pull-secret NAME` | `regcred` | Nama imagePullSecret |
+| `--apply-secret` | off | kubectl apply Secret (opt-in, non-prod) |
+| `--kube-context NAME` | current | kubectl context |
+| `--force-recreate-deploy` | off | Delete deploy saat drift (opt-in, non-prod) |
+| `--dry-run` | execute | Skip push/PR |
+| `--keep-workdir` | delete | Simpan workdir untuk inspeksi |
+
 ---
 
 ## 8. CLI Contract
@@ -403,7 +513,7 @@ Setelah build sukses (atau `--dry-run`), `bq` cetak 2 perintah siap copy-paste y
 bq [<repo> [<ref>]] [OPTIONS]
 ```
 
-Flag penting: `--local`, `--remote`, `--clone <owner/repo>`, `--clean`, `--compose`, `--cicd <path>`, `--context <dir>`, `-f/--dockerfile`, `-t/--tag`, `--push/--no-push`, `--image-check/--no-image-check/--rebuild`, `--platform`, `--build-arg`, `--secret`, `--gh-auth`, `--dry-run`, `--init`, `--force`, `--config`, `--init-jx`, `--init-legacy`, `--gh-action-init`, `--init-secrets`, `--fix-dockerfile [PATH]`, `--token`, `--version`. **Sejak v0.1.18+:** `--ns <name>`, `--infra {cce,k8s}`, `--gitops-path <path>` (rollout overrides). **Sejak v0.1.22+:** `--check`. **Sejak v0.1.24+:** `--pr-fix`, `--pr-branch <name>`, `--keep-workdir`.
+Flag penting: `--local`, `--remote`, `--clone <owner/repo>`, `--clean`, `--compose`, `--cicd <path>`, `--context <dir>`, `-f/--dockerfile`, `-t/--tag`, `--push/--no-push`, `--image-check/--no-image-check/--rebuild`, `--platform`, `--build-arg`, `--secret`, `--gh-auth`, `--dry-run`, `--init`, `--force`, `--config`, `--init-jx`, `--init-legacy`, `--gh-action-init`, `--init-secrets`, `--fix-dockerfile [PATH]`, `--token`, `--version`. **Sejak v0.1.18+:** `--ns <name>`, `--infra {cce,k8s}`, `--gitops-path <path>` (rollout overrides). **Sejak v0.1.22+:** `--check`. **Sejak v0.1.24+:** `--pr-fix`, `--pr-branch <name>`, `--keep-workdir`. **Sejak v0.1.29+:** `--bootstrap-k8s`, `--gitops-repo`, `--gitops-branch`, `--path-yaml`, `--namespace`, `--nodepool`, `--env`, `--stack`, `--replicas`, `--image-pull-secret`, `--apply-secret`, `--kube-context`, `--force-recreate-deploy`.
 
 Default: `--push=True`, `--image-check=True`, `--platform=linux/amd64`, secret `netrc` otomatis.
 
@@ -483,6 +593,8 @@ sequenceDiagram
 
 ## 13. Changelog Ringkas
 
+- **0.1.29** — `bq --bootstrap-k8s`: one-shot bootstrap manifest K8s (Secret + Deployment + Service + kustomization) ke repo GitOps sesuai standar Qoin CCE. Modul baru `bootstrap.py`; 5 template YAML baru di gist (secret/deployment × dotnet/default + services); auto-detect stack (probe `appsettings.{Env}.json` → `.env.{env}` → `.env` → `.env.example`); labels 4-tuple `{app,env,project,role}` dengan selector by construction (impossible mismatch); `imagePullSecrets: regcred` + `nodeSelector: cce.cloud.com/cce-nodepool` + tz-config volume + `imagePullPolicy: Always` + `RollingUpdate` strategy; auto-update `kustomization.yaml` (idempotent); flag `--namespace`/`--nodepool`/`--env` override untuk cross-env (mis. gitops di `staging-qoin/` tapi apply ke `production-qoin`); opsional `--apply-secret` (guardrail production PR-only) + `--force-recreate-deploy` (untuk selector-immutable drift, guardrail production manual). Dedupe PR filter by `head.ref` (fix false-positive dari GitHub API filter tanpa `owner:branch`). PR body + branch naming `bootstrap/{app}-{env}-{ts}`. Test end-to-end verified di 4 repo Rust ke `develop-qoin` (hw-dev) + cross-env `production-qoin` (hw-pro-q). Dokumentasi §6.8 + §7.24.
+- **0.1.28** — `--pr-fix`: preserve existing Dockerfile (skip regenerate) — cegah overwrite kustomisasi tim.
 - **0.1.27** — DRY refactor Fase 1: modul baru `_common.py` (`INIT_ARTIFACTS`, `fetch_cicd_data`, `init_ctx_from_cicd`, `normalize_text`); `github_api.normalize_repo` public; hapus 4× normalisasi repo inline + 2× cicd fetch loop di check/pr_fix + duplikat helper `_normalize`/`_init_ctx`. Zero-behavior-change (~165 LOC reduksi). PRD di-sync ke v0.1.27.
 - **0.1.26** — UX fix: `--pr-fix` push gagal karena token kurang scope `workflow` → pesan 4-langkah perbaikan konkret + update template `.env`.
 - **0.1.25** — Default `JX_KUBE_CONTEXT=hw-dev` (cluster JX Qoin) + error preflight informatif.

@@ -215,6 +215,93 @@ Config file: ~/.build-q/.env
         action="store_true",
         help="Jangan hapus /tmp workdir setelah --pr-fix selesai (untuk debugging)",
     )
+    parser.add_argument(
+        "--cicd-webhook",
+        action="store_true",
+        help="Cek apakah repo sudah terpasang webhook cicd-hw.qoin.id/hook. "
+             "Berjalan sendiri (`bq --cicd-webhook [<repo>]`) atau berbarengan "
+             "dengan --pr-fix (dijalankan setelah pr-fix sukses).",
+    )
+    parser.add_argument(
+        "--bootstrap-k8s",
+        action="store_true",
+        help="Bootstrap manifest K8s (Secret + Deployment + Service) ke repo GitOps. "
+             "Butuh --gitops-repo, --gitops-branch, --path-yaml. "
+             "Usage: bq --bootstrap-k8s <repo> <ref> --gitops-repo <r> "
+             "--gitops-branch <b> --path-yaml <p>",
+    )
+    parser.add_argument(
+        "--gitops-repo",
+        metavar="OWNER/REPO",
+        help="Target GitOps repo untuk --bootstrap-k8s (mis. Qoin-Digital-Indonesia/gitops)",
+    )
+    parser.add_argument(
+        "--gitops-branch",
+        metavar="BRANCH",
+        help="Base branch di GitOps repo untuk PR --bootstrap-k8s (mis. main)",
+    )
+    parser.add_argument(
+        "--path-yaml",
+        metavar="PATH",
+        help="Folder tujuan di GitOps repo (mis. cce/production-qoin). "
+             "Segmen terakhir jadi namespace.",
+    )
+    parser.add_argument(
+        "--stack",
+        choices=["dotnet", "default"],
+        help="Override deteksi stack untuk --bootstrap-k8s "
+             "(dotnet → appsettings.{Env}.json ; default → .env)",
+    )
+    parser.add_argument(
+        "--env",
+        metavar="NAME",
+        help="Override env yg diturunkan dari <ref> untuk --bootstrap-k8s "
+             "(develop/staging/production)",
+    )
+    parser.add_argument(
+        "--replicas",
+        type=int,
+        default=2,
+        metavar="N",
+        help="Jumlah replicas di Deployment untuk --bootstrap-k8s (default: 2)",
+    )
+    parser.add_argument(
+        "--apply-secret",
+        action="store_true",
+        help="Setelah render, apply Secret ke cluster via kubectl bila belum ada "
+             "(hanya Secret; Deployment/Service tetap via PR). Untuk --bootstrap-k8s.",
+    )
+    parser.add_argument(
+        "--kube-context",
+        metavar="NAME",
+        help="kubectl context untuk --apply-secret (default: current context)",
+    )
+    parser.add_argument(
+        "--image-pull-secret",
+        metavar="NAME",
+        default="regcred",
+        help="Nama imagePullSecret di Deployment (default: regcred — standar Qoin)",
+    )
+    parser.add_argument(
+        "--force-recreate-deploy",
+        action="store_true",
+        help="Delete Deployment lama bila selector.matchLabels drift dari ctx "
+             "(K8s selector IMMUTABLE). Butuh --kube-context. Refuse untuk "
+             "env=production. Untuk --bootstrap-k8s.",
+    )
+    parser.add_argument(
+        "--namespace",
+        metavar="NAME",
+        help="Override target K8s namespace (default: segmen terakhir --path-yaml). "
+             "Berguna untuk cross-env: gitops di cce/staging-qoin/ tapi apply "
+             "ke ns production-qoin di cluster prod.",
+    )
+    parser.add_argument(
+        "--nodepool",
+        metavar="NAME",
+        help="Override cce-nodepool selector (default: {namespace}-{manager|service}). "
+             "Berguna bila cluster pakai pattern beda mis. production-nodepool-service.",
+    )
 
     # Positional args (optional — auto-detected from git when --local is used)
     parser.add_argument("repo", nargs="?", help="Repository / service name")
@@ -376,6 +463,69 @@ Config file: ~/.build-q/.env
                 dry_run=args.dry_run,
                 keep_workdir=args.keep_workdir,
                 pr_branch=args.pr_branch,
+            )
+            if rc == 0 and args.cicd_webhook:
+                print()  # spacer
+                from .cicd_webhook import run_cicd_webhook_check
+                # Webhook check bersifat informatif — tidak mempengaruhi exit code pr-fix.
+                run_cicd_webhook_check(api_repo)
+            sys.exit(rc)
+
+        if args.cicd_webhook:
+            from .cicd_webhook import run_cicd_webhook_check
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            repo = args.repo
+            if not repo:
+                print("🔍 Auto-detect repo dari git ...")
+                try:
+                    info = get_git_info()
+                    repo = info["repo"]
+                    print(f"   repo: {repo}")
+                except BuildError as e:
+                    print(f"❌ {e}", file=sys.stderr)
+                    print("   Berikan <repo> eksplisit atau jalankan dari direktori git.",
+                          file=sys.stderr)
+                    sys.exit(1)
+            api_repo = normalize_repo(_expand_repo(repo, default_org))
+            sys.exit(run_cicd_webhook_check(api_repo))
+
+        if args.bootstrap_k8s:
+            missing = []
+            if not args.repo:            missing.append("<repo>")
+            if not args.ref:             missing.append("<ref>")
+            if not args.gitops_repo:     missing.append("--gitops-repo")
+            if not args.gitops_branch:   missing.append("--gitops-branch")
+            if not args.path_yaml:       missing.append("--path-yaml")
+            if missing:
+                print(
+                    "❌ Usage: bq --bootstrap-k8s <repo> <ref> --gitops-repo <r> "
+                    "--gitops-branch <b> --path-yaml <p>\n"
+                    f"   Kurang: {', '.join(missing)}",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            from .bootstrap import run_bootstrap_k8s
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            source_repo = normalize_repo(_expand_repo(args.repo, default_org))
+            gitops_repo = normalize_repo(_expand_repo(args.gitops_repo, default_org))
+            rc = run_bootstrap_k8s(
+                source_repo, args.ref,
+                gitops_repo, args.gitops_branch, args.path_yaml,
+                cicd_path=args.cicd,
+                dry_run=args.dry_run,
+                keep_workdir=args.keep_workdir,
+                replicas=args.replicas,
+                stack_override=args.stack,
+                env_override=args.env,
+                pr_branch=args.pr_branch,
+                apply_secret=args.apply_secret,
+                kube_context=args.kube_context,
+                image_pull_secret=args.image_pull_secret,
+                force_recreate_deploy=args.force_recreate_deploy,
+                namespace_override=args.namespace,
+                nodepool_override=args.nodepool,
             )
             sys.exit(rc)
 

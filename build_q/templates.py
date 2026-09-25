@@ -38,12 +38,18 @@ CACHE_DIR = Path.home() / ".build-q" / "templates"
 
 # Mapping nama logis (dipakai builder.py) → nama file di gist.
 TEMPLATE_FILES: Dict[str, str] = {
-    "makefile":         "Makefile.modern",
-    "compose":          "compose.yaml.modern",
-    "dockerfile":       "Dockerfile.modern",
-    "makefile_legacy":  "Makefile.legacy",
-    "compose_legacy":   "compose.yaml.legacy",
-    "trigger_ci":       "trigger-ci.yml",
+    "makefile":            "Makefile.modern",
+    "compose":             "compose.yaml.modern",
+    "dockerfile":          "Dockerfile.modern",
+    "makefile_legacy":     "Makefile.legacy",
+    "compose_legacy":      "compose.yaml.legacy",
+    "trigger_ci":          "trigger-ci.yml",
+    # bootstrap-k8s — 5 file YAML (secret + deployment untuk 2 stack, + service)
+    "secret_dotnet":       "secret.dotnet.yaml",
+    "secret_default":      "secret.default.yaml",
+    "deployment_dotnet":   "deployment.dotnet.yaml",
+    "deployment_default":  "deployment.default.yaml",
+    "services":            "services.yaml",
 }
 
 
@@ -662,16 +668,212 @@ jobs:
 
 
 # ============================================================
+# bootstrap-k8s templates — Secret/Deployment/Service standar.
+# Selector Deployment dan Service DIJAMIN match via placeholder `app: {{APP}}`
+# tunggal (rendering tunggal → selector konsisten by construction).
+# Mount path: dotnet → /app/appsettings.{{DOTNET_ENV}}.json ; default (go/node/rust) → /app/.env
+# ============================================================
+
+_BUNDLED_SECRET_DOTNET = """\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: file-config-{{APP}}-{{ENV}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: {{APP}}
+    env: {{ENV}}
+type: Opaque
+data:
+  appsettings.{{DOTNET_ENV}}.json: {{CONFIG_B64}}
+"""
+
+_BUNDLED_SECRET_DEFAULT = """\
+apiVersion: v1
+kind: Secret
+metadata:
+  name: file-config-{{APP}}-{{ENV}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: {{APP}}
+    env: {{ENV}}
+type: Opaque
+data:
+  .env: {{CONFIG_B64}}
+"""
+
+_BUNDLED_DEPLOYMENT_DOTNET = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{APP}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: {{APP}}
+    env: {{ENV}}
+    project: {{PROJECT}}
+    role: {{ROLE}}
+spec:
+  replicas: {{REPLICAS}}
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: {{APP}}
+      env: {{ENV}}
+      project: {{PROJECT}}
+      role: {{ROLE}}
+  template:
+    metadata:
+      labels:
+        app: {{APP}}
+        env: {{ENV}}
+        project: {{PROJECT}}
+        role: {{ROLE}}
+    spec:
+      imagePullSecrets:
+        - name: {{IMAGE_PULL_SECRET}}
+      nodeSelector:
+        cce.cloud.com/cce-nodepool: {{NODEPOOL}}
+      containers:
+        - name: {{APP}}
+          image: {{IMAGE_FULL}}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: {{PORT}}
+              protocol: TCP
+          env:
+            - name: ASPNETCORE_ENVIRONMENT
+              value: {{DOTNET_ENV}}
+            - name: DOTNET_ENVIRONMENT
+              value: {{DOTNET_ENV}}
+          volumeMounts:
+            - name: tz-config
+              mountPath: /etc/localtime
+            - name: file-config-volume
+              mountPath: /app/appsettings.{{DOTNET_ENV}}.json
+              subPath: appsettings.{{DOTNET_ENV}}.json
+              readOnly: true
+      volumes:
+        - name: tz-config
+          hostPath:
+            path: /usr/share/zoneinfo/Asia/Jakarta
+            type: ""
+        - name: file-config-volume
+          secret:
+            secretName: file-config-{{APP}}-{{ENV}}
+            defaultMode: 420
+"""
+
+_BUNDLED_DEPLOYMENT_DEFAULT = """\
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{APP}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: {{APP}}
+    env: {{ENV}}
+    project: {{PROJECT}}
+    role: {{ROLE}}
+spec:
+  replicas: {{REPLICAS}}
+  revisionHistoryLimit: 10
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: {{APP}}
+      env: {{ENV}}
+      project: {{PROJECT}}
+      role: {{ROLE}}
+  template:
+    metadata:
+      labels:
+        app: {{APP}}
+        env: {{ENV}}
+        project: {{PROJECT}}
+        role: {{ROLE}}
+    spec:
+      imagePullSecrets:
+        - name: {{IMAGE_PULL_SECRET}}
+      nodeSelector:
+        cce.cloud.com/cce-nodepool: {{NODEPOOL}}
+      containers:
+        - name: {{APP}}
+          image: {{IMAGE_FULL}}
+          imagePullPolicy: Always
+          ports:
+            - name: http
+              containerPort: {{PORT}}
+              protocol: TCP
+          volumeMounts:
+            - name: tz-config
+              mountPath: /etc/localtime
+            - name: file-config-volume
+              mountPath: /app/.env
+              subPath: .env
+              readOnly: true
+      volumes:
+        - name: tz-config
+          hostPath:
+            path: /usr/share/zoneinfo/Asia/Jakarta
+            type: ""
+        - name: file-config-volume
+          secret:
+            secretName: file-config-{{APP}}-{{ENV}}
+            defaultMode: 420
+"""
+
+_BUNDLED_SERVICES = """\
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{APP}}
+  namespace: {{NAMESPACE}}
+  labels:
+    app: {{APP}}
+    env: {{ENV}}
+    project: {{PROJECT}}
+    role: {{ROLE}}
+spec:
+  type: ClusterIP
+  selector:
+    app: {{APP}}
+  ports:
+    - name: http
+      port: {{PORT}}
+      targetPort: http
+      protocol: TCP
+"""
+
+
+# ============================================================
 # Registry fallback — dipakai load_template() sebagai layer terakhir bila
 # gist + cache tidak tersedia.
 # ============================================================
 _BUNDLED_FALLBACK: Dict[str, str] = {
-    "makefile":        _BUNDLED_MAKEFILE,
-    "compose":         _BUNDLED_COMPOSE,
-    "dockerfile":      _BUNDLED_DOCKERFILE,
-    "makefile_legacy": _BUNDLED_MAKEFILE_LEGACY,
-    "compose_legacy":  _BUNDLED_COMPOSE_LEGACY,
-    "trigger_ci":      _BUNDLED_TRIGGER_CI,
+    "makefile":            _BUNDLED_MAKEFILE,
+    "compose":             _BUNDLED_COMPOSE,
+    "dockerfile":          _BUNDLED_DOCKERFILE,
+    "makefile_legacy":     _BUNDLED_MAKEFILE_LEGACY,
+    "compose_legacy":      _BUNDLED_COMPOSE_LEGACY,
+    "trigger_ci":          _BUNDLED_TRIGGER_CI,
+    "secret_dotnet":       _BUNDLED_SECRET_DOTNET,
+    "secret_default":      _BUNDLED_SECRET_DEFAULT,
+    "deployment_dotnet":   _BUNDLED_DEPLOYMENT_DOTNET,
+    "deployment_default":  _BUNDLED_DEPLOYMENT_DEFAULT,
+    "services":            _BUNDLED_SERVICES,
 }
 
 
