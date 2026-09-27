@@ -413,8 +413,11 @@ def init_secrets(
 
 
 def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
-    """Scaffold Makefile / compose.yaml / Dockerfile / .github/workflows/trigger-ci.yml
-    from `cicd/cicd.json`.
+    """Scaffold Makefile / compose.yaml / Dockerfile dari `cicd/cicd.json`.
+
+    Standar trigger CI/CD sekarang via GitHub webhook `cicd-hw.qoin.id/hook`
+    (Fase 3 migrasi). `trigger-ci.yml` action TIDAK di-scaffold lagi. Setelah
+    scaffold, cek status webhook di repo dan beri saran register bila belum.
 
     Returns True if any file was written.
     """
@@ -447,8 +450,7 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
 
     from ._common import INIT_ARTIFACTS
     files = [
-        (Path(path),
-         load_template(tpl) if tpl == "trigger_ci" else render(load_template(tpl), ctx))
+        (Path(path), render(load_template(tpl), ctx))
         for path, tpl in INIT_ARTIFACTS
     ]
 
@@ -467,73 +469,66 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
     else:
         print(f"\n✅ Scaffolded {written} file(s).")
 
+    # ── Cek webhook (standar CI/CD baru, Fase 3) ──
     repo = detect_github_repo()
     if repo:
-        print(f"\n🔗 Detected GitHub remote: {repo} — configuring Actions secrets ...")
-        init_secrets(repo=repo)
+        print(f"\n🔗 Detected GitHub remote: {repo}")
+        try:
+            from .cicd_webhook import run_cicd_webhook_check
+            print("🔎 Cek status webhook (standar trigger CI/CD Fase 3+):")
+            run_cicd_webhook_check(repo)
+        except Exception as e:
+            print(f"⚠️  Cek webhook gagal: {e}", file=sys.stderr)
     else:
-        print("\nℹ️  No GitHub remote detected. After pushing the repo, configure secrets:")
-        print("   bq --init-secrets <owner>/<repo>")
+        print("\nℹ️  Git remote belum ada — setelah push repo, cek webhook:")
+        print("   bq --cicd-webhook <owner>/<repo>")
 
     print("\n📋 Next steps:")
     print("   • Review generated Dockerfile & adjust go build path (server.go or cmd/…)")
     print("   • Ensure .env.<env> files exist for each environment")
-    print("   • Commit and push to trigger Jenkins X pipeline")
+    print("   • Pastikan webhook cicd-hw.qoin.id/hook terpasang (lihat pesan di atas)")
+    print("   • Commit & push branch develop/staging/sandbox atau tag v* → auto-trigger pipeline")
     return written > 0
 
 
 def init_gh_action(token: Optional[str] = None) -> bool:
-    """Bootstrap .github/workflows/trigger-ci.yml sebagai satu-satunya workflow.
+    """DEPRECATED (Fase 3 migrasi): `trigger-ci.yml` action bukan lagi standar.
 
-    - Hapus semua file .yml/.yaml lain di .github/workflows/ (workflow lama)
-    - Tulis ulang trigger-ci.yml dari TRIGGER_CI_TPL
-    - Set WEBHOOK_TRIGGER_URL + WEBHOOK_TRIGGER_TOKEN via `gh secret set`
+    Standar sekarang: GitHub webhook `cicd-hw.qoin.id/hook` (di-relay ke
+    webhook-trigger service). Fungsi ini sekarang:
+    1. Print warning deprecation
+    2. Hapus `.github/workflows/trigger-ci.yml` kalau masih ada (cleanup lokal)
+    3. Cek status webhook di repo & beri saran register bila belum
     """
-    from .templates import load_template
+    print("⚠️  DEPRECATED: --gh-action-init tidak lagi menghasilkan trigger-ci.yml.")
+    print("   Standar CI/CD sekarang: GitHub webhook cicd-hw.qoin.id/hook.")
+    print("   Lihat: docs/pipeline-trigger-workflow.md di repo jenkins-x.\n")
 
-    workflows_dir = Path(".github/workflows")
-    workflows_dir.mkdir(parents=True, exist_ok=True)
-
-    trigger_path = workflows_dir / "trigger-ci.yml"
-
-    # 1. Hapus workflow lain
-    existing = [
-        p for p in workflows_dir.iterdir()
-        if p.is_file() and p.suffix in {".yml", ".yaml"} and p.name != "trigger-ci.yml"
-    ]
-    if existing:
-        print(f"🗑️  Menghapus {len(existing)} workflow lain di {workflows_dir}:")
-        for p in existing:
-            print(f"   • {p.name}")
-            p.unlink()
-    else:
-        print(f"ℹ️  Tidak ada workflow lain untuk dihapus di {workflows_dir}.")
-
-    # 2. Tulis ulang trigger-ci.yml (selalu overwrite — file standar dari gist)
+    trigger_path = Path(".github/workflows/trigger-ci.yml")
     if trigger_path.exists():
-        print(f"♻️  Overwrite existing {trigger_path}")
-    trigger_path.write_text(load_template("trigger_ci"))
-    print(f"✅ Wrote {trigger_path} (dari central gist)")
+        trigger_path.unlink()
+        print(f"🗑️  Hapus {trigger_path} (action tidak lagi dipakai).")
+    else:
+        print(f"ℹ️  {trigger_path} tidak ada — sudah bersih.")
 
-    # 3. Set webhook secrets (butuh git remote origin)
     repo = detect_github_repo()
     if not repo:
-        print("\n⚠️  Git remote origin belum ada — skip pengaturan secret.")
-        print("   Setelah push repo ke GitHub, jalankan:")
-        print("     bq --init-secrets <owner>/<repo>")
+        print("\n⚠️  Git remote origin belum ada. Setelah push repo, cek webhook:")
+        print("   bq --cicd-webhook <owner>/<repo>")
         return True
 
-    print(f"\n🔐 Setting webhook secrets on {repo} ...")
-    ok = init_secrets(repo=repo, token=token)
-    if not ok:
-        print("\n⚠️  Workflow ter-generate, tapi secret gagal di-set. "
-              "Perbaiki lalu jalankan `bq --init-secrets` lagi.", file=sys.stderr)
-        return False
+    print(f"\n🔎 Cek status webhook di {repo}:")
+    try:
+        from .cicd_webhook import run_cicd_webhook_check
+        rc = run_cicd_webhook_check(repo)
+    except Exception as e:
+        print(f"   ⚠️  {e}", file=sys.stderr)
+        rc = 1
 
     print("\n📋 Next steps:")
-    print("   • Commit & push perubahan .github/workflows/trigger-ci.yml")
-    print("   • Push branch develop/staging/master atau tag v* akan trigger pipeline JX")
-    return True
+    print("   • Kalau webhook belum terpasang, ikuti saran perintah di atas")
+    print("   • Push branch develop/staging/sandbox atau tag v* → auto-trigger via webhook")
+    return rc == 0
 
 
 def init_legacy(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:

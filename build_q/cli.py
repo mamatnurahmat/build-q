@@ -172,7 +172,9 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--init-jx",
         action="store_true",
-        help="Scaffold Makefile / compose.yaml / Dockerfile / trigger-ci.yml from cicd/cicd.json",
+        help="Scaffold Makefile / compose.yaml / Dockerfile dari cicd/cicd.json. "
+             "Standar trigger CI/CD: GitHub webhook cicd-hw.qoin.id/hook (bukan action). "
+             "Setelah scaffold, otomatis cek status webhook di repo.",
     )
     parser.add_argument(
         "--init-legacy",
@@ -182,12 +184,15 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--init-secrets",
         action="store_true",
-        help="Set GitHub Actions webhook secrets on target repo (auto-detect from git)",
+        help="[DEPRECATED] Set GitHub Actions webhook secrets (WEBHOOK_TRIGGER_URL/TOKEN) — "
+             "hanya dibutuhkan kalau repo masih pakai trigger-ci.yml action sebagai fallback. "
+             "Standar sekarang: webhook cicd-hw.qoin.id/hook, tanpa secret action.",
     )
     parser.add_argument(
         "--gh-action-init",
         action="store_true",
-        help="Bootstrap standar .github/workflows/trigger-ci.yml — hapus workflow lain + set webhook secrets",
+        help="[DEPRECATED] Sekarang HANYA cleanup: hapus trigger-ci.yml lokal + cek status webhook. "
+             "Standar CI/CD Fase 3: GitHub webhook cicd-hw.qoin.id/hook.",
     )
     parser.add_argument(
         "--token",
@@ -203,7 +208,9 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--pr-fix",
         action="store_true",
-        help="One-shot fix: clone → branch → regenerate jx-init artifacts → push → set secrets → open PR.",
+        help="One-shot fix: clone → branch → regenerate jx-init artifacts (Makefile/compose/Dockerfile) "
+             "+ Fase 3 cleanup (hapus trigger-ci.yml legacy) → push → open PR → verify webhook. "
+             "Tidak set secret action (standar webhook cicd-hw.qoin.id/hook).",
     )
     parser.add_argument(
         "--pr-branch",

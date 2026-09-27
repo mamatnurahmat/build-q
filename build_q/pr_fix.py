@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import github_api
-from ._common import INIT_ARTIFACTS, fetch_cicd_data, init_ctx_from_cicd, normalize_text
+from ._common import (
+    INIT_ARTIFACTS, LEGACY_ARTIFACTS_TO_REMOVE,
+    fetch_cicd_data, init_ctx_from_cicd, normalize_text,
+)
 from .config import cicd_candidates, load_config, save_env_value
 
 
@@ -148,7 +151,7 @@ def run_pr_fix(
             print(f"   ⏭  {path_str} (preserved — sudah ada, tidak di-overwrite)")
             continue
         tpl = load_template(tpl_name)
-        new_content = render(tpl, ctx) if tpl_name != "trigger_ci" else tpl
+        new_content = render(tpl, ctx)
         current = target.read_text() if target.exists() else ""
         if normalize_text(current) == normalize_text(new_content):
             print(f"   ⏭  {path_str} (already up-to-date)")
@@ -159,26 +162,51 @@ def run_pr_fix(
         print(f"   ✏️  {path_str} (+{added}, -{removed})")
         changes.append(path_str)
 
-    if not changes:
-        print("\n✅ Semua artifact sudah up-to-date. Tidak perlu PR.")
+    # ── Fase 3 cleanup: hapus artifact legacy (mis. trigger-ci.yml action) ──
+    # Sekarang standar CI/CD pakai GitHub webhook cicd-hw.qoin.id/hook.
+    removals: List[str] = []
+    for legacy_path in LEGACY_ARTIFACTS_TO_REMOVE:
+        target = repo_dir / legacy_path
+        if target.exists():
+            try:
+                _sh(["git", "rm", "-f", legacy_path], cwd=str(repo_dir))
+                print(f"   🗑  {legacy_path} (removed — legacy Fase 3 cleanup)")
+                removals.append(legacy_path)
+            except subprocess.CalledProcessError as e:
+                print(f"   ⚠️  git rm {legacy_path} gagal: {e.stderr}", file=sys.stderr)
+        else:
+            # Tidak dicetak — mayoritas repo baru tidak punya file ini
+            pass
+
+    if not changes and not removals:
+        print("\n✅ Semua artifact sudah up-to-date & clean. Tidak perlu PR.")
         if not keep_workdir:
             shutil.rmtree(workdir, ignore_errors=True)
         return 0
 
     # Commit
     print(f"\n📦 Commit …")
-    _sh(["git", "add", "--"] + changes, cwd=str(repo_dir))
+    if changes:
+        _sh(["git", "add", "--"] + changes, cwd=str(repo_dir))
+    # `git rm` sudah stage removals — tidak perlu re-add.
+    commit_parts = []
+    if changes:
+        commit_parts.append(f"Regenerated: {', '.join(changes)}")
+    if removals:
+        commit_parts.append(f"Removed (legacy Fase 3): {', '.join(removals)}")
     commit_msg = (
-        "chore: regenerate jx-init artifacts to match latest template\n\n"
-        f"Regenerated: {', '.join(changes)}\n"
+        "chore: sync jx-init artifacts to latest template + Fase 3 cleanup\n\n"
+        + "\n".join(commit_parts) + "\n\n"
         f"Base: {ref} @ {head_sha[:12]}\n"
+        "Standar trigger: GitHub webhook cicd-hw.qoin.id/hook (bukan action).\n"
         "Generated with bq --pr-fix (build-q)"
     )
     _sh(
         ["git", "-c", "user.name=build-q bot", "-c", "user.email=bq@build-q.local",
          "commit", "-m", commit_msg], cwd=str(repo_dir),
     )
-    print(f"   ✅ {len(changes)} file")
+    total = len(changes) + len(removals)
+    print(f"   ✅ {total} file ({len(changes)} regen + {len(removals)} legacy removed)")
 
     if dry_run:
         print(f"\n🔍 Dry-run: skip push, set-secret, open PR. Workdir: {repo_dir}")
@@ -192,32 +220,24 @@ def run_pr_fix(
         err = (e.stderr or "").strip()
         print(f"   ❌ Push gagal: {err}", file=sys.stderr)
         if "workflow" in err and "scope" in err:
+            # Terjadi kalau removals berisi file .github/workflows/* (Fase 3 cleanup
+            # menghapus trigger-ci.yml). GitHub tetap butuh scope `workflow` utk push
+            # perubahan di path tsb, bahkan hanya delete.
             print(
-                "\n💡 GITHUB_TOKEN kurang scope `workflow` (dibutuhkan untuk update file di\n"
-                "   .github/workflows/). Perbaikan:\n"
+                "\n💡 GITHUB_TOKEN kurang scope `workflow` (perlu untuk delete file di\n"
+                "   .github/workflows/, termasuk trigger-ci.yml cleanup). Perbaikan:\n"
                 "     1) Buka https://github.com/settings/tokens → edit token Anda\n"
-                "     2) Centang scope: workflow (dan pastikan repo, read:user, admin:public_key opsional)\n"
+                "     2) Centang scope: workflow (juga repo, read:user)\n"
                 "     3) Regenerate → copy → update GITHUB_TOKEN di ~/.build-q/.env\n"
-                f"     4) Retry: bq --pr-fix {api_repo.split('/')[-1]} {ref}\n"
-                "   Alternatif: hapus trigger-ci.yml dari commit (--pr-branch <name> + edit manual),\n"
-                "   lalu update workflow via GitHub UI (butuh browser).",
+                f"     4) Retry: bq --pr-fix {api_repo.split('/')[-1]} {ref}",
                 file=sys.stderr,
             )
         return 2
 
-    # Secrets
-    print(f"\n🔐 Setting repo secrets di {api_repo}:")
-    webhook = config["webhook"]
-    entries = [
-        ("WEBHOOK_TRIGGER_URL", webhook["trigger_url"], webhook["trigger_url"]),
-        ("WEBHOOK_TRIGGER_TOKEN", webhook["trigger_token"], "***"),
-    ]
-    for name, value, display in entries:
-        try:
-            github_api.set_secret(api_repo, name, value)
-            print(f"   ✅ {name} = {display}")
-        except github_api.GitHubAPIError as e:
-            print(f"   ⚠️  {name}: {e}", file=sys.stderr)
+    # Repo secrets — DIHAPUS (Fase 3): WEBHOOK_TRIGGER_URL/TOKEN dipakai oleh
+    # trigger-ci.yml action. Setelah action dihapus, secret tsb tidak diperlukan.
+    # Untuk backward-compat repo yg masih pakai action (fallback tanpa akses
+    # setup webhook), bisa di-set manual via `bq --init-secrets` (deprecated).
 
     # Deduplicate PR
     print(f"\n🔀 Opening PR → {ref} ...")
@@ -230,23 +250,47 @@ def run_pr_fix(
     except github_api.GitHubAPIError:
         pass
 
-    body = (
-        f"Regenerate jx-init artifacts agar match template terkini (bq v0.1.24+).\n\n"
-        f"**Base:** `{ref}` @ `{head_sha[:12]}`\n"
-        f"**Files changed:**\n"
-        + "\n".join(f"- `{p}`" for p in changes)
-        + "\n\nGenerated with `bq --pr-fix`."
-    )
+    body_lines = [
+        "Regenerate jx-init artifacts agar match template terkini + Fase 3 cleanup migrasi CI/CD trigger.",
+        "",
+        f"**Base:** `{ref}` @ `{head_sha[:12]}`",
+    ]
+    if changes:
+        body_lines += ["", "**Regenerated:**"] + [f"- `{p}`" for p in changes]
+    if removals:
+        body_lines += ["", "**Removed (legacy, Fase 3):**"] + [f"- `{p}` — action digantikan webhook `cicd-hw.qoin.id/hook`" for p in removals]
+    body_lines += [
+        "",
+        "**Standar trigger CI/CD sekarang:** GitHub webhook `https://cicd-hw.qoin.id/hook` (di-relay ke webhook-trigger service, dedup middleware Fase 1).",
+        "",
+        "Kalau webhook belum terpasang di repo ini, jalankan:",
+        f"```",
+        f"bq --cicd-webhook {api_repo.split('/')[-1]}",
+        f"```",
+        "",
+        "Generated with `bq --pr-fix`.",
+    ]
+    body = "\n".join(body_lines)
+    total = len(changes) + len(removals)
     try:
         pr = github_api.create_pull_request(
             api_repo, base=ref, head=branch_name,
-            title=f"chore: sync jx-init artifacts ({len(changes)} file)",
+            title=f"chore: sync jx-init + Fase 3 cleanup ({total} file)",
             body=body,
         )
         print(f"   ✅ {pr.get('html_url')}")
     except github_api.GitHubAPIError as e:
         print(f"   ❌ Gagal buat PR: {e}", file=sys.stderr)
         return 2
+
+    # Verifikasi webhook standar (Fase 3) — informatif, tidak affect exit code
+    try:
+        from .cicd_webhook import run_cicd_webhook_check
+        print()
+        print("🔎 Verifikasi webhook standar Fase 3:")
+        run_cicd_webhook_check(api_repo)
+    except Exception as e:
+        print(f"   ⚠️  Cek webhook gagal: {e}", file=sys.stderr)
 
     if not keep_workdir:
         shutil.rmtree(workdir, ignore_errors=True)

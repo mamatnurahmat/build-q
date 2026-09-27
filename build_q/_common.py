@@ -12,14 +12,25 @@ from .config import cicd_candidates
 from .github_api import GitHubAPIError, get_contents_raw
 
 
-# Pair (path, template_name) — 4 artifact yang di-scaffold `bq --init-jx`
+# Pair (path, template_name) — artifact yang di-scaffold `bq --init-jx`
 # dan diperiksa `bq --check` + di-regenerate `bq --pr-fix`.
 # Sumber template: build_q/templates.py (dari gist mamatnurahmat).
+#
+# NOTE: `.github/workflows/trigger-ci.yml` DIHAPUS dari standar (Fase 3
+# migrasi CI/CD trigger — sekarang pakai GitHub webhook `cicd-hw.qoin.id/hook`
+# yang di-relay ke webhook-trigger service. Lihat docs/pipeline-trigger-workflow.md
+# di repo jenkins-x). `pr-fix` akan otomatis menghapus file trigger-ci.yml
+# yang masih ada di repo (opt-in cleanup).
 INIT_ARTIFACTS: List[Tuple[str, str]] = [
     ("Makefile", "makefile"),
     ("compose.yaml", "compose"),
     ("Dockerfile", "dockerfile"),
-    (".github/workflows/trigger-ci.yml", "trigger_ci"),
+]
+
+# File-file lama yang harus DIHAPUS saat pr-fix (Fase 3 cleanup).
+# Dihapus via `git rm` supaya masuk PR sebagai perubahan yg jelas.
+LEGACY_ARTIFACTS_TO_REMOVE: List[str] = [
+    ".github/workflows/trigger-ci.yml",
 ]
 
 
