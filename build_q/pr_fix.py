@@ -25,6 +25,11 @@ def _preflight(config: Dict) -> Optional[str]:
     """Return error string bila prasyarat kurang, None kalau OK.
 
     Auto-fetch WEBHOOK_TRIGGER_TOKEN dari k8s + save ke .env bila kosong.
+
+    Note: pynacl (dipakai github_api.set_secret) TIDAK lagi dicek — Fase 3
+    tidak set action secrets. Kalau user tetap butuh --init-secrets sbg
+    fallback, ImportError akan muncul saat set_secret dipanggil, dgn pesan
+    yang jelas dari github_api.
     """
     gh = config["github"]
     if gh["use_cli"]:
@@ -32,11 +37,6 @@ def _preflight(config: Dict) -> Optional[str]:
                 "Set GH_CLI=false di ~/.build-q/.env.")
     if not gh["token"]:
         return "GITHUB_TOKEN kosong di ~/.build-q/.env."
-
-    try:
-        import nacl  # noqa: F401
-    except ImportError:
-        return "pynacl belum terinstall — jalankan: pip install pynacl"
 
     webhook = config["webhook"]
     if not webhook["trigger_token"]:
@@ -101,7 +101,6 @@ def run_pr_fix(
         return 1
     print(f"   ✅ GITHUB_TOKEN ({len(config['github']['token'])} chars)")
     print("   ✅ WEBHOOK_TRIGGER_TOKEN")
-    print("   ✅ pynacl installed")
 
     # Fetch cicd (native REST)
     print(f"\n📡 Fetching cicd config from {api_repo}@{ref} ...")
