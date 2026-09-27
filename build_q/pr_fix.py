@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from . import github_api
 from ._common import (
@@ -19,6 +19,9 @@ from ._common import (
     fetch_cicd_data, init_ctx_from_cicd, normalize_text,
 )
 from .config import cicd_candidates, load_config, save_env_value
+from .dockerfile_checks import (
+    analyze_dockerfile, format_issues_console, format_issues_markdown, has_error,
+)
 
 
 def _preflight(config: Dict) -> Optional[str]:
@@ -141,14 +144,27 @@ def run_pr_fix(
     ctx = init_ctx_from_cicd(cicd, config)
     print(f"\n📝 Regenerating artifacts (ctx: IMAGE={ctx['IMAGE']} PROJECT={ctx['PROJECT']} PORT={ctx['PORT']}):")
     changes: List[str] = []
+    dockerfile_issues: List[Dict] = []
     for path_str, tpl_name in INIT_ARTIFACTS:
         target = repo_dir / path_str
-        # Preserve Dockerfile bila sudah ada — bisa jadi hasil kustomisasi
-        # (multi-stage khusus, base image lain, tambah RUN). Regenerasi bakal
-        # menimpa kerja tim.
+        # Dockerfile: default preserve (kustomisasi tim), TAPI cek issue known.
+        # Kalau ada issue `severity=error` (mis. compose/Dockerfile secret
+        # mismatch), OVERRIDE preserve → regenerate paksa. `warning` di-report
+        # di PR body tapi Dockerfile tetap di-preserve.
         if path_str == "Dockerfile" and target.exists():
-            print(f"   ⏭  {path_str} (preserved — sudah ada, tidak di-overwrite)")
-            continue
+            current_content = target.read_text()
+            dockerfile_issues = analyze_dockerfile(current_content)
+            if not dockerfile_issues:
+                print(f"   ⏭  {path_str} (preserved — sudah ada, tidak di-overwrite)")
+                continue
+            print(f"   🔍 {path_str} — {len(dockerfile_issues)} issue terdeteksi:")
+            for line in format_issues_console(dockerfile_issues):
+                print(line)
+            if not has_error(dockerfile_issues):
+                print(f"   ⏭  {path_str} (preserved — hanya warning, report di PR body)")
+                continue
+            print(f"   🔧 {path_str} — critical issue → REGEN paksa dari template modern")
+            # jatuh ke render+write flow di bawah
         tpl = load_template(tpl_name)
         new_content = render(tpl, ctx)
         current = target.read_text() if target.exists() else ""
@@ -258,6 +274,8 @@ def run_pr_fix(
         body_lines += ["", "**Regenerated:**"] + [f"- `{p}`" for p in changes]
     if removals:
         body_lines += ["", "**Removed (legacy, Fase 3):**"] + [f"- `{p}` — action digantikan webhook `cicd-hw.qoin.id/hook`" for p in removals]
+    if dockerfile_issues:
+        body_lines += ["", format_issues_markdown(dockerfile_issues)]
     body_lines += [
         "",
         "**Standar trigger CI/CD sekarang:** GitHub webhook `https://cicd-hw.qoin.id/hook` (di-relay ke webhook-trigger service, dedup middleware Fase 1).",
