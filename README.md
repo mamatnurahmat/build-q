@@ -187,7 +187,7 @@ bq --config       # tampilkan konfigurasi aktif
 | Variable | Default | Keterangan |
 | ---------- | --------- | ----------- |
 | `BUILDER_NAME` | `mybuilder` | Nama Docker Buildx builder |
-| `REGISTRY_URL` | `registry.example.com` | Docker registry (Qoin: `loyaltolpi`) |
+| `REGISTRY_URL` | `loyaltolpi` | Docker registry (Qoin default: `loyaltolpi` — Docker Hub org) |
 | `DEFAULT_MEMORY` | `4g` | Memory limit build |
 | `DEFAULT_CPU_PERIOD` | `100000` | CPU period |
 | `DEFAULT_CPU_QUOTA` | `200000` | CPU quota |

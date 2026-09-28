@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from ._common import resolve_registry
 from .config import load_config, load_local_cicd, use_gh_cli
 
 
@@ -430,7 +431,7 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
         return False
 
     config = load_config()
-    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+    registry = resolve_registry(config)
 
     image = cicd.get("IMAGE") or Path.cwd().name
     ctx = {
@@ -549,7 +550,7 @@ def init_legacy(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
         cicd = {}
 
     config = load_config()
-    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+    registry = resolve_registry(config)
 
     image = cicd.get("IMAGE") or Path.cwd().name
     ctx = {

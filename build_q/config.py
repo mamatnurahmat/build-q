@@ -160,8 +160,8 @@ DEFAULT_MEMORY=4g
 DEFAULT_CPU_PERIOD=100000
 DEFAULT_CPU_QUOTA=200000
 
-# Container registry URL
-REGISTRY_URL=registry.example.com
+# Container registry URL (Qoin default: loyaltolpi — Docker Hub org)
+REGISTRY_URL=loyaltolpi
 
 # Git remote settings (for --remote / --clone)
 GIT_SSH_PREFIX=git@github.com:

@@ -34,6 +34,20 @@ LEGACY_ARTIFACTS_TO_REMOVE: List[str] = [
 ]
 
 
+def resolve_registry(config: Dict[str, Any]) -> str:
+    """Registry effective — fallback ke `loyaltolpi` bila kosong / placeholder legacy.
+
+    `registry.example.com` adalah placeholder default lama di `~/.build-q/.env`
+    (v0.1.x). User yang belum overwrite file config-nya bisa keluar dengan
+    Makefile berisi `ORG_REGISTRY ?= registry.example.com` yang fail di CI
+    (DNS lookup error). Fungsi ini treats placeholder itu sebagai kosong.
+    """
+    url = (config.get("registry", {}).get("url", "") or "").strip()
+    if not url or url == "registry.example.com":
+        return "loyaltolpi"
+    return url
+
+
 def normalize_text(text: str) -> str:
     """Normalize whitespace agar trivial format drift tidak dianggap mismatch.
 
@@ -55,7 +69,7 @@ def init_ctx_from_cicd(cicd: Dict[str, Any], config: Dict[str, Any]) -> Dict[str
     Ctx keys: IMAGE, PROJECT, PORT, CLUSTER, DEPLOYMENT, NODETYPE, ORG_REGISTRY.
     Default value konsisten dgn perilaku init_jx historis.
     """
-    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+    registry = resolve_registry(config)
     image = cicd.get("IMAGE") or ""
     return {
         "IMAGE": image,

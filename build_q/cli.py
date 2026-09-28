@@ -151,6 +151,9 @@ Examples:
   # Show active configuration
   bq --config
 
+  # Preflight — cek tools & credentials
+  bq --doctor
+
 Config file: ~/.build-q/.env
 """,
     )
@@ -161,6 +164,13 @@ Config file: ~/.build-q/.env
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
     parser.add_argument("--force", action="store_true", help="Force recreate config (use with --init)")
     parser.add_argument("--config", action="store_true", help="Show current configuration")
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="Cek kesiapan tools (git/docker/buildx/kubectl) & credentials "
+             "(GITHUB_TOKEN, docker login, buildx builder, kubectl context). "
+             "Exit 0 bila blocker-free.",
+    )
     parser.add_argument(
         "--fix-dockerfile",
         nargs="?",
@@ -228,6 +238,25 @@ Config file: ~/.build-q/.env
         help="Cek apakah repo sudah terpasang webhook cicd-hw.qoin.id/hook. "
              "Berjalan sendiri (`bq --cicd-webhook [<repo>]`) atau berbarengan "
              "dengan --pr-fix (dijalankan setelah pr-fix sukses).",
+    )
+    parser.add_argument(
+        "--cicd-trigger",
+        action="store_true",
+        help="Trigger MANUAL pipeline via webhook cicd-hw.qoin.id/hook — kirim "
+             "synthetic push event untuk <repo> <ref>. HMAC diambil dari secret "
+             "jenkins-x/incoming-webhook (context hw-dev) atau env INCOMING_WEBHOOK_HMAC. "
+             "Usage: bq --cicd-trigger <repo> <ref> [--sha SHA] [--dry-run]",
+    )
+    parser.add_argument(
+        "--sha",
+        metavar="SHA",
+        help="Override commit SHA untuk --cicd-trigger (default: resolve dari <ref>)",
+    )
+    parser.add_argument(
+        "--hook-url",
+        metavar="URL",
+        default=None,
+        help="Override webhook URL untuk --cicd-trigger (default: https://cicd-hw.qoin.id/hook)",
     )
     parser.add_argument(
         "--bootstrap-k8s",
@@ -426,6 +455,27 @@ Config file: ~/.build-q/.env
         help="Override path YAML lengkap (bypass template {infra}/{ns}/{app}_deployment.yaml)",
     )
 
+    # ── Native set-image / gitops-set-image (ganti script bash eksternal) ────
+    parser.add_argument(
+        "--set-image",
+        action="store_true",
+        help="Hot-patch K8s Deployment via `kubectl set image` + wait rollout. "
+             "Usage: bq --set-image <ns> <deployment> <image> [container]. "
+             "Bila <image> tanpa `/`, jadi <REGISTRY_URL>/<deployment>:<image>.",
+    )
+    parser.add_argument(
+        "--gitops-set-image",
+        action="store_true",
+        help="Update image di deployment YAML repo GitOps, commit + push langsung "
+             "ke branch (tanpa PR). Ada pre-flight: file exist di GitHub, image "
+             "ready di Docker Hub, duplikasi. "
+             "Usage: bq --gitops-set-image <gitops-repo> <branch> <path.yaml> <image_full>",
+    )
+
+    # Extra positional args untuk --set-image / --gitops-set-image
+    # (repo & ref existing menampung 2 pertama; sisanya ke sini)
+    parser.add_argument("extra_args", nargs="*", help=argparse.SUPPRESS)
+
     args = parser.parse_args()
 
     try:
@@ -435,6 +485,10 @@ Config file: ~/.build-q/.env
             config = load_config()
             ensure_builder(config["builder"]["name"], bootstrap=True)
             return
+
+        if args.doctor:
+            from .doctor import run_doctor
+            sys.exit(run_doctor())
 
         if args.fix_dockerfile is not None:
             ok = fix_dockerfile(args.fix_dockerfile)
@@ -471,10 +525,12 @@ Config file: ~/.build-q/.env
                 keep_workdir=args.keep_workdir,
                 pr_branch=args.pr_branch,
             )
+            # Note: --pr-fix now runs webhook SETUP internally (skip bila ada,
+            # soft-fail bila error). Flag --cicd-webhook di sini menjadi
+            # verifikasi tambahan (check) — informatif, tidak affect exit code.
             if rc == 0 and args.cicd_webhook:
                 print()  # spacer
                 from .cicd_webhook import run_cicd_webhook_check
-                # Webhook check bersifat informatif — tidak mempengaruhi exit code pr-fix.
                 run_cicd_webhook_check(api_repo)
             sys.exit(rc)
 
@@ -496,6 +552,33 @@ Config file: ~/.build-q/.env
                     sys.exit(1)
             api_repo = normalize_repo(_expand_repo(repo, default_org))
             sys.exit(run_cicd_webhook_check(api_repo))
+
+        if args.cicd_trigger:
+            from .cicd_trigger import run_cicd_trigger, HOOK_URL_DEFAULT
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            repo = args.repo
+            ref = args.ref
+            if not repo or not ref:
+                print("🔍 Auto-detect repo/ref dari git ...")
+                try:
+                    info = get_git_info()
+                    if not repo:
+                        repo = info["repo"]
+                    if not ref:
+                        ref = info["ref"]
+                    print(f"   repo: {repo}  ref: {ref}")
+                except BuildError as e:
+                    print(f"❌ {e}", file=sys.stderr)
+                    print("   Usage: bq --cicd-trigger <repo> <ref>", file=sys.stderr)
+                    sys.exit(2)
+            api_repo = normalize_repo(_expand_repo(repo, default_org))
+            sys.exit(run_cicd_trigger(
+                api_repo, ref,
+                hook_url=args.hook_url or HOOK_URL_DEFAULT,
+                sha_override=args.sha,
+                dry_run=args.dry_run,
+            ))
 
         if args.bootstrap_k8s:
             missing = []
@@ -535,6 +618,40 @@ Config file: ~/.build-q/.env
                 nodepool_override=args.nodepool,
             )
             sys.exit(rc)
+
+        if args.set_image:
+            # Positional: <ns> <deployment> <image> [container]
+            positionals = [args.repo, args.ref, *args.extra_args]
+            positionals = [p for p in positionals if p]
+            if len(positionals) < 3:
+                print(
+                    "❌ Usage: bq --set-image <ns> <deployment> <image> [container]",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            ns_arg, deploy_arg, image_arg = positionals[0], positionals[1], positionals[2]
+            container_arg = positionals[3] if len(positionals) > 3 else None
+            from .set_image import run_set_image
+            sys.exit(run_set_image(
+                ns_arg, deploy_arg, image_arg, container=container_arg,
+            ))
+
+        if args.gitops_set_image:
+            # Positional: <gitops-repo> <branch> <path.yaml> <image_full>
+            positionals = [args.repo, args.ref, *args.extra_args]
+            positionals = [p for p in positionals if p]
+            if len(positionals) < 4:
+                print(
+                    "❌ Usage: bq --gitops-set-image <repo> <branch> <path.yaml> <image_full>",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            gr, gb, gp, gi = positionals[0], positionals[1], positionals[2], positionals[3]
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            gr = normalize_repo(_expand_repo(gr, default_org))
+            from .gitops_set_image import run_gitops_set_image
+            sys.exit(run_gitops_set_image(gr, gb, gp, gi))
 
         if args.check:
             if not args.repo or not args.ref:

@@ -316,7 +316,7 @@ File `~/.build-q/.env`:
 | Variable | Default |
 | ---------- | --------- |
 | `BUILDER_NAME` | `mybuilder` |
-| `REGISTRY_URL` | `registry.example.com` |
+| `REGISTRY_URL` | `loyaltolpi` |
 | `DEFAULT_MEMORY` | `4g` |
 | `DEFAULT_CPU_PERIOD` | `100000` |
 | `DEFAULT_CPU_QUOTA` | `200000` |

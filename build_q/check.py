@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Tuple
 
-from ._common import INIT_ARTIFACTS, fetch_cicd_data, init_ctx_from_cicd, normalize_text
+from ._common import INIT_ARTIFACTS, fetch_cicd_data, init_ctx_from_cicd, normalize_text, resolve_registry
 from .config import cicd_candidates, load_config
 from .github_api import GitHubAPIError, get_commit_sha, get_contents_raw
 
@@ -95,7 +95,7 @@ def run_check(
 
     # 4) Registry image — tag-aware (sejak v0.1.23)
     print("\n📦 Registry:")
-    dh_org = config["dockerhub"]["org"] or config["registry"]["url"]
+    dh_org = config["dockerhub"]["org"] or resolve_registry(config)
     image_name = cicd_data.get("IMAGE") or api_repo.split("/")[-1]
     if not dh_org:
         print("   ⚠️  DOCKERHUB_ORG / REGISTRY_URL kosong — skip cek image")

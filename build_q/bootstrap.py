@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from . import github_api
-from ._common import fetch_cicd_data
+from ._common import fetch_cicd_data, resolve_registry
 from .config import cicd_candidates, load_config
 from .templates import load_template, render
 
@@ -305,7 +305,7 @@ def _apply_secret_if_missing(
 
 def _resolve_image_tag(api_repo: str, ref: str, cicd: Dict, config: Dict) -> str:
     """`<registry>/<IMAGE>:<tag-or-sha>` — mirror rule Makefile."""
-    registry = config.get("registry", {}).get("url", "") or "loyaltolpi"
+    registry = resolve_registry(config)
     image_name = cicd.get("IMAGE") or api_repo.split("/")[-1]
     try:
         sha = github_api.get_commit_sha(api_repo, ref)

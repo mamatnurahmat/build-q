@@ -300,14 +300,15 @@ def run_pr_fix(
         print(f"   ❌ Gagal buat PR: {e}", file=sys.stderr)
         return 2
 
-    # Verifikasi webhook standar (Fase 3) — informatif, tidak affect exit code
+    # Setup webhook standar (Fase 3) — skip bila sudah ada, soft-fail bila error.
+    # Tidak affect exit code pr-fix supaya PR tetap terbuka meski webhook gagal.
     try:
-        from .cicd_webhook import run_cicd_webhook_check
+        from .cicd_webhook import run_cicd_webhook_setup
         print()
-        print("🔎 Verifikasi webhook standar Fase 3:")
-        run_cicd_webhook_check(api_repo)
+        print("🪝 Setup webhook standar Fase 3:")
+        run_cicd_webhook_setup(api_repo)
     except Exception as e:
-        print(f"   ⚠️  Cek webhook gagal: {e}", file=sys.stderr)
+        print(f"   ⚠️  Setup webhook gagal (di-skip, PR tetap dibuka): {e}", file=sys.stderr)
 
     if not keep_workdir:
         shutil.rmtree(workdir, ignore_errors=True)
