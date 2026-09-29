@@ -471,6 +471,14 @@ Config file: ~/.build-q/.env
              "ready di Docker Hub, duplikasi. "
              "Usage: bq --gitops-set-image <gitops-repo> <branch> <path.yaml> <image_full>",
     )
+    parser.add_argument(
+        "--is-match-image",
+        action="store_true",
+        help="Bandingkan image container[0] deployment K8s (live) dengan image "
+             "di file deployment YAML repo GitOps. Kalau MISMATCH, sarankan "
+             "perintah `bq --gitops-set-image` untuk sync GitOps ke image K8s. "
+             "Usage: bq --is-match-image <ns> <deployment> <gitops-repo> <branch> <path.yaml>",
+    )
 
     # Extra positional args untuk --set-image / --gitops-set-image
     # (repo & ref existing menampung 2 pertama; sisanya ke sini)
@@ -652,6 +660,24 @@ Config file: ~/.build-q/.env
             gr = normalize_repo(_expand_repo(gr, default_org))
             from .gitops_set_image import run_gitops_set_image
             sys.exit(run_gitops_set_image(gr, gb, gp, gi))
+
+        if args.is_match_image:
+            # Positional: <ns> <deployment> <gitops-repo> <branch> <path.yaml>
+            positionals = [args.repo, args.ref, *args.extra_args]
+            positionals = [p for p in positionals if p]
+            if len(positionals) < 5:
+                print(
+                    "❌ Usage: bq --is-match-image <ns> <deployment> "
+                    "<gitops-repo> <branch> <path.yaml>",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            ns_, dep_, gr, gb, gp = positionals[:5]
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            gr = normalize_repo(_expand_repo(gr, default_org))
+            from .is_match_image import run_is_match_image
+            sys.exit(run_is_match_image(ns_, dep_, gr, gb, gp))
 
         if args.check:
             if not args.repo or not args.ref:

@@ -102,7 +102,7 @@ def _image_is_ready(
 
 # ── Extract "image: <val>" dari YAML text (grep-style, first match) ──────
 
-_IMAGE_LINE_RE = re.compile(r"^\s*image:\s*(\S+)\s*$", re.MULTILINE)
+_IMAGE_LINE_RE = re.compile(r"^\s*(?:-\s+)?image:\s*(\S+)\s*$", re.MULTILINE)
 
 
 def _extract_first_image(yaml_text: str) -> Optional[str]:
@@ -116,7 +116,7 @@ def _replace_image(yaml_text: str, base_prefix: str, new_full: str) -> str:
     Menggunakan regex yang menghormati indentasi asli.
     """
     pattern = re.compile(
-        r"^(?P<indent>\s*)image:\s*" + re.escape(base_prefix) + r":\S+\s*$",
+        r"^(?P<indent>\s*(?:-\s+)?)image:\s*" + re.escape(base_prefix) + r":\S+\s*$",
         re.MULTILINE,
     )
     return pattern.sub(lambda m: f"{m.group('indent')}image: {new_full}", yaml_text, count=1)
@@ -237,6 +237,9 @@ def run_gitops_set_image(
         if not current:
             print(f"❌ Tidak menemukan 'image:' di {path}", file=sys.stderr)
             return 1
+        if current == image_full:
+            print(f"⚠️  Image di {path} sudah = {image_full}. Skip commit/push.")
+            return 0
         print(f"   image lama: {current}")
         print(f"   image baru: {image_full}")
 
