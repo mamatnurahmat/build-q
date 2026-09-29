@@ -1,3 +1,3 @@
 """build-q — Simple Docker Buildx CLI for local builds."""
 
-__version__ = "0.1.32"
+__version__ = "0.1.33"

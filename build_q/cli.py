@@ -833,20 +833,71 @@ Config file: ~/.build-q/.env
                         print("⏭️ Skipping clone and build.")
                         sys.exit(0)
             
-            print(f"📥 Cloning repository {args.clone} (branch: {ref}) ...")
-            try:
-                _github_clone(args.clone, ref)
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
-                sys.exit(1)
-            except FileNotFoundError:
-                print("❌ Required CLI not found (`gh` or `git`). Install one, or toggle GH_CLI.", file=sys.stderr)
-                sys.exit(1)
-            except GitHubAPIError as e:
-                print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
-                sys.exit(1)
-
             clone_dir = args.clone.split("/")[-1]
+            if os.path.isdir(clone_dir):
+                if not os.path.isdir(os.path.join(clone_dir, ".git")):
+                    print(
+                        f"❌ Directory '{clone_dir}' already exists and is not a git repository.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                print(f"📂 Directory '{clone_dir}' already exists — reusing existing checkout.")
+                try:
+                    remote_url = subprocess.run(
+                        ["git", "-C", clone_dir, "remote", "get-url", "origin"],
+                        capture_output=True, text=True, check=True,
+                    ).stdout.strip()
+                except subprocess.CalledProcessError:
+                    print(
+                        f"❌ Failed to read origin remote of '{clone_dir}'.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                expected_repo = normalize_repo(args.clone).lower()
+                if expected_repo not in normalize_repo(remote_url).lower():
+                    print(
+                        f"❌ Existing '{clone_dir}' points to '{remote_url}', "
+                        f"expected '{expected_repo}'. Remove or rename it and retry.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                try:
+                    subprocess.run(
+                        ["git", "-C", clone_dir, "fetch", "origin", ref],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", clone_dir, "checkout", ref],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", clone_dir, "merge", "--ff-only", f"origin/{ref}"],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    print(
+                        f"❌ Failed to update existing '{clone_dir}' to '{ref}': {e}. "
+                        "Resolve the working tree or remove the directory and retry.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                except FileNotFoundError:
+                    print("❌ `git` not found in PATH.", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                print(f"📥 Cloning repository {args.clone} (branch: {ref}) ...")
+                try:
+                    _github_clone(args.clone, ref)
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
+                    sys.exit(1)
+                except FileNotFoundError:
+                    print("❌ Required CLI not found (`gh` or `git`). Install one, or toggle GH_CLI.", file=sys.stderr)
+                    sys.exit(1)
+                except GitHubAPIError as e:
+                    print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
+                    sys.exit(1)
+
             print(f"📁 Changing directory to {clone_dir} ...")
             os.chdir(clone_dir)
             

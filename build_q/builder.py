@@ -89,7 +89,25 @@ def get_local_tag_or_commit() -> str:
     return get_local_commit_short()
 
 
-def _env_from_ref(ref: Optional[str]) -> str:
+def _is_fe_repo(repo: Optional[str]) -> bool:
+    """Deteksi repo FRONTEND — mirror rule skill `gitops-web-bootstrap`.
+
+    Cocokan (case-insensitive):
+      • `*-fe-*`         (mis. pay-fe-portal)
+      • `*-web-*`        (mis. qoin-web-dashboard)
+      • `qoinhub-mono-*` (mis. qoinhub-mono-webadmin)
+    """
+    if not repo:
+        return False
+    name = repo.rsplit("/", 1)[-1].lower()
+    if "-fe-" in name or "-web-" in name:
+        return True
+    if name.startswith("qoinhub-mono-"):
+        return True
+    return False
+
+
+def _env_from_ref(ref: Optional[str], repo: Optional[str] = None) -> str:
     """Map a git ref (branch or tag) to a build ENV.
 
     **INLINE dengan pipeline Tekton** di ~/jenkins-x/pipeline (lighthouse
@@ -104,9 +122,11 @@ def _env_from_ref(ref: Optional[str]) -> str:
     Perhatikan:
       • `main`/`master` masuk ke fallback (`*)` di Tekton → `staging`, bukan
         production. Push ke main TIDAK memicu production; tag `v*` yang memicu.
-      • `development` (alias develop) juga masuk fallback → `staging` di
-        Tekton. bq mengikuti; kalau developer memang mau `develop`, pakai
-        branch bernama `develop` (bukan `development`) atau override via
+      • `development` (alias develop) di Tekton default masuk fallback →
+        `staging`. **Pengecualian repo FRONTEND** (`*-fe-*`, `*-web-*`,
+        `qoinhub-mono-*`): `development` diperlakukan sebagai `develop`
+        karena konvensi FE Qoin memakai branch `development` untuk env dev.
+        Untuk repo BE, tetap pakai `develop` atau override via
         `--build-arg BRANCH=develop`.
 
     Override manual: `bq --build-arg BRANCH=<env>` (untuk buildx).
@@ -117,6 +137,8 @@ def _env_from_ref(ref: Optional[str]) -> str:
     if r.startswith("v") or r.startswith("refs/tags/v"):
         return "production"
     if r == "develop":
+        return "develop"
+    if r == "development" and _is_fe_repo(repo):
         return "develop"
     if r == "staging":
         return "staging"
@@ -194,7 +216,7 @@ def build_command(
     #   - build-arg BRANCH   (dipakai Dockerfile untuk `.env.${BRANCH}`)
     #   - and the compose `ENV=` in run_compose
     # menyimpulkan environment yang sama dari ref (branch atau tag).
-    branch_val = _env_from_ref(ref)
+    branch_val = _env_from_ref(ref, repo)
 
     # Check if BRANCH is already in extra_build_args (user override wins)
     extra_args_list = list(extra_build_args) if extra_build_args else []
@@ -943,7 +965,7 @@ def run_compose(
             return 0
         print("   Image not found. Proceeding with compose build.")
 
-    env_name = _env_from_ref(ref)
+    env_name = _env_from_ref(ref, repo)
     print(f"🌱 ENV = {env_name}  (dari ref: {ref})")
 
     cmds = [
