@@ -34,7 +34,7 @@ def _load_dotenv(path: Path) -> None:
 def load_config() -> Dict[str, Any]:
     """Load configuration from environment variables and ~/.build-q/.env.
 
-    Priority: env vars > .env file > defaults.
+    Priority: shell env > PB API (bila PB_API=true) > .env file > defaults.
     """
     ensure_config_dir()
 
@@ -43,6 +43,13 @@ def load_config() -> Dict[str, Any]:
 
     if ENV_FILE.exists():
         _load_dotenv(ENV_FILE)
+
+    # Bila PB_API=true, overlay credentials dari PB (PocketBase IDP) ke
+    # os.environ SEBELUM kita baca nilainya di bawah. Shell env tetap menang
+    # (hydrate_env pakai setdefault). Fallback resilient: warning + lanjut.
+    from . import pb_api
+    if pb_api.is_enabled():
+        pb_api.hydrate_env(quiet=True)
 
     return {
         "builder": {
@@ -151,6 +158,17 @@ def init_config(force: bool = False, silent: bool = False) -> None:
 
     default = """\
 # build-q Configuration
+
+# ── PB API (centralized credentials, PocketBase IDP) ────────────────────
+# Bila PB_API=true, credentials aplikasi (GITHUB_TOKEN, DOCKERHUB_TOKEN,
+# WEBHOOK_HOOK_HMAC, dst) diambil dari API — tidak perlu diisi di file ini.
+# Hanya 4 baris di bawah yang tetap harus lokal (bootstrap).
+# Cache secrets: ~/.build-q/.pb-cache.json (TTL default 15 menit).
+PB_API=false
+PB_API_URL=https://cicd-hw.qoin.id/devops
+PB_API_USER=
+PB_API_PASS=
+# PB_API_CACHE_TTL=900
 
 # Docker builder name
 BUILDER_NAME=mybuilder

@@ -165,6 +165,35 @@ def _check_docker_login() -> List[Result]:
     return [("docker login", True, detail, False)]
 
 
+def _check_pb_api() -> List[Result]:
+    """Cek PB API (PocketBase IDP) — hanya bila PB_API=true."""
+    from . import pb_api
+    if not pb_api.is_enabled():
+        return []
+    out: List[Result] = []
+    base = pb_api._base_url()
+    user = os.environ.get("PB_API_USER", "")
+    password = os.environ.get("PB_API_PASS", "")
+    if not user or not password:
+        out.append(("PB_API creds", False,
+                    "PB_API_USER / PB_API_PASS empty di ~/.build-q/.env", True))
+        return out
+    try:
+        pb_api.authenticate(base, user, password)
+        out.append((f"PB API {base}", True, f"auth ok as {user}", False))
+    except pb_api.PBAPIError as e:
+        out.append((f"PB API {base}", False, str(e)[:100], False))
+        return out
+    age = pb_api.cache_age_seconds()
+    cache = pb_api._read_cache() or {}
+    count = len(cache.get("secrets", {}))
+    if age is None:
+        out.append(("PB cache", False, "empty — jalankan `bq --pb-login`", False))
+    else:
+        out.append(("PB cache", True, f"{count} secrets, age {age}s", False))
+    return out
+
+
 def _check_kube_context() -> List[Result]:
     if not _which("kubectl"):
         return []  # sudah di-report di _check_tools
@@ -338,6 +367,7 @@ def run_doctor() -> int:
     sections = [
         ("Tools", _check_tools()),
         ("Config", _check_config()),
+        ("PB API (opsional)", _check_pb_api()),
         ("GitHub credentials", _check_github_credentials()),
         ("Docker registry", _check_docker_login()),
         ("Buildx builder", _check_buildx_builder()),

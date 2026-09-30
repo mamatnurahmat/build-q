@@ -172,6 +172,29 @@ Config file: ~/.build-q/.env
              "Exit 0 bila blocker-free.",
     )
     parser.add_argument(
+        "--pb-login",
+        action="store_true",
+        help="Verifikasi kredensial PB API (PocketBase IDP) & warm cache "
+             "secrets ke ~/.build-q/.pb-cache.json. Butuh PB_API=true + "
+             "PB_API_URL/USER/PASS di ~/.build-q/.env.",
+    )
+    parser.add_argument(
+        "--pb-status",
+        action="store_true",
+        help="Tampilkan status PB API: toggle, URL, user, cache age, jumlah "
+             "secrets yang di-cache.",
+    )
+    parser.add_argument(
+        "--pb-pull",
+        action="store_true",
+        help="Force refresh cache PB API (skip TTL) — auth ulang & fetch secrets.",
+    )
+    parser.add_argument(
+        "--pb-logout",
+        action="store_true",
+        help="Hapus ~/.build-q/.pb-cache.json (paksa re-auth pada run berikutnya).",
+    )
+    parser.add_argument(
         "--fix-dockerfile",
         nargs="?",
         const="Dockerfile",
@@ -497,6 +520,46 @@ Config file: ~/.build-q/.env
         if args.doctor:
             from .doctor import run_doctor
             sys.exit(run_doctor())
+
+        if args.pb_login or args.pb_status or args.pb_pull or args.pb_logout:
+            from . import pb_api
+            from .config import _load_dotenv
+            # Baca .env tanpa memicu hydrate_env (side-effect: refill cache)
+            if ENV_FILE.exists():
+                _load_dotenv(ENV_FILE)
+
+            if args.pb_logout:
+                removed = pb_api.clear_cache()
+                print("🧹 PB cache dihapus." if removed else "ℹ️  Tidak ada cache untuk dihapus.")
+                sys.exit(0)
+
+            if not pb_api.is_enabled():
+                print("⚠️  PB_API=false — set PB_API=true di ~/.build-q/.env dulu.",
+                      file=sys.stderr)
+                sys.exit(1)
+
+            if args.pb_status:
+                age = pb_api.cache_age_seconds()
+                cache = pb_api._read_cache() or {}
+                secrets = cache.get("secrets", {})
+                print(f"   URL       : {pb_api._base_url()}")
+                print(f"   User      : {os.getenv('PB_API_USER', '(unset)')}")
+                print(f"   Enabled   : {pb_api.is_enabled()}")
+                print(f"   TTL       : {pb_api._ttl_seconds()}s")
+                if age is None:
+                    print("   Cache     : (empty) — jalankan `bq --pb-login`")
+                else:
+                    print(f"   Cache age : {age}s ({len(secrets)} secrets)")
+                sys.exit(0)
+
+            try:
+                secrets = pb_api.pull(force=args.pb_pull)
+            except pb_api.PBAPIError as e:
+                print(f"❌ PB API error: {e}", file=sys.stderr)
+                sys.exit(1)
+            action = "refreshed" if args.pb_pull else "warmed"
+            print(f"✅ PB cache {action}: {len(secrets)} secrets dari {pb_api._base_url()}")
+            sys.exit(0)
 
         if args.fix_dockerfile is not None:
             ok = fix_dockerfile(args.fix_dockerfile)
