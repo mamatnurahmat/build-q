@@ -31,7 +31,7 @@ def compute_rollout(
     """
     from .builder import _env_from_ref  # lazy: avoid circular import
 
-    env = _env_from_ref(ref)
+    env = _env_from_ref(ref, repo)
     ns_suffix_global = config["gitops"]["ns_suffix"]
     # Per-repo project (cicd.PROJECT) menang atas NS_SUFFIX global. Alasan:
     # NS_SUFFIX di ~/.build-q/.env satu nilai untuk semua repo, sedangkan

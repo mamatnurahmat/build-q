@@ -471,6 +471,14 @@ Config file: ~/.build-q/.env
              "ready di Docker Hub, duplikasi. "
              "Usage: bq --gitops-set-image <gitops-repo> <branch> <path.yaml> <image_full>",
     )
+    parser.add_argument(
+        "--is-match-image",
+        action="store_true",
+        help="Bandingkan image container[0] deployment K8s (live) dengan image "
+             "di file deployment YAML repo GitOps. Kalau MISMATCH, sarankan "
+             "perintah `bq --gitops-set-image` untuk sync GitOps ke image K8s. "
+             "Usage: bq --is-match-image <ns> <deployment> <gitops-repo> <branch> <path.yaml>",
+    )
 
     # Extra positional args untuk --set-image / --gitops-set-image
     # (repo & ref existing menampung 2 pertama; sisanya ke sini)
@@ -653,6 +661,24 @@ Config file: ~/.build-q/.env
             from .gitops_set_image import run_gitops_set_image
             sys.exit(run_gitops_set_image(gr, gb, gp, gi))
 
+        if args.is_match_image:
+            # Positional: <ns> <deployment> <gitops-repo> <branch> <path.yaml>
+            positionals = [args.repo, args.ref, *args.extra_args]
+            positionals = [p for p in positionals if p]
+            if len(positionals) < 5:
+                print(
+                    "❌ Usage: bq --is-match-image <ns> <deployment> "
+                    "<gitops-repo> <branch> <path.yaml>",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            ns_, dep_, gr, gb, gp = positionals[:5]
+            config = load_config()
+            default_org = config.get("git", {}).get("org", "")
+            gr = normalize_repo(_expand_repo(gr, default_org))
+            from .is_match_image import run_is_match_image
+            sys.exit(run_is_match_image(ns_, dep_, gr, gb, gp))
+
         if args.check:
             if not args.repo or not args.ref:
                 print("❌ Usage: bq --check <repo> <ref> --remote", file=sys.stderr)
@@ -833,20 +859,71 @@ Config file: ~/.build-q/.env
                         print("⏭️ Skipping clone and build.")
                         sys.exit(0)
             
-            print(f"📥 Cloning repository {args.clone} (branch: {ref}) ...")
-            try:
-                _github_clone(args.clone, ref)
-            except subprocess.CalledProcessError as e:
-                print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
-                sys.exit(1)
-            except FileNotFoundError:
-                print("❌ Required CLI not found (`gh` or `git`). Install one, or toggle GH_CLI.", file=sys.stderr)
-                sys.exit(1)
-            except GitHubAPIError as e:
-                print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
-                sys.exit(1)
-
             clone_dir = args.clone.split("/")[-1]
+            if os.path.isdir(clone_dir):
+                if not os.path.isdir(os.path.join(clone_dir, ".git")):
+                    print(
+                        f"❌ Directory '{clone_dir}' already exists and is not a git repository.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                print(f"📂 Directory '{clone_dir}' already exists — reusing existing checkout.")
+                try:
+                    remote_url = subprocess.run(
+                        ["git", "-C", clone_dir, "remote", "get-url", "origin"],
+                        capture_output=True, text=True, check=True,
+                    ).stdout.strip()
+                except subprocess.CalledProcessError:
+                    print(
+                        f"❌ Failed to read origin remote of '{clone_dir}'.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                expected_repo = normalize_repo(args.clone).lower()
+                if expected_repo not in normalize_repo(remote_url).lower():
+                    print(
+                        f"❌ Existing '{clone_dir}' points to '{remote_url}', "
+                        f"expected '{expected_repo}'. Remove or rename it and retry.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                try:
+                    subprocess.run(
+                        ["git", "-C", clone_dir, "fetch", "origin", ref],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", clone_dir, "checkout", ref],
+                        check=True,
+                    )
+                    subprocess.run(
+                        ["git", "-C", clone_dir, "merge", "--ff-only", f"origin/{ref}"],
+                        check=True,
+                    )
+                except subprocess.CalledProcessError as e:
+                    print(
+                        f"❌ Failed to update existing '{clone_dir}' to '{ref}': {e}. "
+                        "Resolve the working tree or remove the directory and retry.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                except FileNotFoundError:
+                    print("❌ `git` not found in PATH.", file=sys.stderr)
+                    sys.exit(1)
+            else:
+                print(f"📥 Cloning repository {args.clone} (branch: {ref}) ...")
+                try:
+                    _github_clone(args.clone, ref)
+                except subprocess.CalledProcessError as e:
+                    print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
+                    sys.exit(1)
+                except FileNotFoundError:
+                    print("❌ Required CLI not found (`gh` or `git`). Install one, or toggle GH_CLI.", file=sys.stderr)
+                    sys.exit(1)
+                except GitHubAPIError as e:
+                    print(f"❌ Failed to clone repository: {e}", file=sys.stderr)
+                    sys.exit(1)
+
             print(f"📁 Changing directory to {clone_dir} ...")
             os.chdir(clone_dir)
             
