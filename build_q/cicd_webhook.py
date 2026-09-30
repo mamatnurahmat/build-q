@@ -18,10 +18,16 @@ import sys
 from typing import List, Optional
 
 from . import github_api
-from .config import use_gh_cli
+from .config import save_env_value, use_gh_cli
 
 HOOK_URL_DEFAULT = "https://cicd-hw.qoin.id/hook"
 DEFAULT_EVENTS = ["push", "pull_request", "issue_comment"]
+
+HMAC_ENV_KEY = "WEBHOOK_HOOK_HMAC"
+HMAC_KUBE_CONTEXT = "hw-dev"
+HMAC_KUBE_NS = "jenkins-x"
+HMAC_SECRET_CANDIDATES = ("lighthouse-hmac-token", "incoming-webhook")
+_HMAC_SAVE_PROMPTED = False
 
 
 def _list_hooks(api_repo: str) -> List[dict]:
@@ -99,28 +105,26 @@ def _maybe_open_browser(url: str) -> None:
 
 def _print_suggest_install(api_repo: str, hook_url: str) -> None:
     repo_short = api_repo.split("/")[-1]
-    print("💡 Cara memasang webhook (CLI):")
-    print(f"   1) Butuh gh admin:repo_hook + kubectl access ke cluster jenkins-x:")
-    print(f"      kubectl config use-context hw-dev")
-    print(f"      cicd-webhook create {repo_short}")
-    print(f"   2) Alternatif via API self-service (butuh HMAC secret):")
-    print(f"      SECRET=$(cicd-webhook hmac | awk '{{print $NF}}')")
-    print(f"      BODY='{{\"repo\":\"{repo_short}\"}}'")
-    print(f"      SIG=\"sha256=$(printf %s \"$BODY\" | openssl dgst -sha256 -hmac \"$SECRET\" | awk '{{print $2}}')\"")
-    print(f"      curl -X POST {hook_url}/register \\")
-    print(f"           -H 'Content-Type: application/json' \\")
-    print(f"           -H \"X-Hub-Signature-256: $SIG\" \\")
-    print(f"           -d \"$BODY\"")
+    print("💡 Pasang webhook — one-shot (auto ambil HMAC + register):")
+    print(f"      bq --cicd-webhook {repo_short}")
+    print( "   HMAC di-cache di ~/.build-q/.env (WEBHOOK_HOOK_HMAC).")
+    print( "   Butuh gh scope admin:repo_hook + kubectl context hw-dev "
+           "(secret jenkins-x/lighthouse-hmac-token).")
     print()
     _print_manual_web_setup(api_repo, hook_url)
     _maybe_open_browser(_github_webhook_new_url(api_repo))
 
 
-def run_cicd_webhook_check(api_repo: str, *, hook_url: str = HOOK_URL_DEFAULT) -> int:
-    """Cek apakah webhook `hook_url` sudah terpasang di `api_repo`.
+def run_cicd_webhook_check(
+    api_repo: str,
+    *,
+    hook_url: str = HOOK_URL_DEFAULT,
+    auto_setup: bool = True,
+) -> int:
+    """Cek webhook `hook_url` di `api_repo`; one-shot register bila belum ada.
 
-    Return 0 = sudah terpasang (aktif), 1 = belum / non-aktif (saran ditampilkan),
-    2 = akses ditolak / error API.
+    Return 0 = sudah terpasang (aktif) atau berhasil di-setup, 1 = belum / non-aktif
+    (dan setup gagal), 2 = akses ditolak / error API.
     """
     print(f"🔎 Cek webhook di {api_repo} → {hook_url}")
     try:
@@ -146,6 +150,9 @@ def run_cicd_webhook_check(api_repo: str, *, hook_url: str = HOOK_URL_DEFAULT) -
         if hooks:
             urls = [(h.get("config") or {}).get("url", "?") for h in hooks]
             print(f"      Webhook lain yang terpasang: {', '.join(urls)}")
+        if auto_setup:
+            print()
+            return run_cicd_webhook_setup(api_repo, hook_url=hook_url)
         _print_suggest_install(api_repo, hook_url)
         return 1
 
@@ -169,22 +176,9 @@ def run_cicd_webhook_check(api_repo: str, *, hook_url: str = HOOK_URL_DEFAULT) -
 
 # ── Setup (create) — dipakai --pr-fix, soft-fail bila error ──────────────
 
-def _fetch_hmac_secret(
-    *,
-    kube_context: str = "hw-dev",
-    ns: str = "jenkins-x",
-    name: str = "incoming-webhook",
-    key: str = "hmac",
+def _kubectl_read_secret(
+    kube_context: str, ns: str, name: str, key: str = "hmac",
 ) -> Optional[str]:
-    """Ambil HMAC secret dari kubectl (fallback env INCOMING_WEBHOOK_HMAC).
-
-    Return None bila gagal — caller boleh soft-fail.
-    """
-    import os
-    env_val = os.getenv("INCOMING_WEBHOOK_HMAC")
-    if env_val:
-        return env_val.strip()
-
     try:
         res = subprocess.run(
             ["kubectl", "--context", kube_context, "-n", ns,
@@ -193,7 +187,6 @@ def _fetch_hmac_secret(
         )
     except (FileNotFoundError, subprocess.CalledProcessError):
         return None
-
     b64 = res.stdout.strip()
     if not b64:
         return None
@@ -202,6 +195,53 @@ def _fetch_hmac_secret(
         return base64.b64decode(b64).decode("utf-8").strip()
     except Exception:
         return None
+
+
+def _fetch_hmac_secret(
+    *,
+    kube_context: str = HMAC_KUBE_CONTEXT,
+    ns: str = HMAC_KUBE_NS,
+    candidates=HMAC_SECRET_CANDIDATES,
+) -> Optional[str]:
+    """Ambil HMAC dari kubectl (coba beberapa nama secret standar)."""
+    for name in candidates:
+        val = _kubectl_read_secret(kube_context, ns, name)
+        if val:
+            return val
+    return None
+
+
+def _get_hmac_with_cache(*, prompt_save: bool = True) -> Optional[str]:
+    """Resolve HMAC dengan urutan: env WEBHOOK_HOOK_HMAC / INCOMING_WEBHOOK_HMAC
+    → kubectl. Bila diambil dari kubectl dan cache di ~/.build-q/.env belum
+    ada, tawarkan simpan (TTY only, sekali per proses).
+    """
+    import os
+    cached = os.getenv(HMAC_ENV_KEY) or os.getenv("INCOMING_WEBHOOK_HMAC")
+    if cached:
+        return cached.strip()
+
+    hmac_val = _fetch_hmac_secret()
+    if not hmac_val:
+        return None
+
+    global _HMAC_SAVE_PROMPTED
+    if prompt_save and not _HMAC_SAVE_PROMPTED and sys.stdin.isatty():
+        _HMAC_SAVE_PROMPTED = True
+        try:
+            ans = input(
+                f"   💾 Simpan HMAC ke ~/.build-q/.env sebagai {HMAC_ENV_KEY}? [Y/n]: "
+            ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = "n"
+            print()
+        if ans in {"", "y", "yes"}:
+            try:
+                save_env_value(HMAC_ENV_KEY, hmac_val)
+                print(f"   ✅ Tersimpan di ~/.build-q/.env ({HMAC_ENV_KEY})")
+            except Exception as e:
+                print(f"   ⚠️  Gagal simpan HMAC: {e}", file=sys.stderr)
+    return hmac_val
 
 
 def run_cicd_webhook_setup(
@@ -237,10 +277,10 @@ def run_cicd_webhook_setup(
         print(f"   ⏭  Sudah terpasang (id={hook_id}, {state}) — skip.")
         return 0
 
-    # 2) Ambil HMAC
-    hmac_secret = _fetch_hmac_secret()
+    # 2) Ambil HMAC (env WEBHOOK_HOOK_HMAC → kubectl → prompt simpan)
+    hmac_secret = _get_hmac_with_cache()
     if not hmac_secret:
-        print("   ⚠️  Tidak bisa ambil HMAC (kubectl/env INCOMING_WEBHOOK_HMAC).")
+        print(f"   ⚠️  Tidak bisa ambil HMAC (env {HMAC_ENV_KEY} / kubectl).")
         print("   ℹ️  Lewati setup — pasang manual dengan:")
         _print_suggest_install(api_repo, hook_url)
         return 1
