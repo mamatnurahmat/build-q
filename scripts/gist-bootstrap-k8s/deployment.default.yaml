@@ -47,7 +47,7 @@ spec:
             - name: tz-config
               mountPath: /etc/localtime
             - name: file-config-volume
-              mountPath: /app/.env
+              mountPath: /.env
               subPath: .env
               readOnly: true
       volumes:
@@ -57,5 +57,5 @@ spec:
             type: ""
         - name: file-config-volume
           secret:
-            secretName: file-config-{{APP}}-{{ENV}}
+            secretName: file-config-{{APP}}
             defaultMode: 420

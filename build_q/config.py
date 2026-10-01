@@ -5,8 +5,13 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 
-CONFIG_DIR = Path.home() / ".build-q"
-ENV_FILE = CONFIG_DIR / ".env"
+# Default config remains ~/.build-q, but deployments can select a separate
+# local env file (for example ~/build-q/.env) without changing credentials.
+_DEFAULT_CONFIG_DIR = Path.home() / ".build-q"
+CONFIG_DIR = Path(os.getenv("BUILD_Q_CONFIG_DIR", str(_DEFAULT_CONFIG_DIR))).expanduser()
+ENV_FILE = Path(
+    os.getenv("BUILD_Q_ENV_FILE", str(CONFIG_DIR / ".env"))
+).expanduser()
 
 
 def ensure_config_dir() -> None:
@@ -48,7 +53,12 @@ def load_config() -> Dict[str, Any]:
     # os.environ SEBELUM kita baca nilainya di bawah. Shell env tetap menang
     # (hydrate_env pakai setdefault). Fallback resilient: warning + lanjut.
     from . import pb_api
-    if pb_api.is_enabled():
+    # Set BUILD_Q_DISABLE_PB_API=true for an explicitly local-only run.
+    # This is useful on Docker-context hosts where credentials must stay in
+    # the selected local env file and no PocketBase request should be made.
+    if pb_api.is_enabled() and not _parse_bool(
+        os.getenv("BUILD_Q_DISABLE_PB_API", "false")
+    ):
         pb_api.hydrate_env(quiet=True)
 
     return {

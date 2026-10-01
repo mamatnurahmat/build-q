@@ -62,5 +62,5 @@ spec:
             type: ""
         - name: file-config-volume
           secret:
-            secretName: file-config-{{APP}}-{{ENV}}
+            secretName: file-config-{{APP}}
             defaultMode: 420

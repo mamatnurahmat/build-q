@@ -271,16 +271,16 @@ flowchart TD
 
 | Stack | Config File | Mount Path di Container | Secret Key |
 |-------|-------------|-------------------------|------------|
-| `default` | `.env` / `.env.{env}` / `.env.example` | `/app/.env` | `.env` |
+| `default` | `.env` / `.env.{env}` / `.env.example` | `/.env` | `.env` |
 | `dotnet` | `appsettings.{Env}.json` | `/app/appsettings.{Env}.json` | `appsettings.{Env}.json` |
 
 **DotnetEnv mapping:**
 
 | env | DotnetEnv |
 |-----|-----------|
-| develop | Development |
-| staging | Staging |
-| production | Production |
+| develop | development |
+| staging | staging |
+| production | production |
 
 **Source code:** [`_detect_stack_and_fetch_config()`](file:///Users/mamatnurahmat/build-q/build_q/bootstrap.py#L79-L122)
 
@@ -380,7 +380,7 @@ spec:
           ports:
             - containerPort: {{PORT}}
           volumeMounts:
-            - mountPath: /app/.env      # Secret mount
+            - mountPath: /.env      # Secret mount
               subPath: .env
       volumes:
         - name: file-config-volume

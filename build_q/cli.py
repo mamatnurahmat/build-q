@@ -377,6 +377,33 @@ Config file: ~/.build-q/.env
              "Berguna bila cluster pakai pattern beda mis. production-nodepool-service.",
     )
 
+    # ── SOPS encrypt / decrypt manual (standalone) ────────────────────────────
+    parser.add_argument(
+        "--sops-encrypt",
+        metavar="FILE",
+        help="Encrypt FILE in-place pakai sops + age. Recipient dari "
+             "BUILD_Q_SOPS_AGE_RECIPIENT, atau .sops.yaml di parent dir, "
+             "atau fallback public key di ~/.config/sops/age/keys.txt.",
+    )
+    parser.add_argument(
+        "--sops-decrypt",
+        metavar="FILE",
+        help="Decrypt FILE SOPS-encrypted. Default: tulis ke stdout. "
+             "Pakai --sops-in-place untuk tulis balik ke file.",
+    )
+    parser.add_argument(
+        "--sops-in-place",
+        action="store_true",
+        help="Dengan --sops-decrypt: tulis plaintext balik ke file "
+             "(bukan ke stdout).",
+    )
+    parser.add_argument(
+        "--sops-recipient",
+        metavar="AGE_PUBKEY",
+        help="Override recipient saat --sops-encrypt (comma-separated untuk "
+             "multi-recipient). Sama dengan env BUILD_Q_SOPS_AGE_RECIPIENT.",
+    )
+
     # Positional args (optional — auto-detected from git when --local is used)
     parser.add_argument("repo", nargs="?", help="Repository / service name")
     parser.add_argument("ref", nargs="?", help="Branch or tag (e.g. staging, main, v1.0.0)")
@@ -671,6 +698,43 @@ Config file: ~/.build-q/.env
                 dry_run=args.dry_run,
                 force=args.force,
             ))
+
+        if args.sops_encrypt or args.sops_decrypt:
+            from pathlib import Path
+            from . import sops as _sops
+            target = args.sops_encrypt or args.sops_decrypt
+            path = Path(target).expanduser()
+            if not path.exists():
+                print(f"❌ File tidak ada: {path}", file=sys.stderr)
+                sys.exit(2)
+            try:
+                if args.sops_encrypt:
+                    if args.sops_recipient:
+                        recipients = [
+                            r.strip() for r in args.sops_recipient.split(",")
+                            if r.strip()
+                        ]
+                        source = "--sops-recipient"
+                    else:
+                        recipients, source = _sops.resolve_recipients(path)
+                    out_recipients, out_source = _sops.encrypt_file(
+                        path, recipients=recipients, source=source,
+                    )
+                    print(f"🔒 Encrypted: {path}")
+                    print(f"   via      : {out_source or source}")
+                    print(f"   recipient: {out_recipients}")
+                else:
+                    text = _sops.decrypt_file(
+                        path, in_place=args.sops_in_place,
+                    )
+                    if args.sops_in_place:
+                        print(f"🔓 Decrypted in-place: {path}")
+                    else:
+                        sys.stdout.write(text)
+                sys.exit(0)
+            except _sops.SopsError as e:
+                print(f"❌ {e}", file=sys.stderr)
+                sys.exit(1)
 
         if args.bootstrap_k8s:
             missing = []

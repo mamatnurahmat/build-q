@@ -671,14 +671,14 @@ jobs:
 # bootstrap-k8s templates — Secret/Deployment/Service standar.
 # Selector Deployment dan Service DIJAMIN match via placeholder `app: {{APP}}`
 # tunggal (rendering tunggal → selector konsisten by construction).
-# Mount path: dotnet → /app/appsettings.{{DOTNET_ENV}}.json ; default (go/node/rust) → /app/.env
+# Mount path: dotnet → /app/appsettings.{{DOTNET_ENV}}.json ; default (go/node/rust) → /.env
 # ============================================================
 
 _BUNDLED_SECRET_DOTNET = """\
 apiVersion: v1
 kind: Secret
 metadata:
-  name: file-config-{{APP}}-{{ENV}}
+  name: file-config-{{APP}}
   namespace: {{NAMESPACE}}
   labels:
     app: {{APP}}
@@ -692,7 +692,7 @@ _BUNDLED_SECRET_DEFAULT = """\
 apiVersion: v1
 kind: Secret
 metadata:
-  name: file-config-{{APP}}-{{ENV}}
+  name: file-config-{{APP}}
   namespace: {{NAMESPACE}}
   labels:
     app: {{APP}}
@@ -767,7 +767,7 @@ spec:
             type: ""
         - name: file-config-volume
           secret:
-            secretName: file-config-{{APP}}-{{ENV}}
+            secretName: file-config-{{APP}}
             defaultMode: 420
 """
 
@@ -821,7 +821,7 @@ spec:
             - name: tz-config
               mountPath: /etc/localtime
             - name: file-config-volume
-              mountPath: /app/.env
+              mountPath: /.env
               subPath: .env
               readOnly: true
       volumes:
@@ -831,7 +831,7 @@ spec:
             type: ""
         - name: file-config-volume
           secret:
-            secretName: file-config-{{APP}}-{{ENV}}
+            secretName: file-config-{{APP}}
             defaultMode: 420
 """
 

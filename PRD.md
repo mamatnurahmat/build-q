@@ -628,7 +628,7 @@ Repo tanpa `cicd/cicd.json` (mis. repo Rust yang pure) bisa di-bootstrap selama 
 
 **Yang di-generate ke `{path-yaml}/`:**
 - `file-config/{app}-{env}.yaml` — Secret (data key `.env` untuk go/node/rust, `appsettings.{Env}.json` untuk dotnet), base64 dari config file source
-- `{app}_deployment.yaml` — Deployment: labels 4-tuple `{app,env,project,role}` (selector immutable — match template.labels), `imagePullSecrets: [{name: regcred}]`, `nodeSelector: cce.cloud.com/cce-nodepool: <nodepool>`, `imagePullPolicy: Always`, `RollingUpdate` strategy, tz-config volume `/etc/localtime`, secret volume mount ke `/app/.env` atau `/app/appsettings.{Env}.json`
+- `{app}_deployment.yaml` — Deployment: labels 4-tuple `{app,env,project,role}` (selector immutable — match template.labels), `imagePullSecrets: [{name: regcred}]`, `nodeSelector: cce.cloud.com/cce-nodepool: <nodepool>`, `imagePullPolicy: Always`, `RollingUpdate` strategy, tz-config volume `/etc/localtime`, secret volume mount ke `/.env` atau `/app/appsettings.{Env}.json`
 - `{app}_services.yaml` — Service ClusterIP, `targetPort: http` (named port), selector 1-tuple `{app: X}` (subset match — cocok dengan pod 4-tuple)
 - `kustomization.yaml` — append 2 entries di `resources:` (idempotent — skip bila sudah ada)
 

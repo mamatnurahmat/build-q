@@ -4,14 +4,15 @@ One-shot bootstrap manifest K8s ke repo GitOps:
   1. fetch `cicd/cicd.json` dari repo source (native REST)
   2. deteksi stack (dotnet vs default: go/node/rust) via cicd hint / probing config file
   3. fetch config file: appsettings.{DotnetEnv}.json  (dotnet) atau .env.{env} / .env (default)
-  4. clone gitops repo shallow → branch baru → render 3 YAML
+  4. clone gitops repo shallow → branch baru → render 3 YAML + encrypt Secret
   5. commit → push → open PR ke gitops_branch
 
 Selector deployment & service auto-match (single `app: {{APP}}` placeholder), tidak
-mungkin drift. Path output:
-  {path_yaml}/file-config/{app}-{env}.yaml   ← Secret
-  {path_yaml}/{app}_deployment.yaml          ← Deployment (mount secretRef)
-  {path_yaml}/{app}_services.yaml            ← Service (selector match)
+mungkin drift. Path output (konvensi gitops Qoin — matching .gitignore exception
+`!**/*_secret_sops.yaml`):
+  {path_yaml}/file-config-{app}_secret_sops.yaml  ← Secret (SOPS-encrypted)
+  {path_yaml}/{app}_deployment.yaml               ← Deployment (mount secretRef)
+  {path_yaml}/{app}_services.yaml                 ← Service (selector match)
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from . import github_api
+from . import github_api, sops
 from ._common import fetch_cicd_data, resolve_registry
 from .config import cicd_candidates, load_config
 from .templates import load_template, render
@@ -46,12 +47,12 @@ def _derive_env(refs: str) -> str:
 
 
 def _dotnet_env(env: str) -> str:
-    """develop→Development, staging→Staging, production→Production."""
+    """develop→development, staging→staging, production→production."""
     return {
-        "develop": "Development",
-        "staging": "Staging",
-        "production": "Production",
-    }.get(env, env.capitalize())
+        "develop": "development",
+        "staging": "staging",
+        "production": "production",
+    }.get(env, env.lower())
 
 
 def _ref_id_for_image_tag(ref: str, sha: str) -> str:
@@ -94,13 +95,17 @@ def _detect_stack_and_fetch_config(
 
     # 1. Hint eksplisit
     if hint == "dotnet":
-        candidates = [f"appsettings.{dotnet_env}.json"]
+        candidates = [
+            f"appsettings.{dotnet_env}.json",
+            f"appsettings.{env}.json",
+        ]
     elif hint in ("go", "node", "nodejs", "rust", "default"):
         candidates = [f".env.{env}", ".env", ".env.example"]
     else:
         # 2/3/4/5. Probe berurutan: dotnet dulu, lalu default
         candidates = [
             f"appsettings.{dotnet_env}.json",
+            f"appsettings.{env}.json",
             f".env.{env}",
             ".env",
             ".env.example",
@@ -116,16 +121,18 @@ def _detect_stack_and_fetch_config(
         stack = "dotnet" if cand.startswith("appsettings.") else "default"
         return stack, cand, raw
 
-    raise ValueError(
-        f"Config file tidak ditemukan di {api_repo}@{ref}. "
+    print(
+        f"   ⚠️  Config file tidak ditemukan di {api_repo}@{ref}. "
         f"Coba (berurutan): {', '.join(candidates)}"
     )
+    print("   ⚠️  Melanjutkan setup tanpa file-config (Secret).")
+    return "default", "none", b""
 
 
 def _update_kustomization(
-    repo_dir: Path, path_yaml: str, app: str,
+    repo_dir: Path, path_yaml: str, app: str, *, has_secret: bool = False,
 ) -> Optional[str]:
-    """Sisipkan `{app}_services.yaml` + `{app}_deployment.yaml` di `resources:`.
+    """Sisipkan secret + services + deployment di `resources:`.
 
     Text-based (tanpa dep PyYAML). Idempotent — skip entries yg sudah ada.
     Return path relatif kustomization bila di-modify; None kalau tidak ada
@@ -138,6 +145,8 @@ def _update_kustomization(
         return None
 
     new_entries = [f"{app}_services.yaml", f"{app}_deployment.yaml"]
+    if has_secret:
+        new_entries.insert(0, f"file-config-{app}_secret_sops.yaml")
     lines = kus_path.read_text().split("\n")
 
     res_idx = next(
@@ -315,32 +324,75 @@ def _resolve_image_tag(api_repo: str, ref: str, cicd: Dict, config: Dict) -> str
     return f"{registry}/{image_name}:{ref_id}"
 
 
+def _secret_rel_path(path_yaml: str, app: str) -> str:
+    """Konvensi file Secret SOPS di gitops Qoin.
+
+    `.gitignore` pada repo ~/gitops men-ignore `**/*_secret*` dan `**/*_sops*`
+    kecuali `!**/*_secret_sops.yaml`, jadi filename WAJIB berakhir
+    `_secret_sops.yaml` agar ter-track. Env implisit dari namespace folder,
+    jadi tidak diikutkan di filename.
+    """
+    return f"{path_yaml}/file-config-{app}_secret_sops.yaml"
+
+
 def _render_and_write(
     repo_dir: Path,
     path_yaml: str,
     ctx: Dict[str, str],
     stack: str,
-) -> List[str]:
-    """Render 3 template → tulis ke workdir. Return list path relatif yang di-write."""
+) -> Tuple[List[str], Optional[str]]:
+    """Render 3 template → tulis ke workdir.
+
+    Return (written_rel_paths, secret_rel_path_or_None). Secret belum
+    di-encrypt di sini — encryption dikerjakan terpisah di run_bootstrap_k8s
+    agar idempotent-check (decrypt existing) bisa short-circuit tanpa rewrite.
+    """
     secret_tpl = "secret_dotnet" if stack == "dotnet" else "secret_default"
     deploy_tpl = "deployment_dotnet" if stack == "dotnet" else "deployment_default"
+    app = ctx["APP"]
 
-    outputs = [
-        (f"{path_yaml}/file-config/{ctx['APP']}-{ctx['ENV']}.yaml", secret_tpl),
-        (f"{path_yaml}/{ctx['APP']}_deployment.yaml",               deploy_tpl),
-        (f"{path_yaml}/{ctx['APP']}_services.yaml",                 "services"),
+    secret_rel: Optional[str] = None
+    outputs: List[Tuple[str, str]] = [
+        (f"{path_yaml}/{app}_deployment.yaml", deploy_tpl),
+        (f"{path_yaml}/{app}_services.yaml",   "services"),
     ]
+    if ctx.get("CONFIG_B64"):
+        secret_rel = _secret_rel_path(path_yaml, app)
+        outputs.insert(0, (secret_rel, secret_tpl))
 
     written: List[str] = []
     for rel_path, tpl_name in outputs:
         tpl = load_template(tpl_name)
         content = render(tpl, ctx)
         target = repo_dir / rel_path
+        is_secret = rel_path == secret_rel
+
+        # Idempotency: Secret SOPS-encrypted → decrypt dan compare field data.
+        # Text match tidak reliable (sops me-re-format indent 2→4), tapi
+        # payload base64 (CONFIG_B64) adalah satu-satunya nilai yg penting
+        # dan deterministik, jadi cukup cek apakah string base64 tersebut
+        # ada di plaintext hasil decrypt.
+        if is_secret and target.exists() and sops.is_encrypted(target):
+            try:
+                decrypted = sops.decrypt_to_string(target, cwd=repo_dir)
+                b64 = ctx.get("CONFIG_B64", "")
+                if b64 and b64 in decrypted:
+                    print(f"   ℹ️  {rel_path} unchanged (SOPS payload match).")
+                    continue
+            except sops.SopsError as e:
+                print(f"   ⚠️  SOPS decrypt check gagal untuk {rel_path}: {e}")
+
+        # Idempotency: file plaintext → bandingkan byte.
+        if not is_secret and target.exists():
+            if target.read_text().strip() == content.strip():
+                print(f"   ℹ️  {rel_path} unchanged.")
+                continue
+
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         written.append(rel_path)
         print(f"   ✏️  {rel_path}")
-    return written
+    return written, secret_rel
 
 
 def run_bootstrap_k8s(
@@ -513,28 +565,62 @@ def run_bootstrap_k8s(
     print(f"\n🌿 Branch: {branch_name} (dari {gitops_branch})")
     _sh(["git", "checkout", "-b", branch_name], cwd=str(repo_dir))
 
-    print(f"\n📝 Render 3 file YAML ke {path_yaml}/:")
-    written = _render_and_write(repo_dir, path_yaml, ctx, stack)
+    print(f"\n📝 Render YAML ke {path_yaml}/:")
+    written, secret_rel = _render_and_write(repo_dir, path_yaml, ctx, stack)
 
-    # 6a. Update kustomization.yaml agar deployment + service ke-pick-up kustomize
-    kus_rel = _update_kustomization(repo_dir, path_yaml, app)
-    if kus_rel:
-        written.append(kus_rel)
+    # 6a. SOPS encrypt Secret (STANDAR — Secret plaintext tidak boleh di-commit).
+    #     Dilakukan SEBELUM apply-secret & kustomization agar file yang di-apply
+    #     ke cluster adalah ciphertext (kubectl handle sops bisa? NO — kita
+    #     apply plaintext ke cluster, tapi plaintext hanya hidup di workdir
+    #     ephemeral, bukan di repo). Jadi: apply dulu → encrypt → commit.
+    secret_path = repo_dir / secret_rel if secret_rel else None
 
-    # 6b. kubectl apply secret jika belum ada (opt-in via --apply-secret)
-    if apply_secret:
-        secret_rel = f"{path_yaml}/file-config/{app}-{env}.yaml"
+    # 6b. kubectl apply secret jika belum ada (opt-in via --apply-secret).
+    #     WAJIB sebelum encrypt — kubectl tidak mengerti SOPS.
+    if apply_secret and secret_rel and secret_path and secret_path.exists():
         _apply_secret_if_missing(
             repo_dir, secret_rel,
-            f"file-config-{app}-{env}", namespace, env,
+            f"file-config-{app}", namespace, env,
             kube_context, dry_run,
         )
 
-    # 6c. Deteksi selector drift → delete Deployment lama (opt-in)
+    # 6c. Deteksi selector drift → delete Deployment lama (opt-in).
     if force_recreate_deploy:
         _recreate_deploy_if_selector_drift(
             app, namespace, ctx, env, kube_context, dry_run,
         )
+
+    # 6d. Encrypt Secret (STANDAR) — fail hard bila sops tidak ada / gagal.
+    #     Idempotent: skip bila file sudah encrypted (artinya baru di-skip di
+    #     _render_and_write karena isinya sama, tapi defensively re-check).
+    if secret_rel and secret_path and secret_path.exists():
+        if sops.is_encrypted(secret_path):
+            print(f"\n🔒 Secret sudah SOPS-encrypted — skip.")
+        else:
+            print(f"\n🔒 Encrypt secret dengan SOPS ...")
+            if dry_run:
+                print(f"   [dry-run] sops --encrypt --in-place {secret_rel}")
+            else:
+                try:
+                    recipients, source = sops.encrypt_file(
+                        secret_path, cwd=repo_dir,
+                    )
+                    print(f"   ✅ Encrypted via {source}")
+                    print(f"      recipient(s): {recipients}")
+                except sops.SopsError as e:
+                    print(f"   ❌ {e}", file=sys.stderr)
+                    print(
+                        f"   💡 Hint: install sops + pastikan "
+                        f"~/.config/sops/age/keys.txt punya identity, atau "
+                        f"set BUILD_Q_SOPS_AGE_RECIPIENT=age1xxx.",
+                        file=sys.stderr,
+                    )
+                    return 1
+
+    # 6e. Update kustomization.yaml — append sekaligus secret + deployment + service.
+    kus_rel = _update_kustomization(repo_dir, path_yaml, app, has_secret=bool(secret_rel))
+    if kus_rel:
+        written.append(kus_rel)
 
     # 7. Commit — skip bila tidak ada diff (re-run pasca-merge PR sebelumnya)
     _sh(["git", "add", "--"] + written, cwd=str(repo_dir))

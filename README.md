@@ -395,6 +395,8 @@ bq plus-be-paymentlink-manager staging --remote --no-image-check --dry-run
 bq plus-be-paymentlink-manager staging --remote --rebuild
 ```
 
+> **Build di host remote (`DOCKER_CONTEXT`)?** Lihat [VERIFY-REMOTE-BUILD.md](./VERIFY-REMOTE-BUILD.md) untuk cara membuktikan bahwa `docker build` benar-benar dieksekusi di VM remote (via `ssh://`), bukan di laptop lokal.
+
 ### 6. Bootstrap CI/CD service baru (Jenkins X — modern, secret mount)
 
 ```bash
@@ -542,10 +544,10 @@ Semua file masuk ke `{path-yaml}/` di repo GitOps:
 
 | File | Isi | Selector consistency |
 |---|---|---|
-| `file-config/{app}-{env}.yaml` | `Secret` — data key `.env` (default) atau `appsettings.{Env}.json` (dotnet), base64 dari source config | — |
-| `{app}_deployment.yaml` | `Deployment` — labels 4-tuple `{app, env, project, role}`, RollingUpdate, `imagePullSecrets: regcred`, `nodeSelector: cce.cloud.com/cce-nodepool={nodepool}`, tz-config volume, mount secret ke `/app/.env` atau `/app/appsettings.{Env}.json` | `matchLabels` = template.labels (4-tuple exact) |
+| `file-config-{app}_secret_sops.yaml` | `Secret` **SOPS-encrypted** (age) — data key `.env` (default) atau `appsettings.{env}.json` (dotnet), base64 dari source config. Nama file match `.gitignore` exception `!**/*_secret_sops.yaml` di repo gitops. | — |
+| `{app}_deployment.yaml` | `Deployment` — labels 4-tuple `{app, env, project, role}`, RollingUpdate, `imagePullSecrets: regcred`, `nodeSelector: cce.cloud.com/cce-nodepool={nodepool}`, tz-config volume, mount secret `file-config-{app}` ke `/.env` atau `/app/appsettings.{env}.json` | `matchLabels` = template.labels (4-tuple exact) |
 | `{app}_services.yaml` | `Service` — `ClusterIP`, `targetPort: http`, port dari `cicd.PORT` | `selector.app = {app}` (subset — match pod 4-tuple) |
-| `kustomization.yaml` | Append 2 entries (`_services.yaml` + `_deployment.yaml`) di `resources:` list | — |
+| `kustomization.yaml` | Append 3 entries (`file-config-{app}_secret_sops.yaml` + `_services.yaml` + `_deployment.yaml`) di `resources:` list | — |
 
 **Selector Deployment ↔ Service** dijamin match — placeholder `{{APP}}` tunggal di
 template, satu render → tidak mungkin drift by construction.
@@ -574,10 +576,10 @@ Env otomatis dari `<ref>`:
 
 | Ref | Env | Dotnet ASPNETCORE_ENVIRONMENT |
 |---|---|---|
-| `develop` | `develop` | `Development` |
-| `staging` | `staging` | `Staging` |
-| `sandbox` | `sandbox` | `Sandbox` |
-| `main` / `master` / tag `v*` | `production` | `Production` |
+| `develop` | `develop` | `development` |
+| `staging` | `staging` | `staging` |
+| `sandbox` | `sandbox` | `sandbox` |
+| `main` / `master` / tag `v*` | `production` | `production` |
 
 Override via `--env NAME` (contoh: `--env staging` walau source ref `main`).
 
