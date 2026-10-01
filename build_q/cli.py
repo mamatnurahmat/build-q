@@ -164,6 +164,23 @@ Config file: ~/.build-q/.env
         action="store_true",
         help="Buka Jev Agent Planner TUI interaktif",
     )
+    parser.add_argument(
+        "--tui-pull",
+        action="store_true",
+        help="Refresh TUI catalog cache dari PocketBase (collection "
+             "build_q_tools / build_q_providers / build_q_patterns).",
+    )
+    parser.add_argument(
+        "--tui-sync",
+        metavar="SEED_FILE",
+        help="Upload katalog dari file seed JSON ke PocketBase (upsert "
+             "by unique field). Format: {\"build_q_tools\": [...], ...}.",
+    )
+    parser.add_argument(
+        "--tui-ls",
+        action="store_true",
+        help="Tampilkan ringkasan katalog TUI aktif (tools/providers/patterns).",
+    )
 
     # Subcommand flags
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
@@ -556,6 +573,73 @@ Config file: ~/.build-q/.env
         if args.tui:
             from .tui import repl
             repl()
+            return
+
+        if args.tui_pull:
+            from . import tui_catalog
+            load_config()  # hydrate PB_API_* ke os.environ
+            tui_catalog.clear_cache()
+            cat = tui_catalog.load_catalog(force_refresh=True)
+            print(
+                f"✅ TUI catalog refreshed from PocketBase:\n"
+                f"   tools    : {len(cat['tools'])}\n"
+                f"   providers: {len(cat['providers'])} "
+                f"(default: {cat['default_provider']})\n"
+                f"   patterns : {len(cat['patterns'])}\n"
+                f"   risky    : {len(cat['risky'])}\n"
+                f"   cache    : {tui_catalog.CACHE_FILE}"
+            )
+            return
+
+        if args.tui_sync:
+            from pathlib import Path
+            from . import tui_catalog
+            load_config()
+            seed = Path(args.tui_sync).expanduser()
+            if not seed.exists():
+                print(f"❌ Seed file tidak ada: {seed}", file=sys.stderr)
+                sys.exit(2)
+            try:
+                summary = tui_catalog.push_from_seed(seed)
+            except tui_catalog.CatalogError as e:
+                print(f"❌ {e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"📤 Uploaded dari {seed}:")
+            for coll, stats in summary.items():
+                print(
+                    f"   {coll:22s} created={stats['created']} "
+                    f"updated={stats['updated']} failed={stats['failed']}"
+                )
+            print(f"   Cache cleared — jalankan `bq --tui` akan refetch.")
+            return
+
+        if args.tui_ls:
+            from . import tui_catalog
+            load_config()
+            cat = tui_catalog.load_catalog()
+            age = tui_catalog.cache_age_seconds()
+            print(
+                f"📚 TUI catalog (source: {cat['source']}, "
+                f"cache_age: {age}s)\n"
+                f"   default provider: {cat['default_provider']}\n"
+            )
+            print(f"── Providers ({len(cat['providers'])}) ──")
+            for p in cat["providers"].values():
+                flag = "★" if p["is_default"] else " "
+                print(f"   {flag} {p['name']:12s} {p['model']:25s} url={p['url']}")
+            print(f"\n── Tools ({len(cat['tools'])}) ──")
+            cats: dict = {}
+            for name, meta in cat["tools"].items():
+                cats.setdefault(meta.get("_category") or "-", []).append(
+                    (name, "⚠️" if meta.get("_risky") else "✓")
+                )
+            for cname in sorted(cats):
+                print(f"   [{cname}]")
+                for n, flag in cats[cname]:
+                    print(f"     {flag} {n}")
+            print(f"\n── Patterns ({len(cat['patterns'])}) ──")
+            for field in sorted(cat["patterns"]):
+                print(f"   {field}")
             return
 
         if args.init:

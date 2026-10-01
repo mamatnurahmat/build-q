@@ -689,8 +689,11 @@ bq --bootstrap-k8s foo develop \
 - `--set-image <ns> <deploy> <image>`: Imperative hot-patch K8s live deployment + `--watch`.
 - `--is-match-image <ns> <deploy> <gitops> <branch> <yaml>`: Drift check antara image live cluster vs spec di GitOps repo.
 
-**E. TUI Planner**
-- `--tui`: Buka Jev Agent Planner (Terminal User Interface) menggunakan Textual.
+**E. TUI Planner (Jev System One)**
+- `--tui`: Buka Jev Agent Planner — katalog tool/provider/pattern dibaca **dari PocketBase** (`build_q_tools`, `build_q_providers`, `build_q_patterns`), cache lokal TTL 1 jam di `~/.build-q/.tui-cache.json`. Fallback bootstrap minimum bila PB down + cache kosong.
+- `--tui-pull`: Refresh cache katalog dari PocketBase (manual).
+- `--tui-sync <seed.json>`: Upload katalog seed JSON ke PocketBase (upsert by unique field).
+- `--tui-ls`: Tampilkan ringkasan katalog aktif (tools per-category, providers, patterns).
 
 ### 15. Contoh full (customize secret, platform, build-arg)
 
@@ -727,7 +730,10 @@ Subcommands (mutually exclusive):
   --check [<repo> <ref>]    Cek readiness repo (7 aspek).
   --repo-check <repo> <ref> Cek config CICD dari PocketBase tanpa clone.
   --doctor                  Diagnostic local toolchain (git, docker, tokens).
-  --tui                     Buka Jev Agent Planner (TUI).
+  --tui                     Buka Jev Agent Planner (TUI, katalog dari PocketBase).
+  --tui-pull                Refresh TUI catalog cache dari PocketBase.
+  --tui-sync <seed.json>    Upload katalog JSON ke PocketBase (upsert).
+  --tui-ls                  Ringkas katalog TUI aktif.
   --set-image <ns> <dp> <img> Hot-patch deployment live di K8s.
   --gitops-set-image ...    Update image di repo GitOps + push.
   --is-match-image ...      Cek drift image K8s live vs GitOps.

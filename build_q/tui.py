@@ -1,14 +1,15 @@
 """Jev Agent Planner — TUI interaktif yang memilih tool build-q via Jev.
 
 Fitur:
-- Provider switchable: `openrouter` atau `typesafe` (via .env atau perintah TUI).
-- Credential per-provider dibaca dari .env, bisa dipersist (`/save`) atau di-swap
-  runtime (`/provider openrouter`).
-- Top-3 kandidat tool ditampilkan dengan **score kecocokan** + **contoh perintah
-  lengkap** (parameter di-extract dari pesan user via regex).
-- Konfirmasi eksekusi dengan penanda RISKY untuk perintah destruktif.
+- Katalog tool, provider, dan regex pattern **100% dari PocketBase**
+  (collection `build_q_tools`, `build_q_providers`, `build_q_patterns`).
+  Cache lokal `~/.build-q/.tui-cache.json` TTL 1 jam. Fallback bootstrap
+  minimum bila PB down + cache kosong.
+- Provider switchable runtime (`/provider openrouter`).
+- Top-3 kandidat tool ditampilkan dengan score + preview perintah.
+- Konfirmasi eksekusi dengan tag RISKY untuk perintah destruktif.
 
-Butuh: `rich`, `requests`. Tidak butuh `typesafe-sdk` — panggilan lewat HTTP langsung.
+Butuh: `rich`, `requests`.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from .config import ENV_FILE, load_config
+from . import tui_catalog
 
 # ---------------------------------------------------------------------------
 # .env handling
@@ -97,7 +99,7 @@ def save_env(updates: dict, path: Path | None = None) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Provider registry
+# Catalog accessors (PocketBase-backed, cached)
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -108,33 +110,53 @@ class Provider:
     key_env: str
 
 
-PROVIDERS: dict[str, Provider] = {
-    "openrouter": Provider(
-        name="openrouter",
-        url="https://openrouter.ai/api/alpha/decisions",
-        model="typesafe/jev-1.13",
-        key_env="OPENROUTER_API_KEY",
-    ),
-    "typesafe": Provider(
-        name="typesafe",
-        url="https://api.typesafe.ai/v1/systemone",
-        model="jev-latest",
-        key_env="TYPESAFE_API_KEY",
-    ),
-}
+_catalog_cache: dict | None = None
+
+
+def catalog(*, force_refresh: bool = False) -> dict:
+    """Lazy-load katalog dari PB (cache per-process + file cache)."""
+    global _catalog_cache
+    if _catalog_cache is None or force_refresh:
+        _catalog_cache = tui_catalog.load_catalog(force_refresh=force_refresh)
+    return _catalog_cache
+
+
+def TOOLS() -> dict:
+    return catalog()["tools"]
+
+
+def PROVIDERS() -> dict:
+    return catalog()["providers"]
+
+
+def RISKY_TOOLS() -> set:
+    return catalog()["risky"]
+
+
+def TEXT_PATTERNS() -> dict:
+    return catalog()["patterns"]
 
 
 def resolve_provider(name: str | None = None) -> Provider:
     """Ambil provider aktif; url/model bisa dioverride via env (mis. TYPESAFE_URL)."""
-    name = (name or os.environ.get("JEV_PROVIDER", "typesafe")).lower()
-    if name not in PROVIDERS:
-        raise RuntimeError(f"Provider '{name}' tidak dikenal. Pilih: {list(PROVIDERS)}")
-    p = PROVIDERS[name]
+    providers = PROVIDERS()
+    if not providers:
+        raise RuntimeError(
+            "Belum ada provider di PocketBase collection `build_q_providers`. "
+            "Jalankan `bq --tui-sync scripts/build-q-seed.json`."
+        )
+    default = catalog()["default_provider"] or next(iter(providers))
+    name = (name or os.environ.get("JEV_PROVIDER") or default).lower()
+    if name not in providers:
+        raise RuntimeError(
+            f"Provider '{name}' tidak dikenal. Pilih: {list(providers)}"
+        )
+    p = providers[name]
     return Provider(
-        name=p.name,
-        url=os.environ.get(f"{p.name.upper()}_URL", p.url),
-        model=os.environ.get(f"{p.name.upper()}_MODEL", p.model),
-        key_env=p.key_env,
+        name=p["name"],
+        url=os.environ.get(f"{p['name'].upper()}_URL", p["url"]),
+        model=os.environ.get(f"{p['name'].upper()}_MODEL", p["model"]),
+        key_env=p["key_env"],
     )
 
 
@@ -164,258 +186,11 @@ def jev_decide(state: dict, questions: dict, provider: Provider) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Tool catalog
+# Tool catalog / regex patterns — SEMUA dari PocketBase (collection
+# `build_q_tools`, `build_q_patterns`, `build_q_providers`). Gunakan
+# accessor di atas: `TOOLS()`, `PROVIDERS()`, `RISKY_TOOLS()`,
+# `TEXT_PATTERNS()` — JANGAN deklarasikan konstanta hardcoded di sini.
 # ---------------------------------------------------------------------------
-
-TOOLS: dict[str, dict] = {
-    # ─── bq: BUILD image ───────────────────────────────────────────────────
-    "bq_build_local": {
-        "desc": "EKSEKUSI build image container secara lokal via Docker buildx untuk repo & branch/tag. Ini perintah default untuk membangun image (bukan setup). Push ke registry.",
-        "template": "bq {repo} {ref} --local",
-        "params": {
-            "repo": {"type": "text", "hint": "nama repo (mis. pay-be-topup-manager, saas-apigateway)"},
-            "ref": {"type": "text", "hint": "branch atau tag (develop, staging, main, v1.2.3)"},
-        },
-    },
-    "bq_build_no_push": {
-        "desc": "Build image lokal tanpa push ke Docker Hub — hanya untuk test build sukses / dry validation.",
-        "template": "bq {repo} {ref} --local --no-push",
-        "params": {
-            "repo": {"type": "text", "hint": "nama repo"},
-            "ref": {"type": "text", "hint": "branch atau tag"},
-        },
-    },
-    "bq_build_compose": {
-        "desc": "Build & release image via docker-compose (make build/release) untuk aplikasi web/legacy compose.",
-        "template": "bq {repo} {ref} --compose",
-        "params": {
-            "repo": {"type": "text", "hint": "nama repo"},
-            "ref": {"type": "text", "hint": "branch/tag"},
-        },
-    },
-    "bq_build_dry_run": {
-        "desc": "Simulasi build tanpa eksekusi — hanya print perintah docker build yang akan dijalankan.",
-        "template": "bq {repo} {ref} --local --dry-run",
-        "params": {
-            "repo": {"type": "text", "hint": "nama repo"},
-            "ref": {"type": "text", "hint": "branch/tag"},
-        },
-    },
-    "bq_clone_build": {
-        "desc": "Clone repo dari GitHub lalu build image (berguna untuk build repo yang belum ada di lokal).",
-        "template": "bq --clone {owner_repo} {ref} --local --clean",
-        "params": {
-            "owner_repo": {"type": "text", "hint": "owner/repo GitHub (mis. Qoin-Digital-Indonesia/pay-be-x)"},
-            "ref": {"type": "text", "hint": "branch/tag"},
-        },
-    },
-    "bq_build_remote": {
-        "desc": "Build image remote dari git langsung via buildx (tanpa clone lokal). Butuh registry access.",
-        "template": "bq {repo} {ref} --remote",
-        "params": {
-            "repo": {"type": "text", "hint": "nama repo"},
-            "ref": {"type": "text", "hint": "branch/tag"},
-        },
-    },
-
-    # ─── bq: CONFIG & PREFLIGHT ─────────────────────────────────────────────
-    "bq_doctor": {
-        "desc": "Preflight check kesiapan tools (git, docker, buildx, kubectl) & credentials (GITHUB_TOKEN, docker login, kube-context). Exit 0 kalau siap.",
-        "template": "bq --doctor",
-        "params": {},
-    },
-    "bq_config_show": {
-        "desc": "Tampilkan konfigurasi build-q yang aktif dari ~/.build-q/.env.",
-        "template": "bq --config",
-        "params": {},
-    },
-    "bq_init_config": {
-        "desc": "Initialize file config ~/.build-q/.env pertama kali (interactive setup).",
-        "template": "bq --init",
-        "params": {},
-    },
-    "bq_check": {
-        "desc": "Cek konsistensi cicd.json, Makefile, Dockerfile, compose.yaml — validasi konfigurasi CI/CD project.",
-        "template": "bq --check",
-        "params": {},
-    },
-
-    # ─── bq: INIT / SCAFFOLD ────────────────────────────────────────────────
-    "bq_init_jx": {
-        "desc": "SETUP AWAL project baru: scaffold Makefile + compose.yaml + Dockerfile + pipeline Jenkins X dari template. Dijalankan sekali di project baru, BUKAN untuk build reguler.",
-        "template": "bq --init-jx --stack {stack}",
-        "params": {
-            "stack": {"type": "choice", "options": ["dotnet", "default"]},
-        },
-    },
-    "bq_init_legacy": {
-        "desc": "Scaffold ulang konfigurasi CI/CD legacy (untuk repo lama yang belum pakai jx-init).",
-        "template": "bq --init-legacy",
-        "params": {},
-    },
-    "bq_init_secrets": {
-        "desc": "Setup GitHub Actions secrets (registry credentials + gitops token) untuk repo aktif.",
-        "template": "bq --init-secrets",
-        "params": {},
-    },
-    "bq_gh_action_init": {
-        "desc": "Install/update file .github/workflows/trigger-ci.yml agar push ke branch memicu build CI/CD.",
-        "template": "bq --gh-action-init",
-        "params": {},
-    },
-    "bq_fix_dockerfile": {
-        "desc": "Migrate Dockerfile legacy (ARG netrc, FROM lowercase) ke pola buildx-native yang benar.",
-        "template": "bq --fix-dockerfile {path}",
-        "params": {
-            "path": {"type": "text", "default": "./Dockerfile", "hint": "path Dockerfile (default: ./Dockerfile)"},
-        },
-    },
-
-    # ─── bq: CI/CD TRIGGER & FIX ────────────────────────────────────────────
-    "bq_cicd_trigger": {
-        "desc": "Trigger CI/CD pipeline lewat webhook (mulai build remote di CI runner).",
-        "template": "bq --cicd-trigger",
-        "params": {},
-    },
-    "bq_cicd_webhook": {
-        "desc": "Register/verifikasi webhook GitHub → CI backend untuk repo aktif.",
-        "template": "bq --cicd-webhook",
-        "params": {},
-    },
-    "bq_pr_fix": {
-        "desc": "Regen konfigurasi CI/CD (jx-init) dan buat PR fix ke repo & ref tertentu — berguna kalau pipeline JX gagal.",
-        "template": "bq --pr-fix {repo} {ref}",
-        "params": {
-            "repo": {"type": "text", "hint": "nama repo (mis. plus-be-webview2-manager)"},
-            "ref": {"type": "text", "hint": "branch atau tag (develop, staging, main, v1.2.3)"},
-        },
-    },
-
-    # ─── bq: K8s BOOTSTRAP & GITOPS ─────────────────────────────────────────
-    "bq_bootstrap_k8s": {
-        "desc": "Bootstrap deployment ke Kubernetes: generate manifest deployment.yaml + service.yaml, apply, push ke repo GitOps.",
-        "template": "bq --bootstrap-k8s --gitops-repo {gitops_repo} --gitops-branch {branch} --path-yaml {path_yaml} --env {env} --replicas {replicas} --kube-context {kube_context} --namespace {namespace}",
-        "params": {
-            "gitops_repo": {"type": "text", "default": "gitops", "hint": "repo gitops (default: gitops)"},
-            "branch": {"type": "text", "default": "main", "hint": "branch gitops (default: main)"},
-            "path_prefix": {"type": "choice", "options": ["cce", "k8s"], "default": "cce"},
-            "path_yaml": {
-                "type": "text",
-                "default_template": "{path_prefix}/{namespace}/{deployment}_deployment.yaml",
-                "hint": "path YAML (auto: <prefix>/<ns>/<deployment>_deployment.yaml)",
-            },
-            "env": {"type": "choice", "options": ["develop", "staging", "production"]},
-            "replicas": {"type": "text", "default": "2", "hint": "jumlah replica (default 2)"},
-            "kube_context": {"type": "text", "hint": "kube context (mis. hw-pro-p)"},
-            "namespace": {"type": "text", "hint": "namespace K8s"},
-            "deployment": {"type": "text", "hint": "nama deployment (utk derive path_yaml)"},
-        },
-    },
-    "bq_set_image": {
-        "desc": "Hot-patch image K8s deployment via `kubectl set image` + wait rollout. Mengubah state cluster langsung.",
-        "template": "bq --set-image {namespace} {deployment} {image}",
-        "params": {
-            "namespace": {"type": "text", "hint": "namespace K8s"},
-            "deployment": {"type": "text", "hint": "nama deployment"},
-            "image": {
-                "type": "text",
-                "default_template": "loyaltolpi/{deployment}:{tag}",
-                "hint": "image lengkap (auto: loyaltolpi/<deployment>:<tag> bila tag ada di pesan)",
-            },
-            "tag": {"type": "text", "hint": "tag versi (utk derive image, opsional)"},
-        },
-    },
-    "bq_gitops_set_image": {
-        "desc": "Update image tag di file YAML repo GitOps + commit + push ke branch (tanpa PR). Pre-flight cek registry.",
-        "template": "bq --gitops-set-image {gitops_repo} {branch} {path_yaml} {image}",
-        "params": {
-            "gitops_repo": {"type": "text", "default": "gitops", "hint": "repo gitops (default: gitops)"},
-            "branch": {"type": "text", "default": "main", "hint": "target branch (default: main)"},
-            "path_prefix": {"type": "choice", "options": ["cce", "k8s"], "default": "cce"},
-            "path_yaml": {
-                "type": "text",
-                "default_template": "{path_prefix}/{namespace}/{deployment}_deployment.yaml",
-                "hint": "path YAML (auto: <prefix>/<ns>/<deployment>_deployment.yaml)",
-            },
-            "image": {
-                "type": "text",
-                "default_template": "loyaltolpi/{deployment}:{tag}",
-                "hint": "image lengkap (auto: loyaltolpi/<deployment>:<tag>)",
-            },
-            "namespace": {"type": "text", "hint": "namespace (utk derive path_yaml)"},
-            "deployment": {"type": "text", "hint": "nama deployment (utk derive path_yaml + image)"},
-            "tag": {"type": "text", "hint": "tag versi"},
-        },
-    },
-    "bq_is_match_image": {
-        "desc": "Bandingkan image container deployment K8s (live) dengan image di file YAML GitOps. Read-only, sarankan fix bila mismatch.",
-        "template": "bq --is-match-image {namespace} {deployment} {gitops_repo} {branch} {path_yaml}",
-        "params": {
-            "namespace": {"type": "text", "hint": "namespace K8s (mis. production-ngenwal)"},
-            "deployment": {"type": "text", "hint": "nama deployment"},
-            "gitops_repo": {"type": "text", "default": "gitops", "hint": "repo gitops (default: gitops)"},
-            "branch": {"type": "text", "default": "main", "hint": "branch (default: main)"},
-            "path_prefix": {"type": "choice", "options": ["cce", "k8s"], "default": "cce"},
-            "path_yaml": {
-                "type": "text",
-                "default_template": "{path_prefix}/{namespace}/{deployment}_deployment.yaml",
-                "hint": "path YAML (auto: <prefix>/<ns>/<deployment>_deployment.yaml)",
-            },
-        },
-    },
-
-    # ─── Companion (non-bq) ─────────────────────────────────────────────────
-    "drift_checker_worker": {
-        "desc": "Jalankan worker version drift check (GitHub vs GitOps YAML vs cluster runtime) untuk satu namespace.",
-        "template": "python3 -m drift_checker.worker {namespace}",
-        "params": {"namespace": {"type": "text", "hint": "namespace target (mis. production-payout)"}},
-    },
-}
-
-RISKY_TOOLS = {
-    "bq_build_local", "bq_build_compose", "bq_build_remote", "bq_clone_build",
-    "bq_init_config", "bq_init_jx", "bq_init_legacy", "bq_init_secrets",
-    "bq_gh_action_init", "bq_fix_dockerfile",
-    "bq_cicd_trigger", "bq_cicd_webhook", "bq_pr_fix",
-    "bq_bootstrap_k8s", "bq_set_image", "bq_gitops_set_image",
-}
-
-TEXT_PATTERNS = {
-    # v1.2.3 tag semver
-    "tag": r"v\d+\.\d+\.\d+",
-    # image: loyaltolpi/xxx:v1.2.3 atau loyaltolpi/xxx:sha
-    "image": r"loyaltolpi/[\w.-]+:[\w.-]+",
-    # nama repo Qoin: harus punya segmen -be-/-fe-/-mono- ATAU berakhir -apigateway
-    # (mencegah false match "payout" dari "production-payout")
-    "repo": r"(?:pay|plus|ngenwal|ngendigid|qoinhub|saas|dana|reward|kyc|admin)-(?:be|fe|mono)-[\w-]+|[a-z]+-apigateway",
-    # owner/repo GitHub
-    "owner_repo": r"[\w-]+/[\w.-]+",
-    # branch/tag umum
-    "ref": r"v\d+\.\d+\.\d+|develop|staging|main|master|production",
-    # K8s namespace
-    "namespace": r"(?:develop|staging|production)-[\w-]+|jenkins-x|kube-system|default",
-    # nama deployment (sama pola dengan repo)
-    "deployment": r"(?:pay|plus|ngenwal|ngendigid|qoinhub|saas|dana|reward|kyc|admin)-(?:be|fe|mono)-[\w-]+|[a-z]+-apigateway",
-    # kube context (mis. hw-pro-p, sls-pro-q)
-    "kube_context": r"(?:hw|sls)-(?:dev|pro|stg)-[a-z]",
-    # ArgoCD app / pod
-    "app": r"[\w-]+-app|[\w-]+-argocd",
-    "pod": r"[\w-]+-[\w-]{5,}-[\w]{5}",
-    # path YAML gitops
-    "path_yaml": r"(?:cce|k8s)/[\w-]+/[\w.-]+\.yaml",
-    "partial_file": r"[\w./-]+\.json",
-    # Dockerfile path
-    "path": r"(?:\./)?[\w./-]*Dockerfile[\w.-]*",
-    # replicas: angka 1-9
-    "replicas": r"\b[1-9]\b",
-    # stack choice
-    "stack": r"\bdotnet\b|\bdefault\b",
-    # env choice
-    "env": r"\b(?:develop|staging|production)\b",
-    # branch
-    "branch": r"\b(?:develop|staging|main|master)\b",
-}
-
 
 # ---------------------------------------------------------------------------
 # Decision + parameter extraction
@@ -423,13 +198,14 @@ TEXT_PATTERNS = {
 
 def extract_params_from_text(user_msg: str, tool_name: str) -> dict:
     """Isi param text (regex) dan choice (word-match); apply default_template dari param lain."""
-    meta = TOOLS[tool_name]
+    meta = TOOLS()[tool_name]
+    patterns = TEXT_PATTERNS()
     out: dict = {}
 
     # Pass 1: regex-based & choice-based extraction
     for pname, pspec in meta["params"].items():
         if pspec["type"] == "text":
-            pat = TEXT_PATTERNS.get(pname)
+            pat = patterns.get(pname)
             m = re.search(pat, user_msg) if pat else None
             if m:
                 out[pname] = m.group(0)
@@ -470,11 +246,11 @@ def extract_params_from_text(user_msg: str, tool_name: str) -> dict:
 
 
 def preview_command(tool_name: str, params: dict) -> str:
-    return TOOLS[tool_name]["template"].format(**params)
+    return TOOLS()[tool_name]["template"].format(**params)
 
 
 def pick_tool(user_msg: str, provider: Provider) -> dict:
-    criteria = {name: meta["desc"] for name, meta in TOOLS.items()}
+    criteria = {name: meta["desc"] for name, meta in TOOLS().items()}
     criteria["none"] = "Tidak ada tool yang cocok untuk permintaan ini."
     questions = {
         "tool": {
@@ -496,7 +272,7 @@ def pick_tool(user_msg: str, provider: Provider) -> dict:
 
 def fill_missing_choice_params(user_msg: str, tool_name: str, provider: Provider) -> dict:
     """Untuk param type=choice yang belum ke-extract regex, minta Jev pilih valuenya."""
-    meta = TOOLS[tool_name]
+    meta = TOOLS()[tool_name]
     already = extract_params_from_text(user_msg, tool_name)
     choice_qs = {}
     for pname, pspec in meta["params"].items():
@@ -565,7 +341,7 @@ def render_verdict(tool_answer: dict, risky_answer: dict) -> tuple[str, bool]:
     tool = tool_answer["choice"]
     conf = tool_answer.get("confidence", 0.0)
     noul = float(risky_answer.get("noul", 0.0)) if risky_answer else 0.0
-    risky = noul >= 0.5 or tool in RISKY_TOOLS
+    risky = noul >= 0.5 or tool in RISKY_TOOLS()
     tag = "[red]RISKY[/red]" if risky else "[green]safe[/green]"
     console.print(
         f"→ Pilihan Jev: [bold green]{tool}[/bold green] "
@@ -594,7 +370,7 @@ def show_tools() -> None:
     tbl.add_column("Tool")
     tbl.add_column("Deskripsi")
     tbl.add_column("Template", style="dim")
-    for name, meta in TOOLS.items():
+    for name, meta in TOOLS().items():
         tbl.add_row(name, meta["desc"], meta["template"])
     console.print(tbl)
 
@@ -737,7 +513,7 @@ def repl() -> None:
             console.print(f"[red]fill-param error:[/red] {e}")
             continue
 
-        meta = TOOLS[tool]
+        meta = TOOLS()[tool]
 
         # Param "sumber" = yang direferensi default_template param lain.
         # Prompt dulu supaya default_template bisa auto-fill dependent params.

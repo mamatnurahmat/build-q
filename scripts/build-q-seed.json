@@ -1,0 +1,620 @@
+{
+  "build_q_tools": [
+    {
+      "name": "bq_build_local",
+      "category": "build",
+      "description": "EKSEKUSI build image container secara lokal via Docker buildx untuk repo & branch/tag. Ini perintah default untuk membangun image (bukan setup). Push ke registry.",
+      "template": "bq {repo} {ref} --local",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (mis. pay-be-topup-manager, saas-apigateway)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch atau tag (develop, staging, main, v1.2.3)"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 0,
+      "notes": ""
+    },
+    {
+      "name": "bq_build_no_push",
+      "category": "build",
+      "description": "Build image lokal tanpa push ke Docker Hub \u2014 hanya untuk test build sukses / dry validation.",
+      "template": "bq {repo} {ref} --local --no-push",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch atau tag"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 1,
+      "notes": ""
+    },
+    {
+      "name": "bq_build_compose",
+      "category": "build",
+      "description": "Build & release image via docker-compose (make build/release) untuk aplikasi web/legacy compose.",
+      "template": "bq {repo} {ref} --compose",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 2,
+      "notes": ""
+    },
+    {
+      "name": "bq_build_dry_run",
+      "category": "build",
+      "description": "Simulasi build tanpa eksekusi \u2014 hanya print perintah docker build yang akan dijalankan.",
+      "template": "bq {repo} {ref} --local --dry-run",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 3,
+      "notes": ""
+    },
+    {
+      "name": "bq_clone_build",
+      "category": "build",
+      "description": "Clone repo dari GitHub lalu build image (berguna untuk build repo yang belum ada di lokal).",
+      "template": "bq --clone {owner_repo} {ref} --local --clean",
+      "params": {
+        "owner_repo": {
+          "type": "text",
+          "hint": "owner/repo GitHub (mis. Qoin-Digital-Indonesia/pay-be-x)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 4,
+      "notes": ""
+    },
+    {
+      "name": "bq_build_remote",
+      "category": "build",
+      "description": "Build image remote dari git langsung via buildx (tanpa clone lokal). Butuh registry access.",
+      "template": "bq {repo} {ref} --remote",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 5,
+      "notes": ""
+    },
+    {
+      "name": "bq_doctor",
+      "category": "preflight",
+      "description": "Preflight check kesiapan tools (git, docker, buildx, kubectl) & credentials (GITHUB_TOKEN, docker login, kube-context). Exit 0 kalau siap.",
+      "template": "bq --doctor",
+      "params": {},
+      "risky": false,
+      "active": true,
+      "order": 6,
+      "notes": ""
+    },
+    {
+      "name": "bq_config_show",
+      "category": "preflight",
+      "description": "Tampilkan konfigurasi build-q yang aktif dari ~/.build-q/.env.",
+      "template": "bq --config",
+      "params": {},
+      "risky": false,
+      "active": true,
+      "order": 7,
+      "notes": ""
+    },
+    {
+      "name": "bq_init_config",
+      "category": "init",
+      "description": "Initialize file config ~/.build-q/.env pertama kali (interactive setup).",
+      "template": "bq --init",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 8,
+      "notes": ""
+    },
+    {
+      "name": "bq_check",
+      "category": "preflight",
+      "description": "Cek konsistensi cicd.json, Makefile, Dockerfile, compose.yaml \u2014 validasi konfigurasi CI/CD project.",
+      "template": "bq --check",
+      "params": {},
+      "risky": false,
+      "active": true,
+      "order": 9,
+      "notes": ""
+    },
+    {
+      "name": "bq_init_jx",
+      "category": "init",
+      "description": "SETUP AWAL project baru: scaffold Makefile + compose.yaml + Dockerfile + pipeline Jenkins X dari template. Dijalankan sekali di project baru, BUKAN untuk build reguler.",
+      "template": "bq --init-jx --stack {stack}",
+      "params": {
+        "stack": {
+          "type": "choice",
+          "options": [
+            "dotnet",
+            "default"
+          ]
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 10,
+      "notes": ""
+    },
+    {
+      "name": "bq_init_legacy",
+      "category": "init",
+      "description": "Scaffold ulang konfigurasi CI/CD legacy (untuk repo lama yang belum pakai jx-init).",
+      "template": "bq --init-legacy",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 11,
+      "notes": ""
+    },
+    {
+      "name": "bq_init_secrets",
+      "category": "init",
+      "description": "Setup GitHub Actions secrets (registry credentials + gitops token) untuk repo aktif.",
+      "template": "bq --init-secrets",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 12,
+      "notes": ""
+    },
+    {
+      "name": "bq_gh_action_init",
+      "category": "init",
+      "description": "Install/update file .github/workflows/trigger-ci.yml agar push ke branch memicu build CI/CD.",
+      "template": "bq --gh-action-init",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 13,
+      "notes": ""
+    },
+    {
+      "name": "bq_fix_dockerfile",
+      "category": "init",
+      "description": "Migrate Dockerfile legacy (ARG netrc, FROM lowercase) ke pola buildx-native yang benar.",
+      "template": "bq --fix-dockerfile {path}",
+      "params": {
+        "path": {
+          "type": "text",
+          "default": "./Dockerfile",
+          "hint": "path Dockerfile (default: ./Dockerfile)"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 14,
+      "notes": ""
+    },
+    {
+      "name": "bq_cicd_trigger",
+      "category": "cicd",
+      "description": "Trigger CI/CD pipeline lewat webhook (mulai build remote di CI runner).",
+      "template": "bq --cicd-trigger",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 15,
+      "notes": ""
+    },
+    {
+      "name": "bq_cicd_webhook",
+      "category": "cicd",
+      "description": "Register/verifikasi webhook GitHub \u2192 CI backend untuk repo aktif.",
+      "template": "bq --cicd-webhook",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 16,
+      "notes": ""
+    },
+    {
+      "name": "bq_pr_fix",
+      "category": "cicd",
+      "description": "Regen konfigurasi CI/CD (jx-init) dan buat PR fix ke repo & ref tertentu \u2014 berguna kalau pipeline JX gagal.",
+      "template": "bq --pr-fix {repo} {ref}",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (mis. plus-be-webview2-manager)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch atau tag (develop, staging, main, v1.2.3)"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 17,
+      "notes": ""
+    },
+    {
+      "name": "bq_bootstrap_k8s",
+      "category": "k8s",
+      "description": "Bootstrap deployment ke Kubernetes: generate manifest deployment.yaml + service.yaml, apply, push ke repo GitOps.",
+      "template": "bq --bootstrap-k8s --gitops-repo {gitops_repo} --gitops-branch {branch} --path-yaml {path_yaml} --env {env} --replicas {replicas} --kube-context {kube_context} --namespace {namespace}",
+      "params": {
+        "gitops_repo": {
+          "type": "text",
+          "default": "gitops",
+          "hint": "repo gitops (default: gitops)"
+        },
+        "branch": {
+          "type": "text",
+          "default": "main",
+          "hint": "branch gitops (default: main)"
+        },
+        "path_prefix": {
+          "type": "choice",
+          "options": [
+            "cce",
+            "k8s"
+          ],
+          "default": "cce"
+        },
+        "path_yaml": {
+          "type": "text",
+          "default_template": "{path_prefix}/{namespace}/{deployment}_deployment.yaml",
+          "hint": "path YAML (auto: <prefix>/<ns>/<deployment>_deployment.yaml)"
+        },
+        "env": {
+          "type": "choice",
+          "options": [
+            "develop",
+            "staging",
+            "production"
+          ]
+        },
+        "replicas": {
+          "type": "text",
+          "default": "2",
+          "hint": "jumlah replica (default 2)"
+        },
+        "kube_context": {
+          "type": "text",
+          "hint": "kube context (mis. hw-pro-p)"
+        },
+        "namespace": {
+          "type": "text",
+          "hint": "namespace K8s"
+        },
+        "deployment": {
+          "type": "text",
+          "hint": "nama deployment (utk derive path_yaml)"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 18,
+      "notes": ""
+    },
+    {
+      "name": "bq_set_image",
+      "category": "k8s",
+      "description": "Hot-patch image K8s deployment via `kubectl set image` + wait rollout. Mengubah state cluster langsung.",
+      "template": "bq --set-image {namespace} {deployment} {image}",
+      "params": {
+        "namespace": {
+          "type": "text",
+          "hint": "namespace K8s"
+        },
+        "deployment": {
+          "type": "text",
+          "hint": "nama deployment"
+        },
+        "image": {
+          "type": "text",
+          "default_template": "loyaltolpi/{deployment}:{tag}",
+          "hint": "image lengkap (auto: loyaltolpi/<deployment>:<tag> bila tag ada di pesan)"
+        },
+        "tag": {
+          "type": "text",
+          "hint": "tag versi (utk derive image, opsional)"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 19,
+      "notes": ""
+    },
+    {
+      "name": "bq_gitops_set_image",
+      "category": "k8s",
+      "description": "Update image tag di file YAML repo GitOps + commit + push ke branch (tanpa PR). Pre-flight cek registry.",
+      "template": "bq --gitops-set-image {gitops_repo} {branch} {path_yaml} {image}",
+      "params": {
+        "gitops_repo": {
+          "type": "text",
+          "default": "gitops",
+          "hint": "repo gitops (default: gitops)"
+        },
+        "branch": {
+          "type": "text",
+          "default": "main",
+          "hint": "target branch (default: main)"
+        },
+        "path_prefix": {
+          "type": "choice",
+          "options": [
+            "cce",
+            "k8s"
+          ],
+          "default": "cce"
+        },
+        "path_yaml": {
+          "type": "text",
+          "default_template": "{path_prefix}/{namespace}/{deployment}_deployment.yaml",
+          "hint": "path YAML (auto: <prefix>/<ns>/<deployment>_deployment.yaml)"
+        },
+        "image": {
+          "type": "text",
+          "default_template": "loyaltolpi/{deployment}:{tag}",
+          "hint": "image lengkap (auto: loyaltolpi/<deployment>:<tag>)"
+        },
+        "namespace": {
+          "type": "text",
+          "hint": "namespace (utk derive path_yaml)"
+        },
+        "deployment": {
+          "type": "text",
+          "hint": "nama deployment (utk derive path_yaml + image)"
+        },
+        "tag": {
+          "type": "text",
+          "hint": "tag versi"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 20,
+      "notes": ""
+    },
+    {
+      "name": "bq_is_match_image",
+      "category": "k8s",
+      "description": "Bandingkan image container deployment K8s (live) dengan image di file YAML GitOps. Read-only, sarankan fix bila mismatch.",
+      "template": "bq --is-match-image {namespace} {deployment} {gitops_repo} {branch} {path_yaml}",
+      "params": {
+        "namespace": {
+          "type": "text",
+          "hint": "namespace K8s (mis. production-ngenwal)"
+        },
+        "deployment": {
+          "type": "text",
+          "hint": "nama deployment"
+        },
+        "gitops_repo": {
+          "type": "text",
+          "default": "gitops",
+          "hint": "repo gitops (default: gitops)"
+        },
+        "branch": {
+          "type": "text",
+          "default": "main",
+          "hint": "branch (default: main)"
+        },
+        "path_prefix": {
+          "type": "choice",
+          "options": [
+            "cce",
+            "k8s"
+          ],
+          "default": "cce"
+        },
+        "path_yaml": {
+          "type": "text",
+          "default_template": "{path_prefix}/{namespace}/{deployment}_deployment.yaml",
+          "hint": "path YAML (auto: <prefix>/<ns>/<deployment>_deployment.yaml)"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 21,
+      "notes": ""
+    },
+    {
+      "name": "drift_checker_worker",
+      "category": "companion",
+      "description": "Jalankan worker version drift check (GitHub vs GitOps YAML vs cluster runtime) untuk satu namespace.",
+      "template": "python3 -m drift_checker.worker {namespace}",
+      "params": {
+        "namespace": {
+          "type": "text",
+          "hint": "namespace target (mis. production-payout)"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 22,
+      "notes": ""
+    }
+  ],
+  "build_q_providers": [
+    {
+      "name": "openrouter",
+      "url": "https://openrouter.ai/api/alpha/decisions",
+      "model": "typesafe/jev-1.13",
+      "key_env": "OPENROUTER_API_KEY",
+      "is_default": false,
+      "active": true,
+      "notes": ""
+    },
+    {
+      "name": "typesafe",
+      "url": "https://api.typesafe.ai/v1/systemone",
+      "model": "jev-latest",
+      "key_env": "TYPESAFE_API_KEY",
+      "is_default": true,
+      "active": true,
+      "notes": ""
+    }
+  ],
+  "build_q_patterns": [
+    {
+      "field": "tag",
+      "pattern": "v\\d+\\.\\d+\\.\\d+",
+      "description": "",
+      "active": true,
+      "order": 0
+    },
+    {
+      "field": "image",
+      "pattern": "loyaltolpi/[\\w.-]+:[\\w.-]+",
+      "description": "",
+      "active": true,
+      "order": 1
+    },
+    {
+      "field": "repo",
+      "pattern": "(?:pay|plus|ngenwal|ngendigid|qoinhub|saas|dana|reward|kyc|admin)-(?:be|fe|mono)-[\\w-]+|[a-z]+-apigateway",
+      "description": "",
+      "active": true,
+      "order": 2
+    },
+    {
+      "field": "owner_repo",
+      "pattern": "[\\w-]+/[\\w.-]+",
+      "description": "",
+      "active": true,
+      "order": 3
+    },
+    {
+      "field": "ref",
+      "pattern": "v\\d+\\.\\d+\\.\\d+|develop|staging|main|master|production",
+      "description": "",
+      "active": true,
+      "order": 4
+    },
+    {
+      "field": "namespace",
+      "pattern": "(?:develop|staging|production)-[\\w-]+|jenkins-x|kube-system|default",
+      "description": "",
+      "active": true,
+      "order": 5
+    },
+    {
+      "field": "deployment",
+      "pattern": "(?:pay|plus|ngenwal|ngendigid|qoinhub|saas|dana|reward|kyc|admin)-(?:be|fe|mono)-[\\w-]+|[a-z]+-apigateway",
+      "description": "",
+      "active": true,
+      "order": 6
+    },
+    {
+      "field": "kube_context",
+      "pattern": "(?:hw|sls)-(?:dev|pro|stg)-[a-z]",
+      "description": "",
+      "active": true,
+      "order": 7
+    },
+    {
+      "field": "app",
+      "pattern": "[\\w-]+-app|[\\w-]+-argocd",
+      "description": "",
+      "active": true,
+      "order": 8
+    },
+    {
+      "field": "pod",
+      "pattern": "[\\w-]+-[\\w-]{5,}-[\\w]{5}",
+      "description": "",
+      "active": true,
+      "order": 9
+    },
+    {
+      "field": "path_yaml",
+      "pattern": "(?:cce|k8s)/[\\w-]+/[\\w.-]+\\.yaml",
+      "description": "",
+      "active": true,
+      "order": 10
+    },
+    {
+      "field": "partial_file",
+      "pattern": "[\\w./-]+\\.json",
+      "description": "",
+      "active": true,
+      "order": 11
+    },
+    {
+      "field": "path",
+      "pattern": "(?:\\./)?[\\w./-]*Dockerfile[\\w.-]*",
+      "description": "",
+      "active": true,
+      "order": 12
+    },
+    {
+      "field": "replicas",
+      "pattern": "\\b[1-9]\\b",
+      "description": "",
+      "active": true,
+      "order": 13
+    },
+    {
+      "field": "stack",
+      "pattern": "\\bdotnet\\b|\\bdefault\\b",
+      "description": "",
+      "active": true,
+      "order": 14
+    },
+    {
+      "field": "env",
+      "pattern": "\\b(?:develop|staging|production)\\b",
+      "description": "",
+      "active": true,
+      "order": 15
+    },
+    {
+      "field": "branch",
+      "pattern": "\\b(?:develop|staging|main|master)\\b",
+      "description": "",
+      "active": true,
+      "order": 16
+    }
+  ]
+}
