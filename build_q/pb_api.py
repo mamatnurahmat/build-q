@@ -145,7 +145,7 @@ def _write_cache(secrets: Dict[str, str]) -> None:
     try:
         CACHE_FILE.chmod(0o600)
     except OSError:
-        pass
+        return
 
 
 def _cache_fresh(cache: dict, ttl: int) -> bool:
@@ -160,6 +160,37 @@ def clear_cache() -> bool:
         CACHE_FILE.unlink()
         return True
     return False
+
+
+def fetch_collection_records(
+    collection: str,
+    filter_: str = "",
+    per_page: int = 100,
+) -> list:
+    """Fetch records from an arbitrary PocketBase collection.
+
+    Args:
+        collection: Collection name (e.g. "repo_config", "secrets")
+        filter_: Optional PB filter expression (e.g. "active=true")
+        per_page: Max records per page (default 100, max 500)
+
+    Returns:
+        List of record dicts from the collection.
+
+    Raises:
+        PBAPIError: If auth fails or API returns error
+    """
+    base = _base_url()
+    user = os.getenv("PB_API_USER") or ""
+    password = os.getenv("PB_API_PASS") or ""
+    if not user or not password:
+        raise PBAPIError("PB_API_USER / PB_API_PASS empty")
+    token = authenticate(base, user, password)
+    url = f"{base}/api/collections/{collection}/records?perPage={min(per_page, 500)}"
+    if filter_:
+        url += f"&filter={urllib.parse.quote(filter_, safe='=')}"
+    resp = _http_json("GET", url, headers={"Authorization": f"Bearer {token}"})
+    return resp.get("items", [])
 
 
 def cache_age_seconds() -> Optional[int]:

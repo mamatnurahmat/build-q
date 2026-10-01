@@ -153,13 +153,15 @@ def _sign(body: bytes, secret: str) -> str:
     return f"sha256={mac}"
 
 
-def _post(hook_url: str, body: bytes, sig: str, delivery: str) -> tuple[int, dict | str]:
+def _post(hook_url: str, body: bytes, sig: str, delivery: str, force: bool = False) -> tuple[int, dict | str]:
     req = Request(hook_url, method="POST", data=body)
     req.add_header("Content-Type", "application/json")
     req.add_header("X-GitHub-Event", "push")
     req.add_header("X-GitHub-Delivery", delivery)
     req.add_header("X-Hub-Signature-256", sig)
     req.add_header("User-Agent", "build-q/cicd-trigger")
+    if force:
+        req.add_header("X-Force-Trigger", "1")
     try:
         with urlopen(req) as resp:
             code = resp.getcode()
@@ -188,13 +190,17 @@ def run_cicd_trigger(
     pusher: Optional[str] = None,
     email: Optional[str] = None,
     dry_run: bool = False,
+    force: bool = False,
 ) -> int:
     """Trigger manual pipeline untuk `api_repo` di branch `ref`.
 
     Return 0 = triggered (200 OK + relay 2xx), 1 = webhook accepted but relay failed,
     2 = network/HMAC/API error.
+
+    force=True → kirim header `X-Force-Trigger: 1` yang di-relay ke webhook-trigger
+    untuk bypass middleware dedup (delete record lama + claim baru).
     """
-    print(f"🚀 Manual trigger: {api_repo} @ {ref} → {hook_url}")
+    print(f"🚀 Manual trigger: {api_repo} @ {ref} → {hook_url}" + ("  [FORCE]" if force else ""))
 
     try:
         repo_meta = _fetch_repo_meta(api_repo)
@@ -246,7 +252,7 @@ def run_cicd_trigger(
 
     print(f"   delivery: {delivery}")
     try:
-        code, resp = _post(hook_url, body, sig, delivery)
+        code, resp = _post(hook_url, body, sig, delivery, force=force)
     except TriggerError as e:
         print(f"❌ {e}", file=sys.stderr)
         return 2

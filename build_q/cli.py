@@ -162,7 +162,7 @@ Config file: ~/.build-q/.env
 
     # Subcommand flags
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
-    parser.add_argument("--force", action="store_true", help="Force recreate config (use with --init)")
+    parser.add_argument("--force", action="store_true", help="Force recreate config (use with --init) / bypass dedup (use with --cicd-trigger)")
     parser.add_argument("--config", action="store_true", help="Show current configuration")
     parser.add_argument(
         "--doctor",
@@ -239,6 +239,14 @@ Config file: ~/.build-q/.env
              "artifact jx-init, image registry, deployment GitOps. Butuh --remote.",
     )
     parser.add_argument(
+        "--repo-check",
+        action="store_true",
+        help="Cek CICD repo config dari PocketBase collection. Menampilkan konfigurasi "
+             "CICD repo (IMAGE, PROJECT, DEPLOYMENT, PORT, dll) tanpa perlu clone. "
+             "Gunakan --cicd=pb untuk tarik dari PocketBase. "
+             "Usage: bq --repo-check <repo> [<ref>] [--cicd=pb] [--dry-run]",
+    )
+    parser.add_argument(
         "--pr-fix",
         action="store_true",
         help="One-shot fix: clone → branch → regenerate jx-init artifacts (Makefile/compose/Dockerfile) "
@@ -268,7 +276,9 @@ Config file: ~/.build-q/.env
         help="Trigger MANUAL pipeline via webhook cicd-hw.qoin.id/hook — kirim "
              "synthetic push event untuk <repo> <ref>. HMAC diambil dari secret "
              "jenkins-x/incoming-webhook (context hw-dev) atau env INCOMING_WEBHOOK_HMAC. "
-             "Usage: bq --cicd-trigger <repo> <ref> [--sha SHA] [--dry-run]",
+             "Usage: bq --cicd-trigger <repo> <ref> [--sha SHA] [--force] [--dry-run]. "
+             "--force: bypass middleware dedup di webhook-trigger "
+             "(delete dedup record lama + claim baru), berguna untuk re-run commit yg sama.",
     )
     parser.add_argument(
         "--sha",
@@ -649,6 +659,7 @@ Config file: ~/.build-q/.env
                 hook_url=args.hook_url or HOOK_URL_DEFAULT,
                 sha_override=args.sha,
                 dry_run=args.dry_run,
+                force=args.force,
             ))
 
         if args.bootstrap_k8s:
@@ -755,6 +766,20 @@ Config file: ~/.build-q/.env
                 cicd_path=args.cicd,
                 ns=args.ns,
                 infra=args.infra,
+            )
+            sys.exit(rc)
+
+        if args.repo_check:
+            if not args.repo:
+                print("❌ Usage: bq --repo-check <repo> [<ref>] [--cicd=pb] [--dry-run]",
+                      file=sys.stderr)
+                sys.exit(2)
+            from .repo import run_repo_check
+            rc = run_repo_check(
+                repo=args.repo,
+                ref=args.ref,
+                cicd_source=args.cicd,
+                dry_run=args.dry_run,
             )
             sys.exit(rc)
 

@@ -1,10 +1,13 @@
 """Core build logic for build-q CLI."""
+from __future__ import annotations
+
+import json
 import os
 import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from ._common import resolve_registry
 from .config import load_config, load_local_cicd, use_gh_cli
@@ -12,10 +15,9 @@ from .config import load_config, load_local_cicd, use_gh_cli
 
 class BuildError(Exception):
     """Raised when build command fails."""
-    pass
 
 
-def get_git_info() -> Dict[str, str]:
+def get_git_info() -> dict[str, str]:
     """Auto-detect repo name and current branch from git.
 
     Returns:
@@ -42,7 +44,7 @@ def get_git_info() -> Dict[str, str]:
                 ).stdout.strip()
 
     except subprocess.CalledProcessError as e:
-        raise BuildError(f"Not in a git repository: {e.stderr.strip()}")
+        raise BuildError(f"Not in a git repository: {e.stderr.strip()}") from e
 
     # Repo name from remote or directory
     try:
@@ -85,11 +87,11 @@ def get_local_tag_or_commit() -> str:
         if tag:
             return tag
     except subprocess.CalledProcessError:
-        pass
+        return get_local_commit_short()
     return get_local_commit_short()
 
 
-def _is_fe_repo(repo: Optional[str]) -> bool:
+def _is_fe_repo(repo: str | None) -> bool:
     """Deteksi repo FRONTEND — mirror rule skill `gitops-web-bootstrap`.
 
     Cocokan (case-insensitive):
@@ -102,12 +104,10 @@ def _is_fe_repo(repo: Optional[str]) -> bool:
     name = repo.rsplit("/", 1)[-1].lower()
     if "-fe-" in name or "-web-" in name:
         return True
-    if name.startswith("qoinhub-mono-"):
-        return True
-    return False
+    return name.startswith("qoinhub-mono-")
 
 
-def _env_from_ref(ref: Optional[str], repo: Optional[str] = None) -> str:
+def _env_from_ref(ref: str | None, repo: str | None = None) -> str:
     """Map a git ref (branch or tag) to a build ENV.
 
     **INLINE dengan pipeline Tekton** di ~/jenkins-x/pipeline (lighthouse
@@ -134,7 +134,7 @@ def _env_from_ref(ref: Optional[str], repo: Optional[str] = None) -> str:
     if not ref:
         return "staging"
     r = ref.lower()
-    if r.startswith("v") or r.startswith("refs/tags/v"):
+    if r.startswith(("v", "refs/tags/v")):
         return "production"
     if r == "develop":
         return "develop"
@@ -150,17 +150,17 @@ def _env_from_ref(ref: Optional[str], repo: Optional[str] = None) -> str:
 def build_command(
     repo: str,
     ref: str,
-    cicd: Dict[str, Any],
-    config: Dict[str, Any],
+    cicd: dict[str, Any],
+    config: dict[str, Any],
     *,
-    platform: Optional[str] = "linux/amd64",
+    platform: str | None = "linux/amd64",
     push: bool = False,
-    tag: Optional[str] = None,
+    tag: str | None = None,
     dockerfile: str = "Dockerfile",
     context: str = ".",
-    extra_build_args: Optional[List[str]] = None,
-    secrets: Optional[List[str]] = None,
-) -> Tuple[List[str], str]:
+    extra_build_args: list[str] | None = None,
+    secrets: list[str] | None = None,
+) -> tuple[list[str], str]:
     """Assemble the docker buildx build command.
 
     Args:
@@ -182,7 +182,7 @@ def build_command(
     builder = config["builder"]
     registry_url = config["registry"]["url"]
 
-    cmd: List[str] = ["docker", "buildx", "build"]
+    cmd: list[str] = ["docker", "buildx", "build"]
 
     # Builder
     cmd += ["--builder", builder["name"]]
@@ -320,7 +320,7 @@ def ensure_builder(name: str, *, bootstrap: bool = False) -> bool:
         return False
 
 
-def _parse_github_remote(url: str) -> Optional[str]:
+def _parse_github_remote(url: str) -> str | None:
     """Return `owner/repo` from any GitHub remote URL, else None."""
     if not url:
         return None
@@ -338,7 +338,7 @@ def _parse_github_remote(url: str) -> Optional[str]:
     return None
 
 
-def detect_github_repo() -> Optional[str]:
+def detect_github_repo() -> str | None:
     """Detect current GitHub repo (owner/repo) from `git remote get-url origin`."""
     try:
         remote = subprocess.run(
@@ -350,7 +350,7 @@ def detect_github_repo() -> Optional[str]:
         return None
 
 
-def _fetch_jx_token(context: str, namespace: str, secret_name: str) -> Optional[str]:
+def _fetch_jx_token(context: str, namespace: str, secret_name: str) -> str | None:
     """Fetch webhook trigger token from k8s secret. Returns None on failure."""
     import base64
 
@@ -371,9 +371,9 @@ def _fetch_jx_token(context: str, namespace: str, secret_name: str) -> Optional[
 
 
 def init_secrets(
-    repo: Optional[str] = None,
-    token: Optional[str] = None,
-    url: Optional[str] = None,
+    repo: str | None = None,
+    token: str | None = None,
+    url: str | None = None,
 ) -> bool:
     """Set GitHub Actions secrets WEBHOOK_TRIGGER_URL & WEBHOOK_TRIGGER_TOKEN on `repo`.
 
@@ -514,7 +514,7 @@ def init_jx(cicd_path: str = "cicd/cicd.json", force: bool = False) -> bool:
     return written > 0
 
 
-def init_gh_action(token: Optional[str] = None) -> bool:
+def init_gh_action(token: str | None = None) -> bool:
     """DEPRECATED (Fase 3 migrasi): `trigger-ci.yml` action bukan lagi standar.
 
     Standar sekarang: GitHub webhook `cicd-hw.qoin.id/hook` (di-relay ke
@@ -634,13 +634,13 @@ def _mask_sensitive(part: str) -> str:
     return part
 
 
-def format_cmd(cmd: List[str]) -> str:
+def format_cmd(cmd: list[str]) -> str:
     """Pretty-print the command with line continuations. Masks sensitive values."""
-    lines: List[str] = []
+    lines: list[str] = []
     buf = ""
     for raw in cmd:
         part = _mask_sensitive(raw)
-        if buf and (part.startswith("--") or part.startswith("-f") or part.startswith("-t")):
+        if buf and part.startswith(("--", "-f", "-t")):
             lines.append(buf)
             buf = f"  {part}"
         else:
@@ -699,13 +699,13 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
 
     original = p.read_text()
     content = original
-    changes: List[str] = []
+    changes: list[str] = []
 
     content, n = FROM_CASING_RE.subn(r"\1 AS \2", content)
     if n:
         changes.append(f"normalized {n} `FROM ... AS ...` casing")
 
-    def _run_repl(m: "re.Match[str]") -> str:
+    def _run_repl(m: re.Match[str]) -> str:
         indent = m.group("indent")
         rest = m.group("rest").strip()
         return f"{indent}RUN --mount=type=secret,id=netrc,target=/root/.netrc \\\n{indent}    {rest}"
@@ -723,7 +723,7 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
     if n_standalone:
         changes.append(f"removed {n_standalone} standalone `RUN echo ... > ~/.netrc` line(s)")
 
-        def _add_mount(m: "re.Match[str]") -> str:
+        def _add_mount(m: re.Match[str]) -> str:
             indent = m.group("indent")
             body = m.group("body").rstrip()
             return (
@@ -741,7 +741,7 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
     if n:
         changes.append(f"removed {n} `ARG GITHUB_*` line(s)")
 
-    def _maintainer_repl(m: "re.Match[str]") -> str:
+    def _maintainer_repl(m: re.Match[str]) -> str:
         indent = m.group("indent")
         val = m.group("val").strip().strip('"').replace('"', '\\"')
         return f'{indent}LABEL maintainer="{val}"'
@@ -750,7 +750,7 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
     if n:
         changes.append(f"converted {n} deprecated `MAINTAINER` → `LABEL maintainer=`")
 
-    def _env_repl(m: "re.Match[str]") -> str:
+    def _env_repl(m: re.Match[str]) -> str:
         indent = m.group("indent")
         key = m.group("key")
         val = m.group("val").strip()
@@ -773,15 +773,15 @@ def fix_dockerfile(path: str = "Dockerfile") -> bool:
     print(f"✅ Fixed {path} (backup: {backup.name})")
     for c in changes:
         print(f"   • {c}")
-    print(f"\n💡 Rebuild now — `bq` already injects `--secret id=netrc,src=~/.netrc`.")
+    print("\n💡 Rebuild now — `bq` already injects `--secret id=netrc,src=~/.netrc`.")
     return True
 
 
 def _predict_image_tag(
     repo: str,
-    tag: Optional[str],
-    cicd: Dict[str, Any],
-    config: Dict[str, Any],
+    tag: str | None,
+    cicd: dict[str, Any],
+    config: dict[str, Any],
 ) -> str:
     """Compute the image tag we'll build/push, using the same rule as `build_command`.
 
@@ -803,19 +803,19 @@ def run_build(
     ref: str,
     *,
     cicd_path: str = "cicd/cicd.json",
-    cicd_dict: Optional[Dict[str, Any]] = None,
-    platform: Optional[str] = "linux/amd64",
+    cicd_dict: dict[str, Any] | None = None,
+    platform: str | None = "linux/amd64",
     push: bool = False,
-    tag: Optional[str] = None,
+    tag: str | None = None,
     dockerfile: str = "Dockerfile",
     context: str = ".",
-    extra_build_args: Optional[List[str]] = None,
-    secrets: Optional[List[str]] = None,
+    extra_build_args: list[str] | None = None,
+    secrets: list[str] | None = None,
     dry_run: bool = False,
     image_check: bool = True,
-    rollout_ns: Optional[str] = None,
-    rollout_infra: Optional[str] = None,
-    rollout_path: Optional[str] = None,
+    rollout_ns: str | None = None,
+    rollout_infra: str | None = None,
+    rollout_path: str | None = None,
 ) -> int:
     """Load config, build the command, and execute it.
 
@@ -856,7 +856,7 @@ def run_build(
         try:
             cicd = load_local_cicd(cicd_path)
         except FileNotFoundError as e:
-            raise BuildError(str(e))
+            raise BuildError(str(e)) from e
 
     cmd, image_tag = build_command(
         repo=repo,
@@ -872,13 +872,14 @@ def run_build(
         secrets=secrets,
     )
 
-    print(f"\n🚀 Build command:")
+    print("\n🚀 Build command:")
     print("=" * 60)
     print(format_cmd(cmd))
     print("=" * 60)
 
     if dry_run:
         print("\n🔍 Dry-run mode — command not executed.")
+        _print_cicd_config(cicd)
         _print_rollout_suggestion(
             cicd, repo, ref, image_tag, config, rollout_ns, rollout_infra, rollout_path,
         )
@@ -896,6 +897,18 @@ def run_build(
     return result.returncode
 
 
+def _print_cicd_config(cicd: dict[str, Any]) -> None:
+    """Print cicd.json configuration contents. Swallow errors — never break the build."""
+    try:
+        if cicd:
+            print("\n📋 cicd config:")
+            print(json.dumps(cicd, indent=2, sort_keys=True))
+        else:
+            print("\n📋 cicd config: (empty — no cicd.json loaded)")
+    except Exception as e:
+        print(f"⚠️ Could not display cicd config: {e}", file=sys.stderr)
+
+
 def _print_rollout_suggestion(cicd, repo, ref, image_tag, config,
                               ns, infra, gitops_path) -> None:
     """Print copy-paste rollout suggestions. Swallow errors — never break the build."""
@@ -911,9 +924,9 @@ def _print_rollout_suggestion(cicd, repo, ref, image_tag, config,
 
 def _predict_compose_image_tag(
     repo: str,
-    tag: Optional[str],
-    cicd: Dict[str, Any],
-    config: Dict[str, Any],
+    tag: str | None,
+    cicd: dict[str, Any],
+    config: dict[str, Any],
 ) -> str:
     """Compose-mode tag predictor — mirrors the Makefile IMAGE_TAG rule.
 
@@ -936,13 +949,13 @@ def run_compose(
     ref: str,
     *,
     cicd_path: str = "cicd/cicd.json",
-    cicd_dict: Optional[Dict[str, Any]] = None,
-    tag: Optional[str] = None,
+    cicd_dict: dict[str, Any] | None = None,
+    tag: str | None = None,
     dry_run: bool = False,
     image_check: bool = True,
-    rollout_ns: Optional[str] = None,
-    rollout_infra: Optional[str] = None,
-    rollout_path: Optional[str] = None,
+    rollout_ns: str | None = None,
+    rollout_infra: str | None = None,
+    rollout_path: str | None = None,
 ) -> int:
     """Run make build and make release instead of docker buildx."""
     config = load_config()
@@ -985,6 +998,9 @@ def run_compose(
 
     if not dry_run:
         print("\n✅ Compose completed successfully.")
+
+    if dry_run:
+        _print_cicd_config(cicd)
 
     _print_rollout_suggestion(
         cicd, repo, ref, predicted_tag, config, rollout_ns, rollout_infra, rollout_path,
