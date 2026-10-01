@@ -17,6 +17,27 @@ class BuildError(Exception):
     """Raised when build command fails."""
 
 
+def _resolve_from_gh(secret_id: str) -> str | None:
+    """Resolve github_user / github_token from `gh` CLI. Returns None on failure."""
+    try:
+        if secret_id == "github_user":
+            res = subprocess.run(
+                ["gh", "api", "user", "--jq", ".login"],
+                capture_output=True, text=True, check=True,
+            )
+        elif secret_id == "github_token":
+            res = subprocess.run(
+                ["gh", "auth", "token"],
+                capture_output=True, text=True, check=True,
+            )
+        else:
+            return None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    out = res.stdout.strip()
+    return out or None
+
+
 def get_git_info() -> dict[str, str]:
     """Auto-detect repo name and current branch from git.
 
@@ -208,6 +229,25 @@ def build_command(
     all_secrets = list(secrets) if secrets else []
     if not any(s.startswith("id=netrc") for s in all_secrets):
         all_secrets.append(default_secret)
+
+    # Auto-inject github_user/github_token BuildKit secrets for Dockerfiles that
+    # use `--mount=type=secret,id=github_user|github_token` (standard Qoin Go/.NET
+    # pattern). Resolve from env (GITHUB_USER/GITHUB_TOKEN or GIT_USER/GIT_TOKEN),
+    # falling back to `gh` CLI. Values are exported to os.environ so buildx reads
+    # them via `env=…` (no temp files). Explicit --secret for the same id wins.
+    _gh_secret_env = {
+        "github_user": ("GITHUB_USER", "GIT_USER"),
+        "github_token": ("GITHUB_TOKEN", "GIT_TOKEN"),
+    }
+    for sid, env_names in _gh_secret_env.items():
+        if any(s.startswith(f"id={sid},") or s == f"id={sid}" for s in all_secrets):
+            continue
+        val = next((os.environ[n] for n in env_names if os.environ.get(n)), None)
+        if not val:
+            val = _resolve_from_gh(sid)
+        if val:
+            os.environ[env_names[0]] = val
+            all_secrets.append(f"id={sid},env={env_names[0]}")
 
     for secret in all_secrets:
         cmd += ["--secret", secret]
