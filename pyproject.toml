@@ -13,7 +13,10 @@ authors = [
     {name = "ngen contributors"}
 ]
 keywords = ["cli", "docker", "buildx", "devops"]
-dependencies = []
+dependencies = [
+    "requests>=2.31",
+    "rich>=13.0",
+]
 
 [project.scripts]
 build-q = "build_q.cli:main"

@@ -159,6 +159,11 @@ Config file: ~/.build-q/.env
     )
 
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="Buka Jev Agent Planner TUI interaktif",
+    )
 
     # Subcommand flags
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
@@ -521,6 +526,11 @@ Config file: ~/.build-q/.env
 
     try:
         # ── Subcommands ──────────────────────────────────────────────────────────
+        if args.tui:
+            from .tui import repl
+            repl()
+            return
+
         if args.init:
             init_config(force=args.force)
             config = load_config()
