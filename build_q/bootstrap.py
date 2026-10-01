@@ -379,16 +379,49 @@ def run_bootstrap_k8s(
     ns_note = " (override)" if namespace_override else " (dari path-yaml)"
     print(f"\n📐 Derived: env={env}  namespace={namespace}{ns_note}")
 
-    # 2. Fetch cicd.json dari source repo
+    # 2. Fetch cicd.json dari source repo (fallback → PocketBase collection)
     print(f"\n📡 Fetch cicd config dari {source_repo}@{refs} ...")
     cicd, cicd_found, _ = fetch_cicd_data(source_repo, refs, cicd_path)
     if not cicd:
         print(
-            f"   ❌ cicd config tidak ada / invalid "
+            f"   ⚠️  cicd config tidak ada di repo "
             f"(tried: {', '.join(cicd_candidates(cicd_path))})",
-            file=sys.stderr,
         )
-        return 1
+        # Fallback: coba PocketBase collection 'repo'
+        print(f"   🔄 Fallback: cek PocketBase collection 'repo' ...")
+        try:
+            from . import pb_api
+            from .repo import _find_repo_record
+            records = pb_api.fetch_collection_records("repo", per_page=500)
+            record = _find_repo_record(source_repo, records, refs)
+            if record:
+                # Ambil dari nested 'cicd' field, atau flat fields
+                cicd_nested = record.get("cicd")
+                if isinstance(cicd_nested, dict) and cicd_nested:
+                    cicd = cicd_nested
+                    cicd_found = "PocketBase/repo.cicd"
+                else:
+                    # Fallback ke flat fields di record
+                    cicd = {}
+                    for key in ("IMAGE", "PORT", "DEPLOYMENT", "PROJECT",
+                                "CLUSTER", "NODETYPE", "STACK"):
+                        val = record.get(key) or record.get(key.lower())
+                        if val is not None and val != "" and val != 0:
+                            cicd[key] = str(val)
+                    if cicd:
+                        cicd_found = "PocketBase/repo (flat)"
+            if not cicd:
+                print(
+                    f"   ❌ cicd config tidak ditemukan di repo maupun PocketBase.",
+                    file=sys.stderr,
+                )
+                return 1
+        except Exception as e:
+            print(
+                f"   ❌ cicd config tidak ada / invalid & PocketBase fallback gagal: {e}",
+                file=sys.stderr,
+            )
+            return 1
     print(f"   ✅ {cicd_found} — IMAGE={cicd.get('IMAGE')} PORT={cicd.get('PORT')}")
 
     # 3. Deteksi stack + fetch config file

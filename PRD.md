@@ -11,9 +11,20 @@
 
 `build-q` (dibaca *bq*, singkatan **Build-Quick**) adalah CLI Python zero-dependency yang menyederhanakan operasi `docker buildx build` di mesin lokal & remote. Tool ini menjembatani perintah Docker manual yang panjang dengan pipeline CI/CD produksi (Jenkins X): developer cukup menjalankan `bq` di dalam repo, dan seluruh flag (secret, build-arg, resource limit, tag image, registry) di-assemble otomatis dari Git + `cicd/cicd.json` + config global.
 
-Selain build, `bq` menyediakan **scaffolding CI/CD** (`--init-jx`, `--init-legacy`), **bootstrap GitHub Actions trigger** (`--gh-action-init`), **setup webhook secrets** (`--init-secrets`), **migrasi Dockerfile legacy** (`--fix-dockerfile`), **auto-init Docker Buildx builder** (`--init`), mode **compose** (`--compose`) untuk build via `make build && make release`, **rollout suggestions** pasca-build (`set-image` / `gitops-set-image`), **verifikasi kesiapan repo tanpa clone** (`--check`), dan **one-shot fix** repo dgn template OUTDATED (`--pr-fix`: branch + push + PR + secrets).
+Selain build, `bq` menyediakan:
 
-Sejak **v0.1.17** semua operasi GitHub berjalan **native** (Python `urllib` + `git`) via `build_q/github_api.py` — tanpa dependensi `gh` CLI. Sejak **v0.1.22** default `GH_CLI=false` (jalur native aktif untuk install baru); pengguna lama tetap bekerja dengan setting existing.
+| Kategori | Fitur |
+|----------|-------|
+| **Scaffolding** | `--init-jx` (modern), `--init-legacy` (legacy ARG-based) |
+| **CI/CD Trigger** | `--gh-action-init`, `--init-secrets`, `--cicd-trigger` (webhook manual), `--cicd-webhook` (verifikasi webhook) |
+| **Build Ops** | `--fix-dockerfile` (migrasi), `--init` (builder), `--compose` (make build) |
+| **GitOps** | `--bootstrap-k8s` (manifest K8s → PR), `--gitops-set-image` (patch YAML), `--set-image` (kubectl), `--is-match-image` (drift check) |
+| **Verifikasi** | `--check` (repo readiness), `--repo-check` (PocketBase lookup), `--doctor` (tools & creds) |
+| **Fix** | `--pr-fix` (one-shot fix + PR) |
+| **Interaktif** | `--tui` (Jev Agent Planner TUI) |
+| **Credentials** | `--pb-login`, `--pb-status`, `--pb-pull`, `--pb-logout` (PocketBase IDP) |
+
+Sejak **v0.1.17** semua operasi GitHub berjalan **native** (Python `urllib` + `git`) via `build_q/github_api.py` — tanpa dependensi `gh` CLI. Sejak **v0.1.22** default `GH_CLI=false` (jalur native aktif untuk install baru); pengguna lama tetap bekerja dengan setting existing. Sejak **v0.1.30** CICD config mendukung **PocketBase fallback** — repo tanpa `cicd/cicd.json` bisa dijembatani via centralized IDP (`cicd-hw.qoin.id/devops`).
 
 ## 2. Problem Statement
 
@@ -31,9 +42,10 @@ Developer sering perlu me-reproduksi build image Docker yang identik dengan CI/C
 ## 4. Non-goals
 
 - Bukan pengganti pipeline CI/CD (Jenkins X / GitHub Actions). Fokus di build lokal / ad-hoc.
-- Tidak melakukan deploy ke Kubernetes/ArgoCD (di luar scope).
+- ~~Tidak melakukan deploy ke Kubernetes/ArgoCD (di luar scope).~~ **Diperbarui v0.1.29+:** `--bootstrap-k8s` men-generate manifest K8s dan mengirim sebagai PR ke GitOps repo. Deploy tetap dilakukan oleh ArgoCD/Kustomize dari PR yang di-merge — `bq` tidak apply langsung ke cluster (kecuali opt-in `--apply-secret` untuk non-production).
 - Tidak mengelola login Docker/registry (asumsi user sudah `docker login`).
 - ~~Tidak mengelola credential GitHub (delegasi ke `gh` CLI).~~ **Diperbarui v0.1.17+:** kini `bq` mengelola credential GitHub sendiri via `GITHUB_TOKEN` di `~/.build-q/.env` (jalur native), tidak butuh `gh` CLI. Toggle `GH_CLI=true` (legacy) masih tersedia untuk backward compat.
+- ~~Tidak mengelola credential terpusat.~~ **Diperbarui v0.1.27+:** PocketBase IDP (`pb_api.py`) memungkinkan zero-local-config workflow — engineer hanya perlu `PB_API_URL/USER/PASS`; seluruh secret di-hydrate dari PB API.
 
 ## 5. Personas
 
@@ -50,26 +62,50 @@ Bagian ini menggambarkan alur kerja `bq` secara visual — ditujukan agar AI age
 
 ### 6.1 Command Router (flag → subcommand vs build)
 
-Diagram ini memetakan flag apa yang akan menjalankan subcommand mana. Subcommand bersifat *mutually exclusive*: jika salah satu diberikan, alur build utama tidak dijalankan.
+Diagram ini memetakan flag apa yang akan menjalankan subcommand mana. Subcommand bersifat *mutually exclusive*: jika salah satu diberikan, alur build utama tidak dijalankan. Evaluasi terjadi **top-down** — flag pertama yang match di-dispatch.
 
 ```mermaid
 flowchart TD
-    Start(["bq <args>"]) --> Parse["argparse: parse flags"]
-    Parse --> Init{"--init?"}
-    Init -- yes --> InitCfg["init_config()<br/>+ ensure_builder(bootstrap=true)"] --> End(["exit 0"])
-    Init -- no --> Fix{"--fix-dockerfile?"}
-    Fix -- yes --> FixDf["fix_dockerfile(path)"] --> End
+    Start(["bq args"]) --> Parse["argparse: parse flags"]
+    Parse --> Tui{"--tui?"}
+    Tui -- yes --> TuiR["Jev Agent Planner TUI"] --> End(["exit"])
+    Tui -- no --> Init{"--init?"}
+    Init -- yes --> InitCfg["init_config + ensure_builder"] --> End
+    Init -- no --> Doctor{"--doctor?"}
+    Doctor -- yes --> DocR["run_doctor: cek tools + creds"] --> End
+    Doctor -- no --> PB{"--pb-login/status/pull/logout?"}
+    PB -- yes --> PBR["PocketBase IDP ops"] --> End
+    PB -- no --> Fix{"--fix-dockerfile?"}
+    Fix -- yes --> FixDf["fix_dockerfile path"] --> End
     Fix -- no --> InitJx{"--init-jx?"}
-    InitJx -- yes --> ScaffoldJx["init_jx()<br/>Makefile + compose + Dockerfile<br/>+ trigger-ci.yml + auto init-secrets"] --> End
+    InitJx -- yes --> ScaffoldJx["init_jx: Makefile + compose + Dockerfile"] --> End
     InitJx -- no --> InitLegacy{"--init-legacy?"}
-    InitLegacy -- yes --> ScaffoldLegacy["init_legacy()<br/>Makefile + compose.yaml (ARG-based)"] --> End
+    InitLegacy -- yes --> ScaffoldLegacy["init_legacy: Makefile + compose"] --> End
     InitLegacy -- no --> GhAct{"--gh-action-init?"}
-    GhAct -- yes --> InitAct["init_gh_action()<br/>hapus workflow lain +<br/>tulis trigger-ci.yml + set secrets"] --> End
+    GhAct -- yes --> InitAct["init_gh_action: cleanup trigger-ci.yml"] --> End
     GhAct -- no --> InitSec{"--init-secrets?"}
-    InitSec -- yes --> SetSec["init_secrets(repo,token)"] --> End
-    InitSec -- no --> Cfg{"--config?"}
+    InitSec -- yes --> SetSec["init_secrets: WEBHOOK secrets"] --> End
+    InitSec -- no --> PRFix{"--pr-fix?"}
+    PRFix -- yes --> PRFixR["run_pr_fix: §7.23"] --> End
+    PRFix -- no --> CicdWH{"--cicd-webhook?"}
+    CicdWH -- yes --> CicdWHR["run_cicd_webhook_check: §7.26"] --> End
+    CicdWH -- no --> CicdTr{"--cicd-trigger?"}
+    CicdTr -- yes --> CicdTrR["run_cicd_trigger: §7.27"] --> End
+    CicdTr -- no --> BootK8s{"--bootstrap-k8s?"}
+    BootK8s -- yes --> BootR["run_bootstrap_k8s: §7.24 + §6.8"] --> End
+    BootK8s -- no --> SetImg{"--set-image?"}
+    SetImg -- yes --> SetImgR["run_set_image: §7.28"] --> End
+    SetImg -- no --> GitopsImg{"--gitops-set-image?"}
+    GitopsImg -- yes --> GitopsR["run_gitops_set_image: §7.29"] --> End
+    GitopsImg -- no --> MatchImg{"--is-match-image?"}
+    MatchImg -- yes --> MatchR["run_is_match_image: §7.30"] --> End
+    MatchImg -- no --> Chk{"--check?"}
+    Chk -- yes --> ChkR["run_check: §7.22"] --> End
+    Chk -- no --> RepoChk{"--repo-check?"}
+    RepoChk -- yes --> RepoChkR["run_repo_check: §7.31"] --> End
+    RepoChk -- no --> Cfg{"--config?"}
     Cfg -- yes --> ShowCfg["print ~/.build-q/.env"] --> End
-    Cfg -- no --> Build["→ Build flow (§6.2)"]
+    Cfg -- no --> Build["→ Build flow §6.2"]
 ```
 
 ### 6.2 Build Flow (dengan early registry check)
@@ -189,32 +225,106 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    A["bq --bootstrap-k8s <repo> <ref><br/>--gitops-repo r --gitops-branch b<br/>--path-yaml p"] --> B{"Preflight<br/>GH_CLI=false<br/>GITHUB_TOKEN"}
-    B -- OK --> C["Derive env dari ref<br/>+ namespace dari path-yaml<br/>(atau --namespace override)"]
+    A["bq --bootstrap-k8s repo ref<br/>--gitops-repo r --gitops-branch b<br/>--path-yaml p"] --> B{"Preflight<br/>GH_CLI=false<br/>GITHUB_TOKEN"}
+    B -- OK --> C["Derive env dari ref<br/>+ namespace dari path-yaml<br/>atau --namespace override"]
     B -- missing --> Z1(["Abort"])
-    C --> D["Fetch cicd/cicd.json<br/>via REST (native)"]
-    D --> E{"Detect stack<br/>(probe berurutan)"}
+    C --> D["Fetch cicd/cicd.json<br/>via REST native"]
+    D --> D2{"cicd.json<br/>ditemukan?"}
+    D2 -- yes --> E
+    D2 -- no --> PB["🔄 Fallback: PocketBase<br/>collection repo"]
+    PB --> PBF{"PB record<br/>ditemukan?"}
+    PBF -- yes + cicd dict --> E
+    PBF -- yes + flat fields --> E
+    PBF -- no --> Z3(["Abort: cicd not found<br/>di repo maupun PocketBase"])
+    E{"Detect stack<br/>probe berurutan"}
     E -- "appsettings.Env.json" --> F1["stack=dotnet"]
     E -- ".env.env / .env" --> F2["stack=default"]
     E -- ".env.example" --> F3["stack=default<br/>⚠️ template"]
     E -- none --> Z2(["Abort: no config"])
-    F1 & F2 & F3 --> G["Build render ctx<br/>APP, ENV, NS, PROJECT, ROLE,<br/>NODEPOOL, IMAGE_FULL, PORT,<br/>IMAGE_PULL_SECRET, CONFIG_B64"]
+    F1 & F2 & F3 --> G["Build render ctx 12 vars:<br/>APP, ENV, NS, PROJECT, ROLE,<br/>NODEPOOL, IMAGE_FULL, PORT,<br/>IMAGE_PULL_SECRET, CONFIG_B64,<br/>REPLICAS, DOTNET_ENV"]
     G --> H["Clone gitops shallow @ base branch"]
     H --> I["Create branch bootstrap/app-env-ts"]
     I --> J["Render 3 YAML dari templates gist:<br/>Secret + Deployment + Service"]
-    J --> K["Update kustomization.yaml<br/>append 2 entries (idempotent)"]
+    J --> K["Update kustomization.yaml<br/>append 2 entries idempotent"]
     K --> L{"--apply-secret?"}
     L -- yes + non-prod + missing --> M["kubectl apply Secret"]
-    L -- yes + production --> M2["SKIP (guardrail)"]
-    L -- yes + already exists --> M3["SKIP (idempotent)"]
+    L -- yes + production --> M2["SKIP guardrail"]
+    L -- yes + already exists --> M3["SKIP idempotent"]
     L -- no --> N
     M & M2 & M3 --> N{"--force-recreate-deploy?"}
     N -- yes + drift + non-prod --> O["kubectl delete deploy<br/>→ ArgoCD selfHeal re-create"]
     N -- no / no drift / prod --> P
     O --> P{"Git diff?"}
     P -- empty --> Q1(["already up-to-date<br/>exit 0"])
-    P -- has changes --> Q2["Commit + Push + Open PR"]
-    Q2 --> R(["Return PR URL"])
+    P -- has changes --> Q2["Commit + Push"]
+    Q2 --> Q3{"PR existing<br/>same head.ref?"}
+    Q3 -- yes --> Q4(["PR sudah ada: URL"])
+    Q3 -- no --> Q5["create_pull_request"] --> R(["✅ Return PR URL"])
+```
+
+### 6.8.1 CICD Config Waterfall (detail Step 2)
+
+```mermaid
+flowchart TD
+    S["Source Repo @ ref"] --> G1["GET cicd/cicd.json"]
+    G1 -->|"404"| G2["GET cicd.json root"]
+    G2 -->|"404"| PB["🔄 PocketBase Fallback"]
+    G1 -->|"200"| PARSE["JSON parse → cicd dict"]
+    G2 -->|"200"| PARSE
+    PB --> PB_AUTH["Authenticate PB API"]
+    PB_AUTH --> PB_FETCH["fetch collection repo"]
+    PB_FETCH --> PB_FIND["_find_repo_record"]
+    PB_FIND -->|"found"| PB_CICD{"record.cicd<br/>is dict?"}
+    PB_CICD -->|"Ya"| PARSE
+    PB_CICD -->|"Tidak"| PB_FLAT["Build cicd dari flat fields:<br/>image, port, deployment,<br/>project, nodetype, stack"]
+    PB_FLAT --> PARSE
+    PB_FIND -->|"not found"| FAIL["❌ Abort"]
+```
+
+### 6.8.2 Stack Detection Waterfall (detail Step 3)
+
+```mermaid
+flowchart TD
+    HINT{"Hint dari cicd<br/>STACK / TYPE"}
+    HINT -->|"dotnet"| D["Probe: appsettings.DotnetEnv.json"]
+    HINT -->|"go/node/rust/default"| E["Probe: .env.env → .env → .env.example"]
+    HINT -->|"tidak ada"| F["Probe berurutan:<br/>1. appsettings.DotnetEnv.json<br/>2. .env.env<br/>3. .env<br/>4. .env.example"]
+    D --> R["Return stack, path, raw_bytes"]
+    E --> R
+    F --> R
+```
+
+### 6.8.3 Commit → Push → PR Sequence
+
+```mermaid
+sequenceDiagram
+    participant BQ as bq CLI
+    participant GIT as Git local
+    participant GH as GitHub API
+
+    BQ->>GIT: git add 3 files + kustomization
+    BQ->>GIT: git status --porcelain
+    
+    alt Tidak ada diff
+        GIT-->>BQ: empty
+        Note over BQ: ✅ Already up-to-date, exit 0
+    else Ada diff
+        BQ->>GIT: git commit -m bootstrap-k8s app @ env
+        
+        alt --dry-run
+            Note over BQ: 🔍 Skip push, exit 0
+        else Normal
+            BQ->>GIT: git push origin bootstrap/app-env-ts
+            BQ->>GH: list_open_prs gitops_repo branch
+            
+            alt PR sudah ada
+                GH-->>BQ: ℹ️ PR existing URL
+            else PR baru
+                BQ->>GH: create_pull_request base head title body
+                GH-->>BQ: ✅ PR URL
+            end
+        end
+    end
 ```
 
 **Standar file yang di-generate ke `{path-yaml}/`:**
@@ -224,6 +334,76 @@ flowchart TD
 - `kustomization.yaml` — append entries
 
 **Selector consistency guarantee:** `spec.selector.matchLabels`, `spec.template.metadata.labels`, dan Service `spec.selector` dirender dari placeholder `{{APP}}` tunggal → tidak mungkin mismatch by construction.
+
+### 6.9 `--cicd-trigger` Flow (manual webhook trigger)
+
+```mermaid
+sequenceDiagram
+    participant Dev as bq --cicd-trigger
+    participant K8s as kubectl get secret
+    participant WH as cicd-hw.qoin.id/hook
+    participant JX as Jenkins X Pipeline
+
+    Dev->>Dev: Resolve repo + ref + SHA
+    Dev->>K8s: get secret incoming-webhook HMAC
+    K8s-->>Dev: HMAC secret
+    Dev->>Dev: Compute HMAC-SHA256 signature
+    Dev->>WH: POST synthetic push event + X-Hub-Signature-256
+    
+    alt --force
+        Dev->>WH: DELETE dedup record + re-claim
+    end
+    
+    WH->>JX: Enqueue pipeline
+    WH-->>Dev: 200 OK or dedup skip
+```
+
+### 6.10 `--set-image` / `--gitops-set-image` / `--is-match-image` Flows
+
+```mermaid
+flowchart TD
+    subgraph SetImage["--set-image ns deploy image"]
+        SI1["kubectl set image deploy/app container=image"] --> SI2["kubectl rollout status --watch"]
+    end
+    subgraph GitopsSetImage["--gitops-set-image repo branch path image"]
+        GI1["Pre-flight: file exist di GitHub?"] --> GI2["Pre-flight: image ready di Docker Hub?"]
+        GI2 --> GI3["Pre-flight: duplikasi? same image already?"]
+        GI3 --> GI4["Patch YAML: update image field"]
+        GI4 --> GI5["commit + push langsung ke branch"]
+    end
+    subgraph IsMatchImage["--is-match-image ns deploy repo branch path"]
+        IM1["kubectl get deploy → image live"] --> IM2["gh api → image di YAML GitOps"]
+        IM2 --> IM3{"Match?"}
+        IM3 -- yes --> IM4["✅ In sync"]
+        IM3 -- no --> IM5["⚠️ MISMATCH<br/>suggest: bq --gitops-set-image ..."]
+    end
+```
+
+### 6.11 PocketBase IDP Credential Flow
+
+```mermaid
+sequenceDiagram
+    participant BQ as bq (any command)
+    participant CFG as load_config
+    participant PB as PocketBase API
+    participant ENV as os.environ
+
+    BQ->>CFG: load_config()
+    CFG->>CFG: _load_dotenv ~/.build-q/.env
+    CFG->>CFG: PB_API=true?
+    
+    alt PB_API=true
+        CFG->>PB: authenticate PB_API_USER/PASS
+        PB-->>CFG: JWT token
+        CFG->>PB: fetch_secrets active=true
+        PB-->>CFG: N secrets
+        CFG->>CFG: _write_cache TTL=900s
+        CFG->>ENV: hydrate missing env vars
+        Note over CFG,ENV: shell env menang.<br/>PB hanya set yang belum ada.
+    else PB_API=false or missing
+        Note over CFG: Skip PB, use .env only
+    end
+```
 
 ### 6.7 Onboarding Journey (Pemula, 5 menit pertama)
 
@@ -439,13 +619,31 @@ Setelah build sukses (atau `--dry-run`), `bq` cetak 2 perintah siap copy-paste y
 
 `bq --bootstrap-k8s <repo> <ref> --gitops-repo <r> --gitops-branch <b> --path-yaml <p>` — one-shot bootstrap Kubernetes manifest ke repo GitOps sesuai standar Qoin CCE. Flow lengkap ada di §6.8.
 
+**CICD Config source (waterfall, detail di §6.8.1):**
+1. `cicd/cicd.json` di source repo (GitHub REST API)
+2. `cicd.json` di root source repo
+3. **PocketBase fallback** (sejak v0.1.30) — collection `repo`, field `cicd` (nested dict) atau flat fields (`image`, `port`, `deployment`, `project`, `nodetype`, `stack`)
+
+Repo tanpa `cicd/cicd.json` (mis. repo Rust yang pure) bisa di-bootstrap selama datanya ada di PocketBase. Update via PB admin UI atau API PATCH.
+
 **Yang di-generate ke `{path-yaml}/`:**
 - `file-config/{app}-{env}.yaml` — Secret (data key `.env` untuk go/node/rust, `appsettings.{Env}.json` untuk dotnet), base64 dari config file source
 - `{app}_deployment.yaml` — Deployment: labels 4-tuple `{app,env,project,role}` (selector immutable — match template.labels), `imagePullSecrets: [{name: regcred}]`, `nodeSelector: cce.cloud.com/cce-nodepool: <nodepool>`, `imagePullPolicy: Always`, `RollingUpdate` strategy, tz-config volume `/etc/localtime`, secret volume mount ke `/app/.env` atau `/app/appsettings.{Env}.json`
 - `{app}_services.yaml` — Service ClusterIP, `targetPort: http` (named port), selector 1-tuple `{app: X}` (subset match — cocok dengan pod 4-tuple)
 - `kustomization.yaml` — append 2 entries di `resources:` (idempotent — skip bila sudah ada)
 
-**Stack auto-detect (probe berurutan di source repo `{repo}@{ref}`):**
+**Output file structure:**
+```
+{gitops-repo}/
+└── {path-yaml}/                            # cce/develop-qoin/
+    ├── kustomization.yaml                   # ← updated (idempotent)
+    ├── file-config/
+    │   └── {app}-{env}.yaml                 # ← Secret
+    ├── {app}_deployment.yaml                # ← Deployment
+    └── {app}_services.yaml                  # ← Service
+```
+
+**Stack auto-detect (probe berurutan di source repo `{repo}@{ref}`, detail di §6.8.2):**
 1. `appsettings.{DotnetEnv}.json` → dotnet
 2. `.env.{env}` → default
 3. `.env` → default
@@ -461,6 +659,25 @@ Override: `--stack {dotnet|default}`.
 
 Override: `--env NAME` (contoh cross-env: `--env staging` walau source ref `main`).
 
+**Render context (12 variabel):**
+
+| Key | Sumber | Contoh |
+|-----|--------|--------|
+| `APP` | `cicd.DEPLOYMENT` → `cicd.IMAGE` → repo name | `plus-be-rustcreateordersnap-manager` |
+| `ENV` | Derived dari ref | `develop` |
+| `NAMESPACE` | Segmen terakhir `--path-yaml` | `develop-qoin` |
+| `DOTNET_ENV` | Mapped dari env | `Development` |
+| `REPLICAS` | `--replicas` (default: 2) | `2` |
+| `IMAGE_FULL` | `{registry}/{IMAGE}:{sha7}` | `loyaltolpi/plus-be-rustcreateordersnap-manager:074b14b` |
+| `PORT` | `cicd.PORT` (default: 8080) | `2323` |
+| `PROJECT` | `cicd.PROJECT` (default: qoin) | `qoin` |
+| `ROLE` | `cicd.NODETYPE` (default: back) | `back` |
+| `NODEPOOL` | `{namespace}-{suffix}` | `develop-qoin-service` |
+| `IMAGE_PULL_SECRET` | `--image-pull-secret` (default: regcred) | `regcred` |
+| `CONFIG_B64` | `base64(config_raw)` | `QVBQX05BTUUu...` |
+
+**Image tag rule** (mirror Makefile `IMAGE_TAG`): ref cocok pola tag `v\d*` → pakai ref (e.g. `v1.0.0`); selain itu → short SHA 7 char (e.g. `074b14b`).
+
 **Nodepool derivation:** `{namespace}-{manager|service}` — manager kalau `cicd.NODETYPE=front`, service kalau `back`. Override: `--nodepool NAME` (mis. `production-nodepool-service` untuk cluster hw-pro-q yang pakai pattern berbeda).
 
 **Namespace decoupling (cross-env):** default `namespace` diambil dari segmen terakhir `--path-yaml` (mis. `cce/develop-qoin` → `develop-qoin`). Override: `--namespace NAME` — berguna saat gitops folder di `cce/staging-qoin/` tapi apply real ke `production-qoin` di cluster prod.
@@ -475,6 +692,7 @@ Override: `--env NAME` (contoh cross-env: `--env staging` walau source ref `main
 - Kustomization entry sudah include → skip update
 - Selector match / Deployment belum ada → skip recreate
 - 0 diff sama sekali → print "already up-to-date" + exit 0 tanpa PR
+- PR sudah open dengan same `head.ref` → print existing URL, skip create
 
 **Selector consistency by construction:** template pakai placeholder `{{APP}}` tunggal untuk `spec.selector.matchLabels`, `spec.template.metadata.labels`, dan Service `spec.selector`. Satu render → tidak mungkin drift.
 
@@ -485,6 +703,19 @@ Override: `--env NAME` (contoh cross-env: `--env staging` walau source ref `main
 | `spec.selector: field is immutable` | Old deploy 1-tuple, new 4-tuple | `--force-recreate-deploy` (non-prod) |
 | Pod crash `Env X required` | `.env.example` = template placeholder | Patch Secret manual + rollout restart |
 | PR konflik `kustomization.yaml` | PR paralel merge duluan | Close & re-run (idempotent dari HEAD baru) |
+| `cicd config tidak ada` | Repo tanpa cicd.json, PB record kosong | Update PB collection `repo` via API PATCH |
+
+**Template source (gist → cache → bundled fallback):**
+
+| Template Name | Gist File | Dipakai Untuk |
+|---------------|-----------|---------------|
+| `secret_default` | `secret.default.yaml` | Secret stack default (Go/Node/Rust) |
+| `secret_dotnet` | `secret.dotnet.yaml` | Secret stack dotnet |
+| `deployment_default` | `deployment.default.yaml` | Deployment stack default |
+| `deployment_dotnet` | `deployment.dotnet.yaml` | Deployment stack dotnet |
+| `services` | `services.yaml` | Service (shared) |
+
+Cache TTL: 3600s (1 jam). Jika gist unreachable, fallback ke bundled template di `templates.py`.
 
 **Flag lengkap:**
 
@@ -492,7 +723,7 @@ Override: `--env NAME` (contoh cross-env: `--env staging` walau source ref `main
 |---|---|---|
 | `--gitops-repo OWNER/REPO` | wajib | Target repo GitOps |
 | `--gitops-branch BRANCH` | wajib | Base branch untuk PR |
-| `--path-yaml PATH` | wajib | Folder tujuan (mis. `cce/develop-qoin`) |
+| `--path-yaml PATH` | wajib | Folder tujuan (mis. `cce/develop-qoin`) — **bukan** file path |
 | `--namespace NAME` | dari path-yaml | Override K8s namespace |
 | `--nodepool NAME` | `{ns}-{svc\|manager}` | Override CCE nodepool selector |
 | `--env NAME` | dari ref | Override env label |
@@ -504,6 +735,81 @@ Override: `--env NAME` (contoh cross-env: `--env staging` walau source ref `main
 | `--force-recreate-deploy` | off | Delete deploy saat drift (opt-in, non-prod) |
 | `--dry-run` | execute | Skip push/PR |
 | `--keep-workdir` | delete | Simpan workdir untuk inspeksi |
+
+**Contoh real execution:**
+```
+$ bq --bootstrap-k8s plus-be-rustcreateordersnap-manager develop \
+     --gitops-repo Qoin-Digital-Indonesia/gitops \
+     --gitops-branch develop \
+     --path-yaml cce/develop-qoin
+
+🔐 Preflight:
+   ✅ GITHUB_TOKEN (40 chars)
+📐 Derived: env=develop  namespace=develop-qoin (dari path-yaml)
+📡 Fetch cicd config ...
+   ⚠️  cicd config tidak ada di repo (tried: cicd/cicd.json, cicd.json)
+   🔄 Fallback: cek PocketBase collection 'repo' ...
+   ✅ PocketBase/repo.cicd — IMAGE=plus-be-rustcreateordersnap-manager PORT=2323
+🔍 Deteksi stack ...
+   ✅ stack=default  source=.env.example  size=346B
+🧩 Render context: APP=plus-be-rustcreateordersnap-manager  ENV=develop ...
+📥 Clone gitops → /tmp/bq-bootstrap-...
+🌿 Branch: bootstrap/plus-be-rustcreateordersnap-manager-develop-...
+📝 Render 3 file YAML
+📦 Commit ... ✅ 3 file
+🚀 Push → origin/bootstrap/...
+🔀 Open PR → develop
+   ✅ https://github.com/Qoin-Digital-Indonesia/gitops/pull/577
+🧹 Cleanup
+```
+
+### 7.25 PocketBase IDP — Centralized Credentials (`--pb-*`, sejak v0.1.27)
+
+PocketBase-based Identity Provider untuk zero-local-config workflow. Engineer hanya perlu `PB_API_URL`, `PB_API_USER`, `PB_API_PASS` — seluruh secret (`GITHUB_TOKEN`, `DOCKERHUB_TOKEN`, `WEBHOOK_HOOK_HMAC`, dll) di-hydrate dari PB API sebelum `load_config()` baca env vars.
+
+| Subcommand | Aksi |
+|------------|------|
+| `--pb-login` | Auth + warm cache |
+| `--pb-status` | Tampilkan URL, user, cache age, jumlah secrets |
+| `--pb-pull` | Force refresh (skip TTL) |
+| `--pb-logout` | Hapus `~/.build-q/.pb-cache.json` |
+
+**Hydration priority:** shell env > PB API > `.env` file > defaults. PB hanya set key yang **belum ada** di `os.environ`. Bootstrap keys (`PB_API*`) tidak pernah di-overlay (chicken-and-egg guard).
+
+**Cache:** `~/.build-q/.pb-cache.json`, TTL default 900s (15 menit), mode 0600.
+
+**Resilient:** bila PB API unreachable → warning ke stderr, fallback ke `.env` lokal, tidak pernah abort.
+
+### 7.26 Verifikasi Webhook (`--cicd-webhook`)
+
+`bq --cicd-webhook [<repo>]` — cek apakah repo sudah terpasang webhook `cicd-hw.qoin.id/hook`. Auto-detect repo dari git remote bila tidak diberikan. Dapat juga berjalan berbarengan dengan `--pr-fix` (dijalankan setelah pr-fix sukses).
+
+### 7.27 Manual Pipeline Trigger (`--cicd-trigger`)
+
+`bq --cicd-trigger <repo> <ref> [--sha SHA] [--force] [--dry-run]` — trigger MANUAL pipeline via webhook `cicd-hw.qoin.id/hook`. Mengirim synthetic push event dengan HMAC-SHA256 signature. HMAC diambil dari secret `jenkins-x/incoming-webhook` (context `hw-dev`) atau env `INCOMING_WEBHOOK_HMAC`.
+
+- `--force`: bypass middleware dedup (delete dedup record lama + claim baru) — berguna untuk re-run commit yang sama.
+- Auto-detect repo/ref dari git remote bila tidak diberikan.
+
+### 7.28 Hot-patch Deployment via kubectl (`--set-image`)
+
+`bq --set-image <ns> <deployment> <image> [container]` — hot-patch K8s Deployment via `kubectl set image` + `kubectl rollout status --watch`. Bila `<image>` tanpa `/`, otomatis expand ke `{REGISTRY_URL}/{deployment}:{image}`.
+
+### 7.29 GitOps Image Update (`--gitops-set-image`)
+
+`bq --gitops-set-image <gitops-repo> <branch> <path.yaml> <image_full>` — update image di deployment YAML di repo GitOps, commit + push langsung ke branch (tanpa PR). Pre-flight: file exist di GitHub, image ready di Docker Hub, duplikasi check.
+
+### 7.30 Image Drift Check (`--is-match-image`)
+
+`bq --is-match-image <ns> <deployment> <gitops-repo> <branch> <path.yaml>` — bandingkan image `container[0]` Deployment K8s (live) dengan image di file deployment YAML repo GitOps. Kalau MISMATCH, cetak perintah `bq --gitops-set-image` untuk sync.
+
+### 7.31 Repo Config Check dari PocketBase (`--repo-check`)
+
+`bq --repo-check <repo> [<ref>] [--cicd=pb] [--dry-run]` — cek CICD repo config dari PocketBase collection `repo`. Menampilkan konfigurasi CICD repo (IMAGE, PROJECT, DEPLOYMENT, PORT, dll) tanpa perlu clone. Berguna untuk verifikasi data sebelum menjalankan `--bootstrap-k8s`.
+
+### 7.32 Preflight Diagnostik (`--doctor`)
+
+`bq --doctor` — cek kesiapan tools (git, docker, buildx, kubectl) & credentials (GITHUB_TOKEN, docker login, buildx builder, kubectl context). Exit 0 bila blocker-free, exit 1 bila ada masalah kritis.
 
 ---
 
@@ -522,28 +828,43 @@ Default: `--push=True`, `--image-check=True`, `--platform=linux/amd64`, secret `
 ```mermaid
 flowchart TB
     User["👤 User / AI Agent"] --> CLI
-    subgraph Package["build_q/ (Python 3.7+, stdlib only; pynacl opt untuk set_secret)"]
+    subgraph Package["build_q/ Python 3.7+ stdlib only; pynacl opt"]
       CLI["cli.py<br/>argparse + orchestration"]
       Builder["builder.py<br/>build_command, run_build,<br/>run_compose, init_jx, init_legacy,<br/>init_gh_action, init_secrets"]
-      Check["check.py<br/>run_check (7 sub-cek)"]
-      PRFix["pr_fix.py<br/>run_pr_fix (11 langkah)"]
+      Bootstrap["bootstrap.py<br/>run_bootstrap_k8s"]
+      Check["check.py<br/>run_check 7 sub-cek"]
+      PRFix["pr_fix.py<br/>run_pr_fix 11 langkah"]
       Rollout["rollout.py<br/>compute + render suggestion"]
       GhApi["github_api.py<br/>REST + libsodium set_secret,<br/>create_pull_request"]
+      PbApi["pb_api.py<br/>PocketBase IDP<br/>auth + secrets + collection fetch"]
+      Repo["repo.py<br/>run_repo_check,<br/>_find_repo_record"]
+      SetImage["set_image.py<br/>kubectl set image"]
+      GitopsSetImage["gitops_set_image.py<br/>patch YAML + push"]
+      IsMatchImage["is_match_image.py<br/>live vs gitops compare"]
+      CicdTrigger["cicd_trigger.py<br/>webhook trigger"]
+      CicdWebhook["cicd_webhook.py<br/>webhook check"]
+      Doctor["doctor.py<br/>run_doctor"]
+      TUI["tui.py<br/>Jev Agent Planner"]
       Common["_common.py<br/>INIT_ARTIFACTS, fetch_cicd_data,<br/>init_ctx, normalize_text"]
       Config["config.py<br/>load_config, save_env_value,<br/>~/.build-q/.env loader"]
-      Templates["templates.py"]
-      CLI --> Builder & Check & PRFix
+      Templates["templates.py<br/>gist fetch + cache + fallback"]
+      CLI --> Builder & Check & PRFix & Bootstrap & Repo & Doctor & TUI
+      CLI --> SetImage & GitopsSetImage & IsMatchImage & CicdTrigger & CicdWebhook
       Check & PRFix --> Common & GhApi & Templates
+      Bootstrap --> Common & GhApi & Templates & PbApi & Repo
       Builder --> Common & Templates & Rollout
-      Builder & Check & PRFix --> Config
+      Builder & Check & PRFix & Bootstrap --> Config
+      Config --> PbApi
       GhApi --> Config
+      Repo --> PbApi
     end
     Builder --> Docker["docker buildx"]
-    Builder & CLI --> Gh["gh CLI (legacy, GH_CLI=true)"]
-    Builder & PRFix --> Kubectl["kubectl (opsional)"]
+    Builder & CLI --> Gh["gh CLI legacy GH_CLI=true"]
+    Builder & PRFix & Bootstrap & SetImage --> Kubectl["kubectl opsional"]
     Builder --> Registry[("Docker Registry")]
-    CLI & GhApi & PRFix --> Git["git"]
-    GhApi & PRFix --> GitHub[("GitHub REST API")]
+    CLI & GhApi & PRFix & Bootstrap --> Git["git"]
+    GhApi & PRFix & Bootstrap --> GitHub[("GitHub REST API")]
+    PbApi --> PocketBase[("PocketBase API<br/>cicd-hw.qoin.id/devops")]
 ```
 
 Distribusi via `pyproject.toml` (setuptools) → dua entry point script: `build-q` & `bq`.
@@ -553,9 +874,10 @@ Distribusi via `pyproject.toml` (setuptools) → dua entry point script: `build-
 - Python 3.7+ (standard library only).
 - Docker Engine + Buildx plugin.
 - Git (opsional; wajib untuk auto-detect & mode local).
-- GitHub credential: `GITHUB_TOKEN` di `~/.build-q/.env` (scope: `repo`, `workflow`, `read:user`). GitHub CLI `gh` opsional (mode legacy `GH_CLI=true`; default sejak v0.1.22: `GH_CLI=false` = native REST).
-- `kubectl` (opsional; untuk fetch webhook token otomatis pada `--pr-fix` preflight; default context `hw-dev`).
+- GitHub credential: `GITHUB_TOKEN` di `~/.build-q/.env` (scope: `repo`, `workflow`, `read:user`). GitHub CLI `gh` opsional (mode legacy `GH_CLI=true`; default sejak v0.1.22: `GH_CLI=false` = native REST). Alternatif: PocketBase IDP (`PB_API=true`) — zero-local-config.
+- `kubectl` (opsional; untuk fetch webhook token otomatis pada `--pr-fix` preflight; default context `hw-dev`; juga dipakai `--apply-secret`, `--force-recreate-deploy`, `--set-image`).
 - `pynacl` (opsional; wajib untuk `--pr-fix` dan `--init-secrets` di mode native — enkripsi libsodium repo secret).
+- PocketBase API credential (opsional; `PB_API_URL`, `PB_API_USER`, `PB_API_PASS` — wajib untuk `--pb-*` commands dan `--bootstrap-k8s` PocketBase fallback).
 
 ## 11. Release Process
 
@@ -593,6 +915,7 @@ sequenceDiagram
 
 ## 13. Changelog Ringkas
 
+- **0.1.30** — `--bootstrap-k8s` **PocketBase fallback**: bila `cicd/cicd.json` tidak ada di source repo, otomatis coba fetch dari PocketBase collection `repo` (nested `cicd` dict → flat fields fallback). Memungkinkan repo tanpa cicd.json (misal Rust services) tetap bisa di-bootstrap selama data CICD terdaftar di PocketBase IDP. Tambah modul import `pb_api` + `repo._find_repo_record` di `bootstrap.py`. Dokumentasi §6.8.1 (CICD waterfall), §7.25 (PB IDP), §7.26–7.32 (fitur baru). PRD §6.1 command router update 15+ subcommands.
 - **0.1.29** — `bq --bootstrap-k8s`: one-shot bootstrap manifest K8s (Secret + Deployment + Service + kustomization) ke repo GitOps sesuai standar Qoin CCE. Modul baru `bootstrap.py`; 5 template YAML baru di gist (secret/deployment × dotnet/default + services); auto-detect stack (probe `appsettings.{Env}.json` → `.env.{env}` → `.env` → `.env.example`); labels 4-tuple `{app,env,project,role}` dengan selector by construction (impossible mismatch); `imagePullSecrets: regcred` + `nodeSelector: cce.cloud.com/cce-nodepool` + tz-config volume + `imagePullPolicy: Always` + `RollingUpdate` strategy; auto-update `kustomization.yaml` (idempotent); flag `--namespace`/`--nodepool`/`--env` override untuk cross-env (mis. gitops di `staging-qoin/` tapi apply ke `production-qoin`); opsional `--apply-secret` (guardrail production PR-only) + `--force-recreate-deploy` (untuk selector-immutable drift, guardrail production manual). Dedupe PR filter by `head.ref` (fix false-positive dari GitHub API filter tanpa `owner:branch`). PR body + branch naming `bootstrap/{app}-{env}-{ts}`. Test end-to-end verified di 4 repo Rust ke `develop-qoin` (hw-dev) + cross-env `production-qoin` (hw-pro-q). Dokumentasi §6.8 + §7.24.
 - **0.1.28** — `--pr-fix`: preserve existing Dockerfile (skip regenerate) — cegah overwrite kustomisasi tim.
 - **0.1.27** — DRY refactor Fase 1: modul baru `_common.py` (`INIT_ARTIFACTS`, `fetch_cicd_data`, `init_ctx_from_cicd`, `normalize_text`); `github_api.normalize_repo` public; hapus 4× normalisasi repo inline + 2× cicd fetch loop di check/pr_fix + duplikat helper `_normalize`/`_init_ctx`. Zero-behavior-change (~165 LOC reduksi). PRD di-sync ke v0.1.27.
@@ -609,7 +932,32 @@ sequenceDiagram
 - **0.1.11** — bug fix: early image check di `run_build`/`run_compose` (dipanggil sebelum `ensure_builder` & sebelum wajib `cicd.json`). Repo tanpa `cicd/cicd.json` sekarang bisa memanfaatkan skip idempotency.
 - **0.1.10** — `--init-jx`, `--init-secrets`, `--fix-dockerfile`, `--gh-auth`, `--init-legacy`, `--gh-action-init`, `--compose`, remote SSH → HTTPS fallback, ekspansi `--fix-dockerfile` (standalone netrc + `MAINTAINER` + legacy `ENV`).
 
-## 14. Future Roadmap
+## 14. Module Reference
+
+| Module | LOC | Tanggung Jawab |
+|--------|-----|----------------|
+| `cli.py` | ~1120 | Argparse + orchestration dispatch |
+| `builder.py` | ~1000 | Build command assembly, init_jx/legacy/secrets, run_build/compose |
+| `bootstrap.py` | ~624 | `--bootstrap-k8s` full flow (preflight → render → PR) |
+| `templates.py` | ~890 | Gist fetch + cache + bundled fallback, `render()` |
+| `config.py` | ~281 | `load_config()`, `.env` loader, PB hydrate |
+| `github_api.py` | ~180 | Native REST: contents, SHA, PR, clone, set_secret |
+| `pb_api.py` | ~251 | PocketBase IDP: auth, secrets, collection fetch, cache |
+| `repo.py` | ~186 | `--repo-check` PocketBase lookup |
+| `pr_fix.py` | ~400 | `--pr-fix` 11-step flow |
+| `check.py` | ~200 | `--check` 7 sub-checks |
+| `rollout.py` | ~100 | Rollout suggestions pasca-build |
+| `_common.py` | ~109 | Shared: `fetch_cicd_data`, `init_ctx`, `normalize_text` |
+| `cicd_trigger.py` | ~300 | `--cicd-trigger` webhook fire |
+| `cicd_webhook.py` | ~350 | `--cicd-webhook` verification |
+| `set_image.py` | ~80 | `--set-image` kubectl hot-patch |
+| `gitops_set_image.py` | ~370 | `--gitops-set-image` declarative update |
+| `is_match_image.py` | ~130 | `--is-match-image` drift check |
+| `doctor.py` | ~400 | `--doctor` diagnostics |
+| `tui.py` | ~1000 | Jev Agent Planner TUI |
+| `dockerfile_checks.py` | ~160 | `--fix-dockerfile` transforms |
+
+## 15. Future Roadmap
 
 - Multi-registry profile (per-project).
 - Integrasi konteks Kubernetes (langsung deploy hasil build ke cluster lokal / kind).
@@ -617,3 +965,6 @@ sequenceDiagram
 - Support platform `linux/arm64` cross-build default untuk M-series Mac.
 - Plugin hook pre/post build untuk custom step.
 - Migrasi `pyproject.toml` `project.license` ke SPDX string (deadline setuptools 2027-Feb-18).
+- `--bootstrap-k8s` batch mode: bootstrap N repo sekaligus dari PocketBase collection.
+- `--bootstrap-k8s` auto-create `cicd/cicd.json` di source repo via PR (dari PocketBase data).
+- PocketBase collection `repo` auto-sync dari GitHub org webhook (new repo → auto-register).

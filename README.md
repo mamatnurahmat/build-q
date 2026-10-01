@@ -2,7 +2,17 @@
 
 **build-q** (dibaca *bq*) adalah CLI Python zero-dependency untuk operasi `docker buildx` lokal & remote yang selaras dengan pipeline CI/CD (Jenkins X). Satu perintah pendek `bq` menggantikan `docker buildx build` yang panjang, dengan auto-detect Git, `cicd/cicd.json`, secret `netrc`, resource limit, dan idempotency check terhadap registry.
 
-Selain build, `bq` menyediakan scaffolding CI/CD (`--init-jx`, `--init-legacy`), bootstrap GitHub Actions trigger (`--gh-action-init`), setup secrets (`--init-secrets`), migrasi Dockerfile legacy ke pola `--mount=type=secret` (`--fix-dockerfile`), auto-init Docker Buildx builder (`--init`), dan mode compose (`--compose`) untuk build via `make build && make release`.
+Selain build, `bq` menyediakan:
+- **Scaffolding CI/CD** (`--init-jx`, `--init-legacy`)
+- **CI/CD Trigger** (`--gh-action-init`, `--init-secrets`, `--cicd-trigger`, `--cicd-webhook`)
+- **Build Ops** (`--fix-dockerfile`, `--init`, `--compose`)
+- **GitOps** (`--bootstrap-k8s`, `--gitops-set-image`, `--set-image`, `--is-match-image`)
+- **Verifikasi** (`--check`, `--repo-check`, `--doctor`)
+- **Fix** (`--pr-fix` repo legacy template)
+- **Interactive** (`--tui` Jev Agent Planner)
+- **Credentials** PocketBase IDP (`--pb-login`, `--pb-status`, dll)
+
+Sejak v0.1.17 operasi GitHub berjalan **native** (tanpa `gh` CLI). Sejak v0.1.30 mendukung **PocketBase fallback** untuk `cicd.json`.
 
 ---
 
@@ -207,6 +217,10 @@ bq --config       # tampilkan konfigurasi aktif
 | `GITOPS_BRANCH` | `main` | Branch target di repo GitOps |
 | `GITOPS_INFRA` | `cce` | `cce` (Huawei CCE) atau `k8s` (SLS). Override per-run: `--infra` |
 | `NS_SUFFIX` | `qoin` | Fallback global: `ns = <env>-<suffix>` bila `--ns` tidak diberikan **dan** `cicd.PROJECT` kosong. Sejak v0.1.22 `cicd.PROJECT` menang. |
+| `PB_API_URL` | (kosong) | Endpoint PocketBase IDP (mis. `https://cicd-hw.qoin.id/devops`) |
+| `PB_API_USER` | (kosong) | Username PocketBase |
+| `PB_API_PASS` | (kosong) | Password PocketBase |
+| `PB_API` | `false` | Set `true` untuk fetch secrets / cicd dari PocketBase |
 
 #### Toggle native (tanpa `gh` CLI)
 
@@ -473,9 +487,9 @@ bq --clone Qoin-Digital-Indonesia/foo v1.2.3 --compose    # ENV=production
 ### 13. Bootstrap manifest K8s ke repo GitOps (`--bootstrap-k8s`, sejak v0.1.29)
 
 Satu perintah untuk **bootstrap service baru** ke Kubernetes lewat GitOps:
-fetch `cicd/cicd.json` dari repo source → deteksi stack (dotnet vs default) →
+fetch `cicd/cicd.json` dari repo source (atau **PocketBase** sebagai fallback) → deteksi stack (dotnet vs default) →
 render 3 file YAML (Secret, Deployment, Service) sesuai standar Qoin CCE →
-update `kustomization.yaml` → commit → push → open PR ke repo GitOps.
+update `kustomization.yaml` → commit → push → open PR ke repo GitOps (deduplicated).
 Opsional apply Secret langsung ke cluster + auto-recreate Deployment saat
 selector drift.
 
@@ -536,6 +550,13 @@ Semua file masuk ke `{path-yaml}/` di repo GitOps:
 **Selector Deployment ↔ Service** dijamin match — placeholder `{{APP}}` tunggal di
 template, satu render → tidak mungkin drift by construction.
 
+#### Deteksi CICD Config (Waterfall)
+
+Cek data CICD berurutan (bila gagal lanjut ke langkah berikutnya):
+1. `cicd/cicd.json` di source repo via GitHub API.
+2. `cicd.json` di root source repo.
+3. **PocketBase collection `repo`** (sejak v0.1.30). Repo *tanpa* `cicd.json` bisa di-bootstrap selama terdaftar di PocketBase dengan data CICD.
+
 #### Deteksi stack (fallback berurutan)
 
 Cek berurutan dari repo source `{repo}@{ref}` via GitHub REST:
@@ -591,6 +612,7 @@ Semua step aman di-run berulang:
 - Kustomization update → skip bila 2 entry sudah include
 - Force-recreate → skip bila selector match / Deployment belum ada
 - Bila tidak ada diff sama sekali → print "already up-to-date" dan exit 0 tanpa PR
+- PR dedup: bila branch fix sudah ada PR-nya (same `head.ref`), cetak PR eksisting.
 
 #### Contoh use case
 
@@ -643,8 +665,32 @@ bq --bootstrap-k8s foo develop \
 | ArgoCD `sync=OutOfSync` — `spec.selector: field is immutable` | Deployment awal punya selector 1-tuple, template baru 4-tuple | Pakai `--force-recreate-deploy` (non-prod). Prod: manual blue-green |
 | Pod crash saat startup — `Environment variable X is required` | Source config `.env.example` = template placeholder | Patch Secret manual dgn value real: `kubectl edit secret file-config-<app>-<env>`, lalu `kubectl rollout restart deploy/<app>` |
 | PR konflik `kustomization.yaml` | PR lain merged duluan menambah baris di posisi sama | Close PR + re-run `bq --bootstrap-k8s` (idempotent — akan render dari staging HEAD terbaru) |
+| `cicd config tidak ada di repo maupun PocketBase` | Repo tidak ada cicd.json dan belum terdaftar di PocketBase | Tambah data di PocketBase via UI admin atau API PATCH. |
 
-### 14. Contoh full (customize secret, platform, build-arg)
+### 14. Fitur-fitur Tambahan
+
+**A. PocketBase IDP (`--pb-*`, v0.1.27+)**
+- `--pb-login`: Authentikasi ke PocketBase API, fetch credentials, cache lokal (15m). Zero-local-config workflow.
+- `--pb-status`, `--pb-pull`, `--pb-logout` untuk manajemen session.
+
+**B. Manual Webhook Trigger & Verify**
+- `--cicd-trigger <repo> <ref>`: POST synthetic payload dengan HMAC signature (fetch webhook token via `kubectl`). Bypass manual GitHub UI.
+- `--cicd-webhook <repo>`: Verifikasi webhook `cicd-hw.qoin.id/hook` terpasang di repo GitHub (REST API).
+
+**C. Kesiapan Repo & Tools**
+- `--check`: Cek 7 aspek repo sebelum CI dijalankan (cicd.json, github webhook, github secrets, artifacts).
+- `--repo-check <repo> <ref>`: Cek config CICD khusus dari PocketBase IDP (verifikasi data sebelum `--bootstrap-k8s`).
+- `--doctor`: Diagnostics local pre-flight (cek binaries `docker buildx`, `gh`, `git`, token validity, dan kubectl context).
+
+**D. GitOps & Live Patching**
+- `--gitops-set-image <gitops> <branch> <yaml> <image>`: Declarative update image tag di file deployment YAML dan commit+push otomatis.
+- `--set-image <ns> <deploy> <image>`: Imperative hot-patch K8s live deployment + `--watch`.
+- `--is-match-image <ns> <deploy> <gitops> <branch> <yaml>`: Drift check antara image live cluster vs spec di GitOps repo.
+
+**E. TUI Planner**
+- `--tui`: Buka Jev Agent Planner (Terminal User Interface) menggunakan Textual.
+
+### 15. Contoh full (customize secret, platform, build-arg)
 
 ```bash
 bq plus-be-service staging \
@@ -673,6 +719,17 @@ Subcommands (mutually exclusive):
   --gh-action-init          Bootstrap standar trigger-ci.yml (hapus workflow lain + set secrets)
   --init-secrets [<repo>]   Set GitHub Actions webhook secrets
   --fix-dockerfile [PATH]   Migrasi Dockerfile legacy ke secret mount (+ MAINTAINER/ENV/standalone netrc)
+  --pr-fix [<repo> <ref>]   One-shot 11-step fix untuk repo legacy template (branch + commit + push + set secrets + PR).
+  --cicd-webhook [<repo>]   Cek eksistensi webhook cicd-hw.qoin.id.
+  --cicd-trigger <repo> <ref> Manual trigger pipeline via webhook (simulasi GitHub event).
+  --check [<repo> <ref>]    Cek readiness repo (7 aspek).
+  --repo-check <repo> <ref> Cek config CICD dari PocketBase tanpa clone.
+  --doctor                  Diagnostic local toolchain (git, docker, tokens).
+  --tui                     Buka Jev Agent Planner (TUI).
+  --set-image <ns> <dp> <img> Hot-patch deployment live di K8s.
+  --gitops-set-image ...    Update image di repo GitOps + push.
+  --is-match-image ...      Cek drift image K8s live vs GitOps.
+  --pb-login/status/pull/logout PocketBase IDP operations.
   --bootstrap-k8s <repo> <ref> \
      --gitops-repo <r> --gitops-branch <b> --path-yaml <p>
                             Bootstrap Secret + Deployment + Service ke repo GitOps.
