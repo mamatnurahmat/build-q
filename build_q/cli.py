@@ -394,6 +394,41 @@ Config file: ~/.build-q/.env
              "Berguna bila cluster pakai pattern beda mis. production-nodepool-service.",
     )
 
+    # ── Anomaly scanner (--anomaly-scan <file|dir>) ───────────────────────────
+    parser.add_argument(
+        "--anomaly-scan",
+        metavar="PATH",
+        help="Scan FILE YAML K8s ATAU seluruh DIREKTORI (glob default "
+             "`*_deployment.yaml`) untuk anomali config. 10 deterministic "
+             "checks + Jev overall severity verdict. "
+             "Exit code: 0=safe, 1=warn, 2=critical.",
+    )
+    parser.add_argument(
+        "--anomaly-glob",
+        metavar="PATTERN",
+        default="*_deployment.yaml",
+        help="Dengan --anomaly-scan <dir>: glob pattern file (default "
+             "`*_deployment.yaml`). Contoh lain: `*.yaml`, `*_services.yaml`.",
+    )
+    parser.add_argument(
+        "--no-jev",
+        action="store_true",
+        help="Dengan --anomaly-scan: skip Jev verdict call "
+             "(deterministic only, offline-friendly, zero LLM cost).",
+    )
+    parser.add_argument(
+        "--export-csv",
+        metavar="PATH",
+        help="Dengan --anomaly-scan: tulis findings ke file CSV "
+             "(1 row per finding, resource tanpa finding tetap 1 row).",
+    )
+    parser.add_argument(
+        "--export-md",
+        metavar="PATH",
+        help="Dengan --anomaly-scan: tulis report Markdown "
+             "(summary + top rules + detail per resource).",
+    )
+
     # ── SOPS encrypt / decrypt manual (standalone) ────────────────────────────
     parser.add_argument(
         "--sops-encrypt",
@@ -781,6 +816,16 @@ Config file: ~/.build-q/.env
                 sha_override=args.sha,
                 dry_run=args.dry_run,
                 force=args.force,
+            ))
+
+        if args.anomaly_scan:
+            from .anomaly import run_anomaly_scan
+            sys.exit(run_anomaly_scan(
+                args.anomaly_scan,
+                use_jev=not args.no_jev,
+                glob_pattern=args.anomaly_glob,
+                export_csv_path=args.export_csv,
+                export_md_path=args.export_md,
             ))
 
         if args.sops_encrypt or args.sops_decrypt:

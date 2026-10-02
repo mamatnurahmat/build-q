@@ -1,0 +1,93 @@
+---
+# ❌ BAD Deployment — sengaja violate 7 rules untuk test
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pay-be-topup-bad
+  namespace: production-qoin
+spec:
+  replicas: 1                    # ❌ prod_replicas_lt_2
+  selector:
+    matchLabels:
+      app: pay-be-topup-bad
+  template:
+    metadata:
+      labels:
+        app: pay-be-topup-bad
+    spec:
+      hostNetwork: true           # ❌ host_network_true
+      # ❌ missing_image_pullsecret (tidak ada imagePullSecrets)
+      containers:
+      - name: app
+        image: loyaltolpi/pay-be-topup:latest   # ❌ image_latest_tag
+        # ❌ missing_liveness_probe
+        # ❌ missing_readiness_probe
+        # ❌ missing_resources_limits
+        securityContext:
+          privileged: true                       # ❌ privileged_container
+        env:
+        - name: DB_PASSWORD
+          value: s3cret-plaintext-hardcoded      # ❌ env_var_hardcoded_credential
+        - name: SAFE_VAR
+          value: ok
+---
+# ✅ GOOD Deployment — compliant (no findings expected)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pay-be-topup-good
+  namespace: production-qoin
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: pay-be-topup-good
+  template:
+    metadata:
+      labels:
+        app: pay-be-topup-good
+    spec:
+      imagePullSecrets:
+      - name: regcred
+      containers:
+      - name: app
+        image: loyaltolpi/pay-be-topup:v1.2.3
+        livenessProbe:
+          httpGet: { path: /health, port: 8080 }
+        readinessProbe:
+          httpGet: { path: /health, port: 8080 }
+        resources:
+          requests: { cpu: 100m, memory: 128Mi }
+          limits:   { cpu: 500m, memory: 512Mi }
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: file-config-pay-be-topup
+              key: db-password
+---
+# ❌ BAD Secret — plaintext (tidak SOPS-encrypted)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: file-config-pay-be-topup-bad
+  namespace: production-qoin
+type: Opaque
+data:
+  db-password: czNjcmV0LXBhc3M=   # ❌ secret_plaintext_committed
+---
+# ✅ GOOD Secret — SOPS-encrypted (ada field `sops`)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: file-config-pay-be-topup-good
+  namespace: production-qoin
+type: Opaque
+data:
+  db-password: ENC[AES256_GCM,data:fake,iv:fake,tag:fake,type:str]
+sops:
+  kms: []
+  age:
+  - recipient: age1examplerecipient
+    enc: fake
+  version: 3.8.1
