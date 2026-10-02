@@ -607,6 +607,39 @@
       "notes": ""
     },
     {
+      "name": "bq_serve",
+      "category": "preflight",
+      "description": "Buka Jev Agent Planner sebagai WEB CHAT di PORT (default 8888). Pilih tool via browser + Top-3 kandidat + streaming output. Default localhost; expose network via --serve-host 0.0.0.0 + --serve-token.",
+      "template": "bq --serve {port}",
+      "params": {
+        "port": {
+          "type": "text",
+          "default": "8888",
+          "hint": "port TCP (default 8888)"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 31,
+      "notes": ""
+    },
+    {
+      "name": "bq_anomaly_scan",
+      "category": "preflight",
+      "description": "Scan file YAML K8s ATAU direktori namespace (glob *_deployment.yaml) untuk anomali config. 10 deterministic checks + Jev overall severity verdict. Opsional export CSV/MD. Exit code: 0=safe, 1=warn, 2=critical.",
+      "template": "bq --anomaly-scan {path}",
+      "params": {
+        "path": {
+          "type": "text",
+          "hint": "file YAML atau direktori (mis. cce/production-qoin)"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 32,
+      "notes": ""
+    },
+    {
       "name": "drift_checker_worker",
       "category": "companion",
       "description": "Jalankan worker version drift check (GitHub vs GitOps YAML vs cluster runtime) untuk satu namespace.",

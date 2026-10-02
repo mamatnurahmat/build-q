@@ -181,6 +181,34 @@ Config file: ~/.build-q/.env
         action="store_true",
         help="Tampilkan ringkasan katalog TUI aktif (tools/providers/patterns).",
     )
+    parser.add_argument(
+        "--serve",
+        type=int,
+        metavar="PORT",
+        help="Buka Jev Agent Planner sebagai web chat di PORT "
+             "(mis. `bq --serve 8888`). Default bind 127.0.0.1 — pakai "
+             "--serve-host 0.0.0.0 untuk expose ke network.",
+    )
+    parser.add_argument(
+        "--serve-host",
+        metavar="HOST",
+        default="127.0.0.1",
+        help="Bind address untuk --serve (default: 127.0.0.1). "
+             "0.0.0.0 → expose ke network (warning dicetak).",
+    )
+    parser.add_argument(
+        "--serve-no-exec",
+        action="store_true",
+        help="Dengan --serve: tolak POST /api/execute (read-only / demo mode). "
+             "Decide tetap jalan, hanya eksekusi command yang di-disable.",
+    )
+    parser.add_argument(
+        "--serve-token",
+        metavar="TOKEN",
+        help="Dengan --serve: wajib Bearer token di header Authorization "
+             "untuk semua /api/*. Berguna saat --serve-host 0.0.0.0. "
+             "Browser akan prompt lewat URL `?token=TOKEN` (auto-stored).",
+    )
 
     # Subcommand flags
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
@@ -609,6 +637,15 @@ Config file: ~/.build-q/.env
             from .tui import repl
             repl()
             return
+
+        if args.serve:
+            from .serve import run_serve
+            sys.exit(run_serve(
+                args.serve,
+                host=args.serve_host,
+                allow_exec=not args.serve_no_exec,
+                token=args.serve_token,
+            ))
 
         if args.tui_pull:
             from . import tui_catalog
