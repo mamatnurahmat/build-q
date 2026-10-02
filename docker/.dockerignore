@@ -1,0 +1,5 @@
+# Minimal context — kita install bq dari PyPI, bukan dari source.
+# Build arg BUILD_Q_VERSION pin ke release.
+*
+!docker/
+!README.md
