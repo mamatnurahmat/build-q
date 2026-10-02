@@ -156,9 +156,18 @@
     {
       "name": "bq_check",
       "category": "preflight",
-      "description": "Cek konsistensi cicd.json, Makefile, Dockerfile, compose.yaml \u2014 validasi konfigurasi CI/CD project.",
-      "template": "bq --check",
-      "params": {},
+      "description": "Verifikasi kesiapan repo di remote (tanpa clone): repo/ref, cicd.json, artifact jx-init, image registry, deployment GitOps. Butuh --remote.",
+      "template": "bq --check {repo} {ref} --remote",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (mis. pay-be-topup-manager)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch atau tag (develop, staging, main, v1.2.3)"
+        }
+      },
       "risky": false,
       "active": true,
       "order": 9,
@@ -197,24 +206,24 @@
     {
       "name": "bq_init_secrets",
       "category": "init",
-      "description": "Setup GitHub Actions secrets (registry credentials + gitops token) untuk repo aktif.",
+      "description": "[DEPRECATED] Set GitHub Actions webhook secrets (WEBHOOK_TRIGGER_URL/TOKEN). Hanya dibutuhkan kalau repo masih pakai trigger-ci.yml action sebagai fallback. Standar sekarang: webhook cicd-hw.qoin.id/hook tanpa secret action.",
       "template": "bq --init-secrets",
       "params": {},
       "risky": true,
       "active": true,
       "order": 12,
-      "notes": ""
+      "notes": "deprecated-fase3"
     },
     {
       "name": "bq_gh_action_init",
       "category": "init",
-      "description": "Install/update file .github/workflows/trigger-ci.yml agar push ke branch memicu build CI/CD.",
+      "description": "[DEPRECATED] Sekarang HANYA cleanup: hapus trigger-ci.yml lokal + cek status webhook. Standar CI/CD Fase 3: GitHub webhook cicd-hw.qoin.id/hook.",
       "template": "bq --gh-action-init",
       "params": {},
       "risky": true,
       "active": true,
       "order": 13,
-      "notes": ""
+      "notes": "deprecated-fase3"
     },
     {
       "name": "bq_fix_dockerfile",
@@ -236,9 +245,18 @@
     {
       "name": "bq_cicd_trigger",
       "category": "cicd",
-      "description": "Trigger CI/CD pipeline lewat webhook (mulai build remote di CI runner).",
-      "template": "bq --cicd-trigger",
-      "params": {},
+      "description": "Trigger MANUAL pipeline via webhook cicd-hw.qoin.id/hook \u2014 kirim synthetic push event untuk <repo> <ref>. HMAC auto dari secret jenkins-x/incoming-webhook. Opsional: --sha, --force (bypass dedup), --hook-url. Auto-detect repo/ref dari git bila kosong.",
+      "template": "bq --cicd-trigger {repo} {ref}",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (auto dari git bila kosong)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag (auto dari git bila kosong)"
+        }
+      },
       "risky": true,
       "active": true,
       "order": 15,
@@ -247,10 +265,15 @@
     {
       "name": "bq_cicd_webhook",
       "category": "cicd",
-      "description": "Register/verifikasi webhook GitHub \u2192 CI backend untuk repo aktif.",
-      "template": "bq --cicd-webhook",
-      "params": {},
-      "risky": true,
+      "description": "Cek apakah repo sudah terpasang webhook cicd-hw.qoin.id/hook. Auto-detect repo dari git bila kosong. Berjalan sendiri atau pasca --pr-fix.",
+      "template": "bq --cicd-webhook {repo}",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (auto dari git bila kosong)"
+        }
+      },
+      "risky": false,
       "active": true,
       "order": 16,
       "notes": ""
@@ -278,9 +301,17 @@
     {
       "name": "bq_bootstrap_k8s",
       "category": "k8s",
-      "description": "Bootstrap deployment ke Kubernetes: generate manifest deployment.yaml + service.yaml, apply, push ke repo GitOps.",
-      "template": "bq --bootstrap-k8s --gitops-repo {gitops_repo} --gitops-branch {branch} --path-yaml {path_yaml} --env {env} --replicas {replicas} --kube-context {kube_context} --namespace {namespace}",
+      "description": "Bootstrap manifest K8s (Secret + Deployment + Service) ke repo GitOps. Butuh <repo> <ref> + --gitops-repo + --gitops-branch + --path-yaml. Opsional: --apply-secret, --kube-context, --namespace, --nodepool, --force-recreate-deploy.",
+      "template": "bq --bootstrap-k8s {repo} {ref} --gitops-repo {gitops_repo} --gitops-branch {branch} --path-yaml {path_yaml} --env {env} --replicas {replicas}",
       "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo source (mis. pay-be-topup-manager)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag source (develop, staging, main, v1.2.3)"
+        },
         "gitops_repo": {
           "type": "text",
           "default": "gitops",
@@ -319,7 +350,7 @@
         },
         "kube_context": {
           "type": "text",
-          "hint": "kube context (mis. hw-pro-p)"
+          "hint": "kube context (mis. hw-pro-p) — pakai dgn --apply-secret"
         },
         "namespace": {
           "type": "text",
@@ -460,6 +491,122 @@
       "notes": ""
     },
     {
+      "name": "bq_pb_login",
+      "category": "pocketbase",
+      "description": "Verifikasi kredensial PB API (PocketBase IDP) & warm cache secrets ke ~/.build-q/.pb-cache.json. Butuh PB_API=true + PB_API_URL/USER/PASS di ~/.build-q/.env.",
+      "template": "bq --pb-login",
+      "params": {},
+      "risky": false,
+      "active": true,
+      "order": 23,
+      "notes": ""
+    },
+    {
+      "name": "bq_pb_status",
+      "category": "pocketbase",
+      "description": "Tampilkan status PB API: toggle, URL, user, cache age, jumlah secrets yang di-cache.",
+      "template": "bq --pb-status",
+      "params": {},
+      "risky": false,
+      "active": true,
+      "order": 24,
+      "notes": ""
+    },
+    {
+      "name": "bq_pb_pull",
+      "category": "pocketbase",
+      "description": "Force refresh cache PB API (skip TTL) \u2014 auth ulang & fetch semua secrets dari PocketBase.",
+      "template": "bq --pb-pull",
+      "params": {},
+      "risky": false,
+      "active": true,
+      "order": 25,
+      "notes": ""
+    },
+    {
+      "name": "bq_pb_logout",
+      "category": "pocketbase",
+      "description": "Hapus ~/.build-q/.pb-cache.json (paksa re-auth pada run berikutnya).",
+      "template": "bq --pb-logout",
+      "params": {},
+      "risky": true,
+      "active": true,
+      "order": 26,
+      "notes": ""
+    },
+    {
+      "name": "bq_sops_encrypt",
+      "category": "secrets",
+      "description": "Encrypt FILE in-place pakai sops + age. Recipient dari BUILD_Q_SOPS_AGE_RECIPIENT, .sops.yaml di parent dir, atau fallback public key di ~/.config/sops/age/keys.txt. Standar bootstrap-k8s v0.1.39.",
+      "template": "bq --sops-encrypt {path}",
+      "params": {
+        "path": {
+          "type": "text",
+          "hint": "path file target (mis. ./k8s/production-qoin/secret.yaml)"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 27,
+      "notes": ""
+    },
+    {
+      "name": "bq_sops_decrypt",
+      "category": "secrets",
+      "description": "Decrypt FILE SOPS-encrypted. Default: tulis plaintext ke stdout. Pakai --sops-in-place untuk tulis balik ke file.",
+      "template": "bq --sops-decrypt {path}",
+      "params": {
+        "path": {
+          "type": "text",
+          "hint": "path file terenkripsi SOPS"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 28,
+      "notes": ""
+    },
+    {
+      "name": "bq_repo_check",
+      "category": "preflight",
+      "description": "Cek CICD repo config dari PocketBase collection. Menampilkan konfigurasi CICD repo (IMAGE, PROJECT, DEPLOYMENT, PORT, dll) tanpa perlu clone. Pakai --cicd=pb untuk tarik dari PocketBase.",
+      "template": "bq --repo-check {repo} {ref} --cicd=pb",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (mis. pay-be-topup-manager)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag (opsional)"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 29,
+      "notes": ""
+    },
+    {
+      "name": "bq_build_gh_auth",
+      "category": "build",
+      "description": "Build image lokal + auto-inject --build-arg GITHUB_USER + GITHUB_TOKEN dari `gh` CLI. Berguna untuk Dockerfile legacy yang pakai go mod private via https. Push ke registry.",
+      "template": "bq {repo} {ref} --local --gh-auth",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (mis. pay-be-topup-manager)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch/tag"
+        }
+      },
+      "risky": true,
+      "active": true,
+      "order": 30,
+      "notes": ""
+    },
+    {
       "name": "drift_checker_worker",
       "category": "companion",
       "description": "Jalankan worker version drift check (GitHub vs GitOps YAML vs cluster runtime) untuk satu namespace.",
@@ -527,7 +674,7 @@
     },
     {
       "field": "ref",
-      "pattern": "v\\d+\\.\\d+\\.\\d+|develop|staging|main|master|production",
+      "pattern": "v\\d+\\.\\d+\\.\\d+(?:-[\\w.]+)?|(?:feat|fix|hotfix|release|chore)/[\\w./-]+|develop|staging|main|master|production",
       "description": "",
       "active": true,
       "order": 4
@@ -548,7 +695,7 @@
     },
     {
       "field": "kube_context",
-      "pattern": "(?:hw|sls)-(?:dev|pro|stg)-[a-z]",
+      "pattern": "(?:hw|sls)-(?:dev|pro|stg)(?:-[a-z])?",
       "description": "",
       "active": true,
       "order": 7
@@ -611,7 +758,7 @@
     },
     {
       "field": "branch",
-      "pattern": "\\b(?:develop|staging|main|master)\\b",
+      "pattern": "(?:feat|fix|hotfix|release|chore)/[\\w./-]+|\\b(?:develop|staging|main|master)\\b",
       "description": "",
       "active": true,
       "order": 16
