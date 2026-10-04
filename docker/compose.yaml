@@ -1,109 +1,91 @@
-# Jev Web Chat — bq --serve 8888 via Docker Compose
-# Docker-outside-of-Docker (DooD): mount /var/run/docker.sock untuk akses
-# FULL ke Docker daemon host. Semua `bq --remote`, `bq --compose`,
-# `docker buildx build` dalam container akan jalan di daemon host.
+# ─────────────────────────────────────────────────────────────────────────
+# Jev Web Chat — bq --serve 8888 (STATELESS BASE)
 #
-# Quick start:
-#   cd docker/
-#   cp .env.example .env
-#   # edit .env isi secret (minimal TYPESAFE_API_KEY + GITHUB_TOKEN)
-#   docker compose up -d --build
-#   open http://localhost:8888
+# Compose ini BISA JALAN DI MESIN MANAPUN tanpa host mount.
+# Semua config via environment variable. Cukup:
+#
+#   cp .env.example .env     # isi minimal: TYPESAFE_API_KEY
+#   docker compose up -d
+#
+# Untuk fitur tambahan (Docker build, kubectl, SOPS, SSH), salin
+# compose.override.yaml.example → compose.override.yaml (auto-merge).
+# ─────────────────────────────────────────────────────────────────────────
 
 services:
   jev-chat:
+    image: ${JEV_IMAGE:-newrahmat/jev}:${BUILD_Q_VERSION:-0.1.43}
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: .
+      dockerfile: Dockerfile
       args:
-        BUILD_Q_VERSION: ${BUILD_Q_VERSION:-0.1.42}
-    image: build-q:${BUILD_Q_VERSION:-0.1.42}
+        BUILD_Q_VERSION: ${BUILD_Q_VERSION:-0.1.43}
     container_name: jev-chat
     hostname: jev-chat
     restart: unless-stopped
+    init: false
+    stop_grace_period: 30s
 
     ports:
-      # Default expose ke LAN. Ganti ke "127.0.0.1:8888:8888" untuk
-      # localhost-only (konsisten dgn default `bq --serve` tanpa container).
-      - "${JEV_HOST_PORT:-8888}:8888"
+      - "${JEV_BIND_ADDR:-0.0.0.0}:${JEV_HOST_PORT:-8888}:8888"
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     environment:
-      # ─── Jev provider (pilih salah satu API key) ─────────────────────
-      JEV_PROVIDER:         ${JEV_PROVIDER:-typesafe}
-      TYPESAFE_API_KEY:     ${TYPESAFE_API_KEY:-}
-      OPENROUTER_API_KEY:   ${OPENROUTER_API_KEY:-}
+      # ─── Jev provider ────────────────────────────────────────────────
+      JEV_PROVIDER:           ${JEV_PROVIDER:-typesafe}
+      TYPESAFE_API_KEY:       ${TYPESAFE_API_KEY:-}
+      OPENROUTER_API_KEY:     ${OPENROUTER_API_KEY:-}
 
-      # ─── PocketBase centralized IDP (optional, auto-hydrate secrets) ─
-      PB_API:               ${PB_API:-true}
-      PB_API_URL:           ${PB_API_URL:-https://cicd-hw.qoin.id/devops}
-      PB_API_USER:          ${PB_API_USER:-}
-      PB_API_PASS:          ${PB_API_PASS:-}
+      # ─── PocketBase IDP (optional) ──────────────────────────────────
+      PB_API:                 ${PB_API:-false}
+      PB_API_URL:             ${PB_API_URL:-}
+      PB_API_USER:            ${PB_API_USER:-}
+      PB_API_PASS:            ${PB_API_PASS:-}
 
-      # ─── GitHub (bq clone, push, PR) ─────────────────────────────────
-      GITHUB_TOKEN:         ${GITHUB_TOKEN:-}
-      GITHUB_ORG:           ${GITHUB_ORG:-Qoin-Digital-Indonesia}
-      GH_CLI:               ${GH_CLI:-false}
+      # ─── GitHub ─────────────────────────────────────────────────────
+      GITHUB_TOKEN:           ${GITHUB_TOKEN:-}
+      GITHUB_ORG:             ${GITHUB_ORG:-}
+      GH_CLI:                 ${GH_CLI:-false}
 
-      # ─── Docker Hub + Registry (image push) ──────────────────────────
-      DOCKERHUB_ORG:        ${DOCKERHUB_ORG:-loyaltolpi}
-      REGISTRY_URL:         ${REGISTRY_URL:-docker.io/loyaltolpi}
+      # ─── Docker Hub (opsional) ──────────────────────────────────────
+      DOCKERHUB_ORG:          ${DOCKERHUB_ORG:-}
+      REGISTRY_URL:           ${REGISTRY_URL:-}
+      DOCKERHUB_USER:         ${DOCKERHUB_USER:-}
+      DOCKERHUB_TOKEN:        ${DOCKERHUB_TOKEN:-}
+      DOCKER_LOGIN_REGISTRY:  ${DOCKER_LOGIN_REGISTRY:-}
 
-      # ─── SOPS encryption (bq --sops-encrypt, bootstrap-k8s secrets) ──
+      # ─── SOPS (opsional) ────────────────────────────────────────────
       BUILD_Q_SOPS_AGE_RECIPIENT: ${BUILD_Q_SOPS_AGE_RECIPIENT:-}
 
-      # ─── Serve mode options ──────────────────────────────────────────
-      BQ_SERVE_TOKEN:       ${BQ_SERVE_TOKEN:-}
-      BQ_SERVE_NO_EXEC:     ${BQ_SERVE_NO_EXEC:-}
-
-      # ─── Build-q tuning ──────────────────────────────────────────────
-      BUILD_Q_TUI_CACHE_TTL: ${BUILD_Q_TUI_CACHE_TTL:-3600}
+      # ─── Serve mode ─────────────────────────────────────────────────
+      BQ_SERVE_TOKEN:         ${BQ_SERVE_TOKEN:-}
+      BQ_SERVE_NO_EXEC:       ${BQ_SERVE_NO_EXEC:-}
+      BUILD_Q_TUI_CACHE_TTL:  ${BUILD_Q_TUI_CACHE_TTL:-3600}
 
     volumes:
-      # ═══ Docker-in-Docker (sock access FULL) ═══════════════════════════
-      # Container punya akses penuh ke Docker daemon host.
-      # Resiko: container compromise = host Docker compromise.
-      # Mitigasi: hanya expose ke LAN tim DevOps (set BQ_SERVE_TOKEN).
-      - /var/run/docker.sock:/var/run/docker.sock
-
-      # ═══ Kubectl ═══════════════════════════════════════════════════════
-      # Mount kubeconfig host (read-only). Harus pakai in-cluster service
-      # account bila cluster endpoint berupa internal DNS; untuk cluster
-      # publik (EKS/GKE/CCE) biasanya tinggal mount.
-      - ${KUBECONFIG_HOST:-${HOME}/.kube/config}:/root/.kube/config:ro
-
-      # ═══ build-q persistent state ══════════════════════════════════════
-      # Config .env, TUI cache, PB cache, audit log — pakai named volume
-      # agar persistent antar restart.
+      # Persistent state (config, cache, audit log)
       - bq-config:/root/.build-q
-
-      # ═══ Workspace untuk git clone / gitops repo ══════════════════════
-      # `bq --pr-fix`, `bq --bootstrap-k8s`, `bq --gitops-set-image`
-      # butuh workspace writable. Named volume agar persistent.
+      # Workspace (git clone, gitops ops)
       - bq-workspace:/workspace
-
-      # ═══ SOPS age keys (read-only) ════════════════════════════════════
-      - ${HOME}/.config/sops:/root/.config/sops:ro
-
-      # ═══ SSH keys untuk git SSH (optional, read-only) ═════════════════
-      # Komentar bila pakai GITHUB_TOKEN HTTPS saja.
-      - ${HOME}/.ssh:/root/.ssh:ro
-
-      # ═══ Docker config untuk registry auth (optional) ═════════════════
-      # Pakai bila `docker push` dari dalam container butuh auth yg sama
-      # dgn host.
-      - ${HOME}/.docker/config.json:/root/.docker/config.json:ro
 
     networks:
       - jev-net
 
-    # Opsional: labels untuk traefik / reverse-proxy integration
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
     labels:
       com.qoin.service: "jev-chat"
       com.qoin.component: "devops-tooling"
-      com.qoin.version:   "${BUILD_Q_VERSION:-0.1.42}"
+      com.qoin.version: "${BUILD_Q_VERSION:-0.1.43}"
 
 networks:
   jev-net:
+    name: jev-net
     driver: bridge
 
 volumes:

@@ -1,0 +1,54 @@
+# ─────────────────────────────────────────────────────────────────────────
+# Host Mounts Override — salin ke compose.override.yaml untuk auto-merge.
+#
+#   cp compose.override.yaml.example compose.override.yaml
+#   docker compose up -d
+#
+# Docker Compose otomatis merge compose.yaml + compose.override.yaml.
+# Hanya aktifkan volume yang diperlukan. Komentari yang tidak ada di host.
+# ─────────────────────────────────────────────────────────────────────────
+
+services:
+  jev-chat:
+    volumes:
+      # ═══ Docker-outside-of-Docker ═══════════════════════════════════
+      # Akses FULL ke Docker daemon host — diperlukan untuk:
+      # bq --remote, bq --compose, docker buildx build
+      # Hapus baris ini jika tidak butuh Docker build dari container.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+      # ═══ Kubeconfig ════════════════════════════════════════════════
+      # kubectl, bq --bootstrap-k8s, bq --set-image
+      # Override: KUBECONFIG_HOST=/path/to/kubeconfig
+      - type: bind
+        source: ${KUBECONFIG_HOST:-${HOME}/.kube/config}
+        target: /root/.kube/config
+        read_only: true
+        bind: { create_host_path: false }
+
+      # ═══ SOPS age keys ═════════════════════════════════════════════
+      # bq --sops-encrypt, bootstrap-k8s secrets
+      # Override: SOPS_DIR_HOST=/path/to/sops
+      - type: bind
+        source: ${SOPS_DIR_HOST:-${HOME}/.config/sops}
+        target: /root/.config/sops
+        read_only: true
+        bind: { create_host_path: false }
+
+      # ═══ SSH keys ══════════════════════════════════════════════════
+      # git SSH clone (git@github.com:...)
+      # Override: SSH_DIR_HOST=/path/to/.ssh
+      - type: bind
+        source: ${SSH_DIR_HOST:-${HOME}/.ssh}
+        target: /run/host/ssh
+        read_only: true
+        bind: { create_host_path: false }
+
+      # ═══ Docker registry auth ══════════════════════════════════════
+      # docker push ke private registry
+      # Override: DOCKER_CONFIG_HOST=/path/to/config.json
+      - type: bind
+        source: ${DOCKER_CONFIG_HOST:-${HOME}/.docker/config.json}
+        target: /run/host/docker/config.json
+        read_only: true
+        bind: { create_host_path: false }
