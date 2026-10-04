@@ -1,0 +1,357 @@
+{
+  "_meta": {
+    "description": "Seed koleksi rule Dockerfile untuk fitur `bq --fix-dockerfile` (v2). Dirancang untuk collection PocketBase `build_q_dockerfile_rules`. Setiap record = 1 rule yang dijalankan deterministic + dikirim ke Jev sebagai context untuk severity synthesis dan fix approval.",
+    "intended_pb_collection": "build_q_dockerfile_rules",
+    "version": "1.0.0",
+    "last_updated": "2026-10-04",
+    "upsert_key": "rule_id",
+    "source_skills": [
+      "docker-build-fix",
+      "jx-pipeline-fix",
+      "jx-init-web",
+      "cicd-init-web"
+    ],
+    "severity_scale": {
+      "error":   "Blocker — build gagal atau security risk serius, harus difix sebelum deploy.",
+      "warning": "Non-blocker tapi melanggar best practice; perlu dibenahi dalam siklus berikutnya.",
+      "info":    "Observasi; bisa jadi intentional. Catatan untuk review."
+    },
+    "category_glossary": {
+      "build":       "Dockerfile syntax, FROM, RUN, instruksi order — menyebabkan build failure",
+      "security":    "Credential leak, root user, privileged, secret exposure",
+      "performance": "Image size, layer optimization, cache efficiency, cleanup",
+      "compliance":  "Standar Qoin: EXPOSE, HEALTHCHECK, multi-stage, label"
+    },
+    "jev_questions": {
+      "overall_severity": {
+        "type": "choice",
+        "options": ["clean", "warn", "critical"],
+        "description": "Severity gabungan berdasarkan semua findings"
+      },
+      "safe_to_autofix": {
+        "type": "noul",
+        "description": "Probabilitas aman auto-fix tanpa merusak build logic"
+      },
+      "fix_priority": {
+        "type": "choice",
+        "options": ["security", "build", "performance", "compliance"],
+        "description": "Kategori fix yang harus diprioritaskan"
+      }
+    }
+  },
+
+  "build_q_dockerfile_rules": [
+    {
+      "rule_id": "legacy-github-secrets",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": true,
+      "title": "Dockerfile pakai secret id=github_token/github_user (legacy)",
+      "description": "Standar compose.yaml modern hanya mount secret id=netrc. Dockerfile yang cat /run/secrets/github_token akan gagal: cat: can't open ... No such file or directory.",
+      "detect_hint": "--mount=type=secret,id=github_(token|user)",
+      "fix_hint": "Regenerate Dockerfile pakai template modern (netrc-based). `bq --fix-dockerfile`.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 0
+    },
+    {
+      "rule_id": "env-before-from",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "Instruksi (ENV/RUN/etc.) sebelum FROM",
+      "description": "Dockerfile HARUS dimulai dengan FROM (atau ARG global). Instruksi lain sebelum FROM: failed to solve: dockerfile parse error.",
+      "detect_hint": "First non-comment/ARG instruction appears before first FROM",
+      "fix_hint": "Pindahkan semua instruksi ke setelah FROM. Hanya ARG global diizinkan sebelum FROM.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 1
+    },
+    {
+      "rule_id": "registry-literal-placeholder",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "FROM pakai placeholder REGISTRY01/PROJECT (template unreplaced)",
+      "description": "FROM mengandung literal placeholder yang seharusnya sudah disubstitusi. Docker pull gagal.",
+      "detect_hint": "FROM REGISTRY\\d*/PROJECT/",
+      "fix_hint": "Replace dengan registry path aktual atau gunakan ARG + --build-arg.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 2
+    },
+    {
+      "rule_id": "deprecated-maintainer",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": true,
+      "title": "Instruksi MAINTAINER deprecated",
+      "description": "MAINTAINER deprecated sejak Docker 1.13. Standar: LABEL maintainer=\"...\".",
+      "detect_hint": "^MAINTAINER\\s+",
+      "fix_hint": "Ganti MAINTAINER x ke LABEL maintainer=\"x\". `bq --fix-dockerfile` auto-convert.",
+      "source": "best-practice",
+      "active": true,
+      "order": 3
+    },
+    {
+      "rule_id": "env-legacy-syntax",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": true,
+      "title": "Legacy ENV KEY value syntax (tanpa =)",
+      "description": "Syntax ENV KEY value masih valid tapi ambiguous. Standar modern: ENV KEY=value.",
+      "detect_hint": "^ENV\\s+[A-Z_]+\\s+[^=]",
+      "fix_hint": "Convert ke ENV KEY=value. `bq --fix-dockerfile` auto-convert.",
+      "source": "best-practice",
+      "active": true,
+      "order": 4
+    },
+    {
+      "rule_id": "private-repo-bitbucket",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "Private repo referensi Bitbucket (deprecated)",
+      "description": "Qoin migrasi dari Bitbucket ke GitHub. Go mod yang masih referensi bitbucket.org/qoin akan gagal Authentication failed.",
+      "detect_hint": "bitbucket\\.org/qoin",
+      "fix_hint": "Migrate import path ke github.com/Qoin-Digital-Indonesia/*. Update GOPRIVATE.",
+      "source": "skill:jx-pipeline-fix",
+      "active": true,
+      "order": 5
+    },
+    {
+      "rule_id": "workdir-commented-out",
+      "severity": "error",
+      "category": "build",
+      "auto_fixable": true,
+      "title": "WORKDIR di-comment-out",
+      "description": "WORKDIR /app di-comment menyebabkan COPY dan RUN bekerja di / atau lokasi unexpected. Binary tidak ditemukan.",
+      "detect_hint": "#\\s*WORKDIR\\s+/app",
+      "fix_hint": "Uncomment WORKDIR /app. `bq --fix-dockerfile` auto-uncomment.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 6
+    },
+    {
+      "rule_id": "netrc-secret-wrong-target",
+      "severity": "warning",
+      "category": "security",
+      "auto_fixable": true,
+      "title": "id=netrc tanpa target=/root/.netrc",
+      "description": "Tanpa target explicit, secret di-drop ke /run/secrets/netrc yang tidak dibaca git.",
+      "detect_hint": "--mount=type=secret,id=netrc (without ,target=/root/.netrc)",
+      "fix_hint": "Ubah ke --mount=type=secret,id=netrc,target=/root/.netrc.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 7
+    },
+    {
+      "rule_id": "arg-github-token-legacy",
+      "severity": "warning",
+      "category": "security",
+      "auto_fixable": true,
+      "title": "Pakai ARG GITHUB_TOKEN/GITHUB_USER (credential leak)",
+      "description": "ARG-based github credential leak ke image layer + history. Standar modern: BuildKit secret mount.",
+      "detect_hint": "ARG\\s+GITHUB_(TOKEN|USER|PASSWORD)",
+      "fix_hint": "Migrasi ke netrc secret mount. `bq --fix-dockerfile` auto-remove ARG.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 8
+    },
+    {
+      "rule_id": "go-toolchain-mismatch",
+      "severity": "warning",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "Go base image versi lama (< 1.22)",
+      "description": "Go 1.22+ diperlukan untuk modul Qoin (temporal, otel v1). Base lama gagal go mod download.",
+      "detect_hint": "FROM.*golang:1\\.(1[0-9]|20|21)-",
+      "fix_hint": "Upgrade FROM ke golang:1.22-alpine atau lebih baru.",
+      "source": "skill:docker-build-fix",
+      "active": true,
+      "order": 9
+    },
+    {
+      "rule_id": "from-as-lowercase",
+      "severity": "warning",
+      "category": "build",
+      "auto_fixable": true,
+      "title": "FROM ... as ... huruf kecil (standar: AS uppercase)",
+      "description": "Docker menerima as lowercase tapi standar pakai AS uppercase. Konsistensi tool CI/CD.",
+      "detect_hint": "FROM\\s+\\S+\\s+as\\s+\\S+",
+      "fix_hint": "Ubah as ke AS. `bq --fix-dockerfile` auto-fix.",
+      "source": "best-practice",
+      "active": true,
+      "order": 10
+    },
+    {
+      "rule_id": "base-image-latest",
+      "severity": "warning",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "Base image pakai tag :latest (non-deterministic)",
+      "description": "Tag :latest bisa berubah. Build hari ini dan besok bisa hasilkan image berbeda.",
+      "detect_hint": "FROM\\s+\\S+:latest",
+      "fix_hint": "Pin ke tag versi spesifik (alpine:3.20, golang:1.23-alpine).",
+      "source": "best-practice",
+      "active": true,
+      "order": 11
+    },
+    {
+      "rule_id": "base-image-no-tag",
+      "severity": "warning",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "Base image tanpa tag (implicitly :latest)",
+      "description": "FROM tanpa tag secara implisit menjadi :latest. Non-deterministic, sulit reproduce.",
+      "detect_hint": "FROM\\s+[a-z][a-z0-9._/-]*\\s+(AS|$) (no : in image)",
+      "fix_hint": "Tambahkan tag versi eksplisit ke base image.",
+      "source": "best-practice",
+      "active": true,
+      "order": 12
+    },
+    {
+      "rule_id": "add-instead-of-copy",
+      "severity": "warning",
+      "category": "build",
+      "auto_fixable": true,
+      "title": "Pakai ADD untuk file lokal (gunakan COPY)",
+      "description": "ADD punya behavior hidden (auto-extract tar, download URL). COPY lebih explicit.",
+      "detect_hint": "ADD (non-URL, non-tar) src dest",
+      "fix_hint": "Ganti ADD src dest ke COPY src dest. `bq --fix-dockerfile` auto-replace.",
+      "source": "best-practice",
+      "active": true,
+      "order": 13
+    },
+    {
+      "rule_id": "missing-user",
+      "severity": "warning",
+      "category": "security",
+      "auto_fixable": false,
+      "title": "Tidak ada instruksi USER (container run root)",
+      "description": "Tanpa USER, container berjalan sebagai root. Attacker exploit = akses root.",
+      "detect_hint": "No USER instruction in final stage",
+      "fix_hint": "Tambah RUN adduser -D appuser && USER appuser di final stage.",
+      "source": "best-practice",
+      "active": true,
+      "order": 14
+    },
+    {
+      "rule_id": "apt-get-no-clean",
+      "severity": "warning",
+      "category": "performance",
+      "auto_fixable": false,
+      "title": "apt-get install tanpa cleanup (image bloat)",
+      "description": "apt-get tanpa clean menyisakan cache 50-200MB+ di layer.",
+      "detect_hint": "apt-get install without apt-get clean && rm -rf /var/lib/apt",
+      "fix_hint": "Chain && apt-get clean && rm -rf /var/lib/apt/lists/* di RUN yang sama.",
+      "source": "best-practice",
+      "active": true,
+      "order": 15
+    },
+    {
+      "rule_id": "pip-no-cache",
+      "severity": "warning",
+      "category": "performance",
+      "auto_fixable": true,
+      "title": "pip install tanpa --no-cache-dir (image bloat)",
+      "description": "pip menyimpan cache download di layer tanpa manfaat di container.",
+      "detect_hint": "pip install (without --no-cache-dir)",
+      "fix_hint": "Tambah --no-cache-dir ke pip install. `bq --fix-dockerfile` auto-add.",
+      "source": "best-practice",
+      "active": true,
+      "order": 16
+    },
+    {
+      "rule_id": "curl-without-fail",
+      "severity": "warning",
+      "category": "build",
+      "auto_fixable": false,
+      "title": "curl/wget tanpa -f/--fail (error HTTP tidak terdeteksi)",
+      "description": "Tanpa -f, curl return exit 0 saat 404/500. Build lanjut dengan file corrupt.",
+      "detect_hint": "curl/wget without -f or --fail",
+      "fix_hint": "Tambah -f/--fail flag ke curl/wget.",
+      "source": "best-practice",
+      "active": true,
+      "order": 17
+    },
+    {
+      "rule_id": "copy-all-before-deps",
+      "severity": "warning",
+      "category": "performance",
+      "auto_fixable": false,
+      "title": "COPY . . sebelum dependency install (cache bust)",
+      "description": "COPY seluruh context sebelum go mod download/npm install membuat layer dependency selalu re-download.",
+      "detect_hint": "COPY . . appears before RUN go mod/npm install",
+      "fix_hint": "COPY go.mod go.sum dulu, RUN go mod download, baru COPY . .",
+      "source": "best-practice",
+      "active": true,
+      "order": 18
+    },
+    {
+      "rule_id": "missing-dockerignore",
+      "severity": "warning",
+      "category": "performance",
+      "auto_fixable": false,
+      "title": "Tidak ada .dockerignore (build context besar)",
+      "description": "Tanpa .dockerignore, seluruh working directory dikirim ke daemon. Build lambat.",
+      "detect_hint": ".dockerignore file missing in context directory",
+      "fix_hint": "Buat .dockerignore yang exclude .git, node_modules, vendor, *.exe.",
+      "source": "best-practice",
+      "active": true,
+      "order": 19
+    },
+    {
+      "rule_id": "run-too-many-layers",
+      "severity": "warning",
+      "category": "performance",
+      "auto_fixable": false,
+      "title": "Terlalu banyak RUN terpisah (>8 layer)",
+      "description": "Setiap RUN membuat layer baru. Chain command terkait dengan && untuk reduce layers.",
+      "detect_hint": "Count RUN instructions > 8 in final stage",
+      "fix_hint": "Gabung RUN terkait dengan && dan \\ line continuation.",
+      "source": "best-practice",
+      "active": true,
+      "order": 20
+    },
+    {
+      "rule_id": "expose-missing",
+      "severity": "info",
+      "category": "compliance",
+      "auto_fixable": false,
+      "title": "Tidak ada instruksi EXPOSE",
+      "description": "EXPOSE mendokumentasikan port container. Tanpa EXPOSE, developer harus menebak port.",
+      "detect_hint": "No EXPOSE instruction in Dockerfile",
+      "fix_hint": "Tambah EXPOSE <PORT> sesuai port aplikasi.",
+      "source": "best-practice",
+      "active": true,
+      "order": 21
+    },
+    {
+      "rule_id": "missing-healthcheck",
+      "severity": "info",
+      "category": "compliance",
+      "auto_fixable": false,
+      "title": "Tidak ada instruksi HEALTHCHECK",
+      "description": "Tanpa HEALTHCHECK, docker compose ps tidak bisa tampilkan health status.",
+      "detect_hint": "No HEALTHCHECK instruction in Dockerfile",
+      "fix_hint": "Tambah HEALTHCHECK CMD curl -f http://localhost:<PORT>/health || exit 1.",
+      "source": "best-practice",
+      "active": true,
+      "order": 22
+    },
+    {
+      "rule_id": "missing-multistage",
+      "severity": "info",
+      "category": "performance",
+      "auto_fixable": false,
+      "title": "Single-stage build (image berisi build tools)",
+      "description": "Tanpa multi-stage, image final mengandung compiler, SDK, build cache. Go image bisa 1GB+ vs 20MB.",
+      "detect_hint": "Only 1 FROM instruction AND uses golang/dotnet-sdk base",
+      "fix_hint": "Pisah ke builder stage (FROM golang AS builder) dan runtime stage (FROM alpine).",
+      "source": "best-practice",
+      "active": true,
+      "order": 23
+    }
+  ]
+}

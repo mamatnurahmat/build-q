@@ -250,7 +250,40 @@ Config file: ~/.build-q/.env
         const="Dockerfile",
         default=None,
         metavar="PATH",
-        help="Migrate ARG-based netrc + FROM casing to buildx-native pattern (default: ./Dockerfile)",
+        help="Scan Dockerfile untuk 22+ issue umum (build, security, performance, "
+             "compliance) + Jev System One verdict & auto-fix approved. "
+             "Scan file tunggal atau seluruh direktori (default: ./Dockerfile).",
+    )
+    parser.add_argument(
+        "--scan-only",
+        action="store_true",
+        help="(--fix-dockerfile) Scan only, jangan apply auto-fix.",
+    )
+    parser.add_argument(
+        "--no-autofix",
+        action="store_true",
+        help="(--fix-dockerfile) Disable auto-fix, hanya report.",
+    )
+    parser.add_argument(
+        "--remote-repo",
+        metavar="REPO",
+        help="(--fix-dockerfile) Scan Dockerfile di remote GitHub repo tanpa clone. "
+             "Format: owner/repo, https://github.com/owner/repo, atau repo shorthand "
+             "(jika GITHUB_ORG di-set). Contoh: bq --fix-dockerfile Dockerfile "
+             "--remote-repo Qoin-Digital-Indonesia/pay-be-topup-manager --remote-branch staging",
+    )
+    parser.add_argument(
+        "--remote-branch",
+        metavar="REF",
+        default="main",
+        help="(--fix-dockerfile --remote-repo) Branch/tag/SHA untuk remote scan (default: main).",
+    )
+    parser.add_argument(
+        "--pr-fix-dockerfile",
+        action="store_true",
+        dest="pr_fix_dockerfile",
+        help="(--fix-dockerfile --remote-repo) Scan remote → jika ada error, clone → "
+             "auto-fix → buat PR ke branch target. Skip PR jika hanya warning/info.",
     )
     parser.add_argument(
         "--init-jx",
@@ -765,8 +798,39 @@ Config file: ~/.build-q/.env
             sys.exit(0)
 
         if args.fix_dockerfile is not None:
-            ok = fix_dockerfile(args.fix_dockerfile)
-            sys.exit(0 if ok else 1)
+            use_jev = not getattr(args, "no_jev", False)
+            if args.remote_repo:
+                config = load_config()
+                default_org = config.get("git", {}).get("org", "")
+                api_repo = normalize_repo(_expand_repo(args.remote_repo, default_org))
+                if args.pr_fix_dockerfile:
+                    from .dockerfile_scanner import run_dockerfile_pr_fix
+                    sys.exit(run_dockerfile_pr_fix(
+                        api_repo,
+                        args.remote_branch,
+                        dockerfile_path=args.fix_dockerfile,
+                        use_jev=use_jev,
+                        export_csv_path=getattr(args, "export_csv", None),
+                        export_md_path=getattr(args, "export_md", None),
+                    ))
+                from .dockerfile_scanner import run_dockerfile_scan_remote
+                sys.exit(run_dockerfile_scan_remote(
+                    api_repo,
+                    args.remote_branch,
+                    dockerfile_path=args.fix_dockerfile,
+                    use_jev=use_jev,
+                    export_csv_path=getattr(args, "export_csv", None),
+                    export_md_path=getattr(args, "export_md", None),
+                ))
+            from .dockerfile_scanner import run_dockerfile_scan
+            sys.exit(run_dockerfile_scan(
+                args.fix_dockerfile,
+                use_jev=use_jev,
+                auto_fix=not args.no_autofix,
+                scan_only=args.scan_only,
+                export_csv_path=getattr(args, "export_csv", None),
+                export_md_path=getattr(args, "export_md", None),
+            ))
 
         if args.init_jx:
             ok = init_jx(cicd_path=args.cicd, force=args.force)
