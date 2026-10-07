@@ -12,7 +12,10 @@ class TestServerToolRegistry:
             "dockerfile_scan", "dockerfile_scan_remote", "k8s_anomaly_scan",
             "dockerfile_fix", "build_doctor", "config_show",
             "pipeline_check", "gitops_match_check", "image_check",
-            "webhook_status",
+            "webhook_status", "pipeline_trigger",
+            "docker_build", "docker_build_preview",
+            "gitops_set_image", "gitops_bootstrap",
+            "k8s_set_image", "sops_encrypt", "sops_decrypt",
         }
         assert set(ALL_TOOLS.keys()) == expected
 
@@ -23,7 +26,7 @@ class TestServerToolRegistry:
 
     def test_tool_count(self):
         from build_q.mcp.server import ALL_TOOLS
-        assert len(ALL_TOOLS) == 10
+        assert len(ALL_TOOLS) == 18
 
 
 class TestToolSchemas:
@@ -66,7 +69,7 @@ class TestResources:
         assert result["version"] == __version__
         assert "capabilities" in result
         assert isinstance(result["capabilities"], list)
-        assert len(result["capabilities"]) == 10
+        assert len(result["capabilities"]) == 18
 
     def test_config_resource_masks_sensitive(self):
         fake_config = {"github": {"token": "ghp_verylongtoken123"}}

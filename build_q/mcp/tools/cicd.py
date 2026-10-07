@@ -89,6 +89,43 @@ CICD_TOOLS: dict[str, dict] = {
             "required": ["image"],
         },
     },
+    "pipeline_trigger": {
+        "name": "pipeline_trigger",
+        "description": (
+            "Trigger a Jenkins X pipeline build by sending a synthetic GitHub "
+            "push event to the webhook relay. "
+            "EXTERNAL ACTION: starts a CI/CD build in the cluster."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "GitHub repo (owner/repo format)",
+                },
+                "ref": {
+                    "type": "string",
+                    "description": "Git ref to build",
+                    "default": "main",
+                },
+                "sha": {
+                    "type": "string",
+                    "description": "Override commit SHA (default: resolve from ref)",
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": "Bypass webhook deduplication",
+                    "default": False,
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "Preview payload without sending",
+                    "default": False,
+                },
+            },
+            "required": ["repo"],
+        },
+    },
     "webhook_status": {
         "name": "webhook_status",
         "description": (
@@ -146,6 +183,17 @@ def handle_cicd_tool(name: str, arguments: dict) -> dict:
                 "exit_code": 2,
                 "error": f"{type(exc).__name__}: {exc}",
             }
+
+    if name == "pipeline_trigger":
+        from build_q.cicd_trigger import run_cicd_trigger
+        return run_captured(
+            run_cicd_trigger,
+            arguments["repo"],
+            arguments.get("ref", "main"),
+            sha_override=arguments.get("sha"),
+            force=arguments.get("force", False),
+            dry_run=arguments.get("dry_run", False),
+        )
 
     if name == "webhook_status":
         from build_q.cicd_webhook import run_cicd_webhook_check
