@@ -9,6 +9,10 @@ from build_q import __version__
 from build_q.mcp.tools.scan import SCAN_TOOLS, handle_scan_tool
 from build_q.mcp.tools.infra import INFRA_TOOLS, handle_infra_tool
 from build_q.mcp.tools.cicd import CICD_TOOLS, handle_cicd_tool
+from build_q.mcp.tools.build import BUILD_TOOLS, handle_build_tool
+from build_q.mcp.tools.gitops import GITOPS_TOOLS, handle_gitops_tool
+from build_q.mcp.tools.k8s import K8S_TOOLS, handle_k8s_tool
+from build_q.mcp.tools.sops import SOPS_TOOLS, handle_sops_tool
 from build_q.mcp.resources import RESOURCES, handle_resource
 
 logger = logging.getLogger("bq-mcp")
@@ -17,11 +21,19 @@ ALL_TOOLS: dict[str, dict] = {}
 ALL_TOOLS.update(SCAN_TOOLS)
 ALL_TOOLS.update(INFRA_TOOLS)
 ALL_TOOLS.update(CICD_TOOLS)
+ALL_TOOLS.update(BUILD_TOOLS)
+ALL_TOOLS.update(GITOPS_TOOLS)
+ALL_TOOLS.update(K8S_TOOLS)
+ALL_TOOLS.update(SOPS_TOOLS)
 
 TOOL_HANDLERS = {
     **{name: handle_scan_tool for name in SCAN_TOOLS},
     **{name: handle_infra_tool for name in INFRA_TOOLS},
     **{name: handle_cicd_tool for name in CICD_TOOLS},
+    **{name: handle_build_tool for name in BUILD_TOOLS},
+    **{name: handle_gitops_tool for name in GITOPS_TOOLS},
+    **{name: handle_k8s_tool for name in K8S_TOOLS},
+    **{name: handle_sops_tool for name in SOPS_TOOLS},
 }
 
 
@@ -39,6 +51,10 @@ def create_server():
     _register_scan_tools(server)
     _register_infra_tools(server)
     _register_cicd_tools(server)
+    _register_build_tools(server)
+    _register_gitops_tools(server)
+    _register_k8s_tools(server)
+    _register_sops_tools(server)
     _register_resources(server)
 
     return server
@@ -157,12 +173,158 @@ def _register_cicd_tools(server):
         }), default=str)
 
     @server.tool(
+        name="pipeline_trigger",
+        description=CICD_TOOLS["pipeline_trigger"]["description"],
+    )
+    def pipeline_trigger(
+        repo: str,
+        ref: str = "main",
+        sha: str | None = None,
+        force: bool = False,
+        dry_run: bool = False,
+    ) -> str:
+        return json.dumps(handle_cicd_tool("pipeline_trigger", {
+            "repo": repo, "ref": ref, "sha": sha,
+            "force": force, "dry_run": dry_run,
+        }), default=str)
+
+    @server.tool(
         name="webhook_status",
         description=CICD_TOOLS["webhook_status"]["description"],
     )
     def webhook_status(repo: str) -> str:
         return json.dumps(handle_cicd_tool("webhook_status", {
             "repo": repo,
+        }), default=str)
+
+
+def _register_build_tools(server):
+    """Register Docker build tools."""
+
+    @server.tool(
+        name="docker_build",
+        description=BUILD_TOOLS["docker_build"]["description"],
+    )
+    def docker_build(
+        repo: str,
+        ref: str,
+        push: bool = False,
+        tag: str | None = None,
+        platform: str = "linux/amd64",
+        dockerfile: str = "Dockerfile",
+        dry_run: bool = False,
+        build_args: list[str] | None = None,
+    ) -> str:
+        return json.dumps(handle_build_tool("docker_build", {
+            "repo": repo, "ref": ref, "push": push, "tag": tag,
+            "platform": platform, "dockerfile": dockerfile,
+            "dry_run": dry_run, "build_args": build_args,
+        }), default=str)
+
+    @server.tool(
+        name="docker_build_preview",
+        description=BUILD_TOOLS["docker_build_preview"]["description"],
+    )
+    def docker_build_preview(
+        repo: str,
+        ref: str,
+        tag: str | None = None,
+        platform: str = "linux/amd64",
+    ) -> str:
+        return json.dumps(handle_build_tool("docker_build_preview", {
+            "repo": repo, "ref": ref, "tag": tag, "platform": platform,
+        }), default=str)
+
+
+def _register_gitops_tools(server):
+    """Register GitOps tools."""
+
+    @server.tool(
+        name="gitops_set_image",
+        description=GITOPS_TOOLS["gitops_set_image"]["description"],
+    )
+    def gitops_set_image(
+        repo: str,
+        path: str,
+        image: str,
+        branch: str = "main",
+    ) -> str:
+        return json.dumps(handle_gitops_tool("gitops_set_image", {
+            "repo": repo, "branch": branch, "path": path, "image": image,
+        }), default=str)
+
+    @server.tool(
+        name="gitops_bootstrap",
+        description=GITOPS_TOOLS["gitops_bootstrap"]["description"],
+    )
+    def gitops_bootstrap(
+        source_repo: str,
+        ref: str,
+        gitops_repo: str,
+        path_yaml: str,
+        gitops_branch: str = "main",
+        replicas: int = 2,
+        stack: str | None = None,
+        env: str | None = None,
+        apply_secret: bool = False,
+        kube_context: str | None = None,
+        namespace: str | None = None,
+        nodepool: str | None = None,
+    ) -> str:
+        return json.dumps(handle_gitops_tool("gitops_bootstrap", {
+            "source_repo": source_repo, "ref": ref,
+            "gitops_repo": gitops_repo, "gitops_branch": gitops_branch,
+            "path_yaml": path_yaml, "replicas": replicas,
+            "stack": stack, "env": env,
+            "apply_secret": apply_secret, "kube_context": kube_context,
+            "namespace": namespace, "nodepool": nodepool,
+        }), default=str)
+
+
+def _register_k8s_tools(server):
+    """Register Kubernetes direct tools."""
+
+    @server.tool(
+        name="k8s_set_image",
+        description=K8S_TOOLS["k8s_set_image"]["description"],
+    )
+    def k8s_set_image(
+        namespace: str,
+        deployment: str,
+        image: str,
+        container: str | None = None,
+    ) -> str:
+        return json.dumps(handle_k8s_tool("k8s_set_image", {
+            "namespace": namespace, "deployment": deployment,
+            "image": image, "container": container,
+        }), default=str)
+
+
+def _register_sops_tools(server):
+    """Register SOPS encryption tools."""
+
+    @server.tool(
+        name="sops_encrypt",
+        description=SOPS_TOOLS["sops_encrypt"]["description"],
+    )
+    def sops_encrypt(
+        path: str,
+        recipients: list[str] | None = None,
+    ) -> str:
+        return json.dumps(handle_sops_tool("sops_encrypt", {
+            "path": path, "recipients": recipients,
+        }), default=str)
+
+    @server.tool(
+        name="sops_decrypt",
+        description=SOPS_TOOLS["sops_decrypt"]["description"],
+    )
+    def sops_decrypt(
+        path: str,
+        in_place: bool = False,
+    ) -> str:
+        return json.dumps(handle_sops_tool("sops_decrypt", {
+            "path": path, "in_place": in_place,
         }), default=str)
 
 
