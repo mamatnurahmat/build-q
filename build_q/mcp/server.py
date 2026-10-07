@@ -14,6 +14,7 @@ from build_q.mcp.tools.gitops import GITOPS_TOOLS, handle_gitops_tool
 from build_q.mcp.tools.k8s import K8S_TOOLS, handle_k8s_tool
 from build_q.mcp.tools.sops import SOPS_TOOLS, handle_sops_tool
 from build_q.mcp.resources import RESOURCES, handle_resource
+from build_q.mcp.prompts import register_prompts, PROMPT_SPECS
 
 logger = logging.getLogger("bq-mcp")
 
@@ -56,6 +57,7 @@ def create_server():
     _register_k8s_tools(server)
     _register_sops_tools(server)
     _register_resources(server)
+    register_prompts(server)
 
     return server
 
@@ -348,8 +350,34 @@ def _make_resource(server, uri: str, spec: dict):
         return json.dumps(handle_resource(uri), default=str)
 
 
-def run_mcp_server():
-    """Run MCP server with stdio transport (blocking)."""
+def _setup_audit_log() -> None:
+    """Configure audit logging to ~/.build-q/.mcp-audit.log."""
+    import os
+    from pathlib import Path
+
+    log_dir = Path(os.environ.get("BQ_HOME", Path.home() / ".build-q"))
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / ".mcp-audit.log"
+
+    handler = logging.FileHandler(str(log_file), encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
+    ))
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+
+
+def run_mcp_server(
+    transport: str = "stdio",
+    port: int = 0,
+    host: str = "127.0.0.1",
+) -> None:
+    """Run MCP server with stdio or SSE transport."""
+    _setup_audit_log()
     server = create_server()
-    logger.info("bq-mcp-server v%s starting (stdio)", __version__)
-    server.run(transport="stdio")
+    logger.info("bq-mcp-server v%s starting (%s)", __version__, transport)
+
+    if transport == "sse" and port:
+        server.run(transport="sse", host=host, port=port)
+    else:
+        server.run(transport="stdio")

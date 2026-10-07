@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import io
+import logging
 import sys
+import time
 from contextlib import contextmanager
 from typing import Generator
+
+logger = logging.getLogger("bq-mcp")
 
 
 @contextmanager
@@ -33,7 +37,10 @@ def run_captured(func, *args, **kwargs) -> dict:
     For functions returning bool, exit_code is 0 (True) or 1 (False).
     For functions returning dict, the dict is included as 'data'.
     """
+    func_name = getattr(func, "__name__", str(func))
+    t0 = time.monotonic()
     result: dict = {"exit_code": 0, "stdout": "", "stderr": ""}
+
     try:
         with capture_output() as (out, err):
             ret = func(*args, **kwargs)
@@ -58,7 +65,18 @@ def run_captured(func, *args, **kwargs) -> dict:
     except Exception as exc:
         result["exit_code"] = 2
         result["error"] = f"{type(exc).__name__}: {exc}"
-        result["stdout"] = strip_ansi(out.getvalue()) if "out" in dir() else ""
-        result["stderr"] = strip_ansi(err.getvalue()) if "err" in dir() else ""
+        result["error_type"] = type(exc).__name__
+        try:
+            result["stdout"] = strip_ansi(out.getvalue())
+            result["stderr"] = strip_ansi(err.getvalue())
+        except UnboundLocalError:
+            pass
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    result["elapsed_ms"] = elapsed_ms
+    logger.info(
+        "tool=%s exit_code=%d elapsed_ms=%d",
+        func_name, result["exit_code"], elapsed_ms,
+    )
 
     return result

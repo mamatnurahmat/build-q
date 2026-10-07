@@ -217,6 +217,26 @@ Config file: ~/.build-q/.env
              "Exposes bq tools to AI assistants (Claude Code, Claude Desktop). "
              "Install: pipx inject build-q mcp",
     )
+    parser.add_argument(
+        "--mcp-transport",
+        choices=["stdio", "sse"],
+        default="stdio",
+        help="MCP transport mode (default: stdio). "
+             "Use 'sse' with --mcp-port for remote access.",
+    )
+    parser.add_argument(
+        "--mcp-port",
+        type=int,
+        default=0,
+        metavar="PORT",
+        help="Port for MCP SSE transport (e.g. --mcp-port 3001).",
+    )
+    parser.add_argument(
+        "--mcp-host",
+        default="127.0.0.1",
+        metavar="HOST",
+        help="Bind address for MCP SSE transport (default: 127.0.0.1).",
+    )
 
     # Subcommand flags
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
@@ -677,7 +697,11 @@ Config file: ~/.build-q/.env
         if args.mcp:
             try:
                 from .mcp.server import run_mcp_server
-                run_mcp_server()
+                run_mcp_server(
+                    transport=args.mcp_transport,
+                    port=args.mcp_port,
+                    host=args.mcp_host,
+                )
             except ImportError:
                 print(
                     "MCP dependency not installed. Run: pipx inject build-q mcp",
