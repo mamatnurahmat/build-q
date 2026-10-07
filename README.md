@@ -10,6 +10,7 @@ Selain build, `bq` menyediakan:
 - **Verifikasi** (`--check`, `--repo-check`, `--doctor`)
 - **Fix** (`--pr-fix` repo legacy template)
 - **Interactive** (`--tui` Jev Agent Planner)
+- **MCP Server** (`--mcp` — 18 tools untuk AI assistant via Model Context Protocol)
 - **Credentials** PocketBase IDP (`--pb-login`, `--pb-status`, dll)
 
 Sejak v0.1.17 operasi GitHub berjalan **native** (tanpa `gh` CLI). Sejak v0.1.30 mendukung **PocketBase fallback** untuk `cicd.json`.
@@ -695,7 +696,219 @@ bq --bootstrap-k8s foo develop \
 - `--tui-sync <seed.json>`: Upload katalog seed JSON ke PocketBase (upsert by unique field).
 - `--tui-ls`: Tampilkan ringkasan katalog aktif (tools per-category, providers, patterns).
 
-### 15. Contoh full (customize secret, platform, build-arg)
+### 15. MCP Server — AI Assistant Integration (`--mcp`, sejak v0.1.44)
+
+Sejak v0.1.46, `bq` menyediakan **MCP (Model Context Protocol) server** yang meng-expose seluruh kapabilitas CLI sebagai tools terstruktur untuk AI assistant (Claude Code, Claude Desktop, atau MCP client lain). AI bisa langsung memanggil Dockerfile scanning, K8s anomaly detection, pipeline trigger, GitOps operations, dan lainnya — tanpa perlu construct command string atau parse stdout.
+
+#### Instalasi MCP
+
+```bash
+# Baru install
+pipx install 'build-q[mcp]'
+
+# Sudah punya bq, tambahkan MCP dependency
+pipx inject build-q mcp
+```
+
+#### Quick Start — Claude Code
+
+Tambahkan konfigurasi MCP server di settings Claude Code:
+
+```json
+// .claude/settings.json
+{
+  "mcpServers": {
+    "bq": {
+      "command": "bq",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+Setelah ini, Claude Code akan otomatis mendeteksi 18 tools dari `bq` dan bisa memanggilnya saat user bertanya tentang Dockerfile, K8s manifest, build image, dan sebagainya.
+
+#### Quick Start — Claude Desktop
+
+```json
+// ~/Library/Application Support/Claude/claude_desktop_config.json (macOS)
+// %APPDATA%\Claude\claude_desktop_config.json (Windows)
+{
+  "mcpServers": {
+    "bq": {
+      "command": "bq",
+      "args": ["--mcp"]
+    }
+  }
+}
+```
+
+#### Transport Modes
+
+| Mode | Flag | Kegunaan |
+|------|------|----------|
+| **stdio** (default) | `bq --mcp` | Claude Code, Claude Desktop — komunikasi via stdin/stdout |
+| **SSE** | `bq --mcp --mcp-transport sse --mcp-port 3001` | Remote access via HTTP Server-Sent Events |
+
+```bash
+# Stdio (default, untuk Claude Code / Desktop)
+bq --mcp
+
+# SSE (untuk remote / web client)
+bq --mcp --mcp-transport sse --mcp-port 3001
+
+# SSE expose ke network (hati-hati — akses terbuka)
+bq --mcp --mcp-transport sse --mcp-port 3001 --mcp-host 0.0.0.0
+```
+
+#### Daftar Lengkap MCP Tools (18)
+
+**Tier 1 — Read-only (aman, tanpa side effect)**
+
+| Tool | CLI Equivalent | Deskripsi |
+|------|---------------|-----------|
+| `dockerfile_scan` | `bq --fix-dockerfile --scan-only` | Scan Dockerfile lokal (22+ rules: security, performance, compliance) |
+| `dockerfile_scan_remote` | `bq --fix-dockerfile --remote-repo X` | Scan Dockerfile dari GitHub repo tanpa clone |
+| `k8s_anomaly_scan` | `bq --anomaly-scan` | Scan K8s manifest (10+ checks: replicas, imagePullSecret, resource limits, securityContext) |
+| `build_doctor` | `bq --doctor` | Preflight check (Docker, buildx, Git, credentials, builder) |
+| `config_show` | `bq --config` | Tampilkan konfigurasi aktif (sensitive values di-mask) |
+| `pipeline_check` | `bq --check` | Verifikasi repo readiness (ref, cicd.json, artifacts, image, GitOps) |
+| `gitops_match_check` | `bq --is-match-image` | Compare image live K8s vs GitOps YAML (drift detection) |
+| `image_check` | — | Cek apakah image:tag sudah ada di Docker Hub |
+| `webhook_status` | `bq --cicd-webhook` | Cek apakah webhook CI/CD terinstall di repo |
+| `docker_build_preview` | `bq --dry-run` | Preview build command tanpa eksekusi |
+
+**Tier 2 — Local Action (modifikasi file lokal, reversible)**
+
+| Tool | CLI Equivalent | Deskripsi |
+|------|---------------|-----------|
+| `dockerfile_fix` | `bq --fix-dockerfile` | Auto-fix Dockerfile issues (backup ke .bak) |
+| `sops_encrypt` | `bq --sops-encrypt` | Encrypt file dengan SOPS + age |
+| `sops_decrypt` | `bq --sops-decrypt` | Decrypt file SOPS |
+
+**Tier 3 — External Action (modifikasi state eksternal)**
+
+| Tool | CLI Equivalent | Deskripsi |
+|------|---------------|-----------|
+| `docker_build` | `bq repo ref` | Build image via buildx + optional push ke registry |
+| `pipeline_trigger` | `bq --cicd-trigger` | Trigger Jenkins X pipeline via webhook |
+| `gitops_set_image` | `bq --gitops-set-image` | Update image tag di GitOps YAML + push |
+| `gitops_bootstrap` | `bq --bootstrap-k8s` | Bootstrap K8s manifest (Secret/Deployment/Service) + PR |
+| `k8s_set_image` | `bq --set-image` | Hot-patch deployment live di cluster |
+
+#### MCP Resources (4)
+
+Resources adalah konteks read-only yang AI bisa akses kapan saja:
+
+| URI | Deskripsi |
+|-----|-----------|
+| `bq://version` | Versi bq + daftar semua capabilities |
+| `bq://config` | Konfigurasi aktif (token/password di-mask) |
+| `bq://doctor` | Hasil preflight check |
+| `bq://catalog` | Jev tool catalog (tools, providers, patterns) |
+
+#### MCP Prompts (3)
+
+Prompts adalah workflow templates yang membimbing AI menjalankan serangkaian tools:
+
+| Prompt | Arguments | Workflow |
+|--------|-----------|----------|
+| `deploy-new-service` | `repo`, `ref`, `env` | doctor → check → scan → build → bootstrap → verify |
+| `scan-and-fix` | `repo`, `ref` | scan Dockerfile remote → fix → scan K8s manifest → report |
+| `rollout-update` | `repo`, `ref`, `namespace` | image check → build → set-image (imperative/declarative) → verify |
+
+#### Contoh Interaksi via Claude Code
+
+```
+User: "scan Dockerfile di repo pay-be-topup-manager untuk security issues"
+
+Claude: (memanggil tool dockerfile_scan_remote)
+  → repo: "Qoin-Digital-Indonesia/pay-be-topup-manager"
+  → ref: "main"
+  → Result: {exit_code: 1, issues: [{rule: "DF-SEC-01", ...}]}
+
+User: "cek apakah image v1.2.3 sudah ada di registry"
+
+Claude: (memanggil tool image_check)
+  → image: "loyaltolpi/pay-be-topup-manager:v1.2.3"
+  → Result: {exit_code: 0, data: {exists: true}}
+
+User: "trigger pipeline untuk build develop"
+
+Claude: (memanggil tool pipeline_trigger)
+  → repo: "Qoin-Digital-Indonesia/pay-be-topup-manager"
+  → ref: "develop"
+  → Result: {exit_code: 0, stdout: "...triggered..."}
+```
+
+#### Audit Logging
+
+Setiap tool call dicatat di `~/.build-q/.mcp-audit.log` dalam format JSON:
+
+```json
+{"ts":"2026-10-07 15:12:50","level":"INFO","msg":"tool=run_doctor exit_code=0 elapsed_ms=6878"}
+{"ts":"2026-10-07 15:12:52","level":"INFO","msg":"tool=run_dockerfile_scan exit_code=2 elapsed_ms=0"}
+```
+
+#### Structured Response
+
+Semua tool mengembalikan JSON terstruktur:
+
+```json
+{
+  "exit_code": 0,
+  "stdout": "...",
+  "stderr": "",
+  "elapsed_ms": 123,
+  "data": { ... }
+}
+```
+
+Jika error:
+```json
+{
+  "exit_code": 2,
+  "error": "ValueError: path not found",
+  "error_type": "ValueError",
+  "elapsed_ms": 1
+}
+```
+
+#### Verifikasi
+
+```bash
+# Cek MCP server berjalan
+bq --version           # build-q (bq) 0.1.46
+
+# Cek help MCP flags
+bq --help | grep mcp
+
+# Test manual (jika punya MCP client SDK)
+# Server akan menampilkan 18 tools, 4 resources, 3 prompts
+```
+
+#### Arsitektur
+
+```
+build_q/mcp/
+├── __init__.py
+├── _capture.py          # stdout/stderr capture + ANSI strip + audit log
+├── server.py            # MCPServer entry point + typed tool wrappers
+├── resources.py         # 4 MCP resources (version, config, doctor, catalog)
+├── prompts.py           # 3 MCP prompts (deploy, scan-fix, rollout)
+└── tools/
+    ├── scan.py          # dockerfile_scan, dockerfile_scan_remote, k8s_anomaly_scan, dockerfile_fix
+    ├── infra.py         # build_doctor, config_show
+    ├── cicd.py          # pipeline_check, gitops_match_check, image_check, webhook_status, pipeline_trigger
+    ├── build.py         # docker_build, docker_build_preview
+    ├── gitops.py        # gitops_set_image, gitops_bootstrap
+    ├── k8s.py           # k8s_set_image
+    └── sops.py          # sops_encrypt, sops_decrypt
+```
+
+---
+
+### 16. Contoh full (customize secret, platform, build-arg)
 
 ```bash
 bq plus-be-service staging \
@@ -738,6 +951,10 @@ Subcommands (mutually exclusive):
   --gitops-set-image ...    Update image di repo GitOps + push.
   --is-match-image ...      Cek drift image K8s live vs GitOps.
   --pb-login/status/pull/logout PocketBase IDP operations.
+  --mcp                     Run MCP server (stdio transport). 18 tools untuk AI assistant.
+  --mcp --mcp-transport sse --mcp-port PORT
+                            Run MCP server via SSE (HTTP) di PORT.
+  --mcp-host HOST           Bind address untuk MCP SSE (default: 127.0.0.1).
   --bootstrap-k8s <repo> <ref> \
      --gitops-repo <r> --gitops-branch <b> --path-yaml <p>
                             Bootstrap Secret + Deployment + Service ke repo GitOps.
@@ -773,11 +990,12 @@ Build options:
 
 ## 📋 Requirements
 
-- **Python 3.7+**
+- **Python 3.10+**
 - **Docker** + **Buildx plugin**
 - **Git** (opsional; wajib untuk auto-detect & mode local)
 - **GitHub CLI (`gh`)** — wajib untuk `--clone`, `--remote`, `--gh-auth`, `--init-secrets`, `--gh-action-init`
 - **kubectl** — opsional; hanya untuk `--init-secrets` / `--gh-action-init` (fetch token otomatis dari cluster)
+- **MCP SDK** — opsional; hanya untuk `--mcp` (`pipx inject build-q mcp`)
 
 ---
 
