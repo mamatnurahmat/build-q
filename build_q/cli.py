@@ -210,6 +210,14 @@ Config file: ~/.build-q/.env
              "Browser akan prompt lewat URL `?token=TOKEN` (auto-stored).",
     )
 
+    parser.add_argument(
+        "--mcp",
+        action="store_true",
+        help="Run as MCP (Model Context Protocol) server via stdio. "
+             "Exposes bq tools to AI assistants (Claude Code, Claude Desktop). "
+             "Install: pipx inject build-q mcp",
+    )
+
     # Subcommand flags
     parser.add_argument("--init", action="store_true", help="Initialize ~/.build-q/.env config file")
     parser.add_argument("--force", action="store_true", help="Force recreate config (use with --init) / bypass dedup (use with --cicd-trigger)")
@@ -666,6 +674,18 @@ Config file: ~/.build-q/.env
 
     try:
         # ── Subcommands ──────────────────────────────────────────────────────────
+        if args.mcp:
+            try:
+                from .mcp.server import run_mcp_server
+                run_mcp_server()
+            except ImportError:
+                print(
+                    "MCP dependency not installed. Run: pipx inject build-q mcp",
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            return
+
         if args.tui:
             from .tui import repl
             repl()

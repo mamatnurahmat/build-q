@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "build-q"
-version = "0.1.43"
+version = "0.1.44"
 description = "Simple Docker Buildx CLI for local builds"
 readme = "README.md"
-requires-python = ">=3.7"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "ngen contributors"}
@@ -20,6 +20,8 @@ dependencies = [
 
 [project.optional-dependencies]
 anomaly = ["pyyaml>=6.0"]
+mcp = ["mcp>=1.0"]
+all = ["pyyaml>=6.0", "mcp>=1.0"]
 
 [project.scripts]
 build-q = "build_q.cli:main"
