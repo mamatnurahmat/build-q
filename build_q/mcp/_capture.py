@@ -77,6 +77,10 @@ def run_captured(func, *args, **kwargs) -> dict:
     logger.info(
         "tool=%s exit_code=%d elapsed_ms=%d",
         func_name, result["exit_code"], elapsed_ms,
+        extra={"audit": {
+            "source": "mcp", "event": "tool_call", "tool": func_name,
+            "exit_code": result["exit_code"], "elapsed_ms": elapsed_ms,
+        }},
     )
 
     return result

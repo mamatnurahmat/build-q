@@ -177,6 +177,22 @@ Config file: ~/.build-q/.env
              "by unique field). Format: {\"build_q_tools\": [...], ...}.",
     )
     parser.add_argument(
+        "--e2e",
+        action="store_true",
+        help="Analisa end-to-end CI/CD satu commit: trigger hook → pipeline Tekton → "
+             "GitOps → ArgoCD (read-only). Usage: bq --e2e <repo> <ref>. "
+             "Exit: 0 sehat, 1 ada tahap gagal, 2 tidak lengkap/peringatan.",
+    )
+    parser.add_argument(
+        "--simulate",
+        nargs="?",
+        const="all",
+        metavar="SCENARIO",
+        help="Dengan --e2e: jalankan simulasi tanpa jaringan/cluster. "
+             "`--simulate list` daftar skenario, `--simulate all` (default) self-test "
+             "semua skenario, `--simulate <nama>` tampilkan laporan satu skenario.",
+    )
+    parser.add_argument(
         "--tui-ls",
         action="store_true",
         help="Tampilkan ringkasan katalog TUI aktif (tools/providers/patterns).",
@@ -761,6 +777,23 @@ Config file: ~/.build-q/.env
                 )
             print(f"   Cache cleared — jalankan `bq --tui` akan refetch.")
             return
+
+        if args.simulate and not args.e2e:
+            print("❌ --simulate hanya untuk --e2e (mis. bq --e2e --simulate list)", file=sys.stderr)
+            sys.exit(2)
+
+        if args.e2e:
+            from . import e2e
+            if args.simulate:
+                from .e2e_sim import run_cli
+                sys.exit(run_cli(args.simulate))
+            if not args.repo or not args.ref:
+                print("❌ Usage: bq --e2e <repo> <ref>   |   bq --e2e --simulate [list|all|<skenario>]",
+                      file=sys.stderr)
+                sys.exit(2)
+            report = e2e.analyze(args.repo, args.ref, config=load_config())
+            print(e2e.render_text(report))
+            sys.exit(e2e.exit_code(report))
 
         if args.tui_ls:
             from . import tui_catalog

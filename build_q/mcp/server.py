@@ -6,6 +6,8 @@ import json
 import logging
 
 from build_q import __version__
+from build_q.audit import setup_audit_logger
+from build_q.tool_policy import annotations_for
 from build_q.mcp.tools.scan import SCAN_TOOLS, handle_scan_tool
 from build_q.mcp.tools.infra import INFRA_TOOLS, handle_infra_tool
 from build_q.mcp.tools.cicd import CICD_TOOLS, handle_cicd_tool
@@ -38,6 +40,13 @@ TOOL_HANDLERS = {
 }
 
 
+def _annotations(tool: str):
+    """ToolAnnotations dari build_q.tool_policy — sumber risiko yang sama dengan TUI."""
+    from mcp.types import ToolAnnotations
+
+    return ToolAnnotations(**annotations_for(tool))
+
+
 def create_server():
     """Create and configure the MCP server with all tools and resources."""
     from mcp.server.mcpserver import MCPServer
@@ -67,6 +76,7 @@ def _register_scan_tools(server):
 
     @server.tool(
         name="dockerfile_scan",
+        annotations=_annotations("dockerfile_scan"),
         description=SCAN_TOOLS["dockerfile_scan"]["description"],
     )
     def dockerfile_scan(path: str = ".", use_jev: bool = False) -> str:
@@ -76,6 +86,7 @@ def _register_scan_tools(server):
 
     @server.tool(
         name="dockerfile_scan_remote",
+        annotations=_annotations("dockerfile_scan_remote"),
         description=SCAN_TOOLS["dockerfile_scan_remote"]["description"],
     )
     def dockerfile_scan_remote(
@@ -91,6 +102,7 @@ def _register_scan_tools(server):
 
     @server.tool(
         name="k8s_anomaly_scan",
+        annotations=_annotations("k8s_anomaly_scan"),
         description=SCAN_TOOLS["k8s_anomaly_scan"]["description"],
     )
     def k8s_anomaly_scan(
@@ -104,6 +116,7 @@ def _register_scan_tools(server):
 
     @server.tool(
         name="dockerfile_fix",
+        annotations=_annotations("dockerfile_fix"),
         description=SCAN_TOOLS["dockerfile_fix"]["description"],
     )
     def dockerfile_fix(path: str = ".", use_jev: bool = False) -> str:
@@ -117,6 +130,7 @@ def _register_infra_tools(server):
 
     @server.tool(
         name="build_doctor",
+        annotations=_annotations("build_doctor"),
         description=INFRA_TOOLS["build_doctor"]["description"],
     )
     def build_doctor() -> str:
@@ -124,6 +138,7 @@ def _register_infra_tools(server):
 
     @server.tool(
         name="config_show",
+        annotations=_annotations("config_show"),
         description=INFRA_TOOLS["config_show"]["description"],
     )
     def config_show() -> str:
@@ -135,6 +150,7 @@ def _register_cicd_tools(server):
 
     @server.tool(
         name="pipeline_check",
+        annotations=_annotations("pipeline_check"),
         description=CICD_TOOLS["pipeline_check"]["description"],
     )
     def pipeline_check(
@@ -150,6 +166,7 @@ def _register_cicd_tools(server):
 
     @server.tool(
         name="gitops_match_check",
+        annotations=_annotations("gitops_match_check"),
         description=CICD_TOOLS["gitops_match_check"]["description"],
     )
     def gitops_match_check(
@@ -167,6 +184,7 @@ def _register_cicd_tools(server):
 
     @server.tool(
         name="image_check",
+        annotations=_annotations("image_check"),
         description=CICD_TOOLS["image_check"]["description"],
     )
     def image_check(image: str) -> str:
@@ -176,6 +194,7 @@ def _register_cicd_tools(server):
 
     @server.tool(
         name="pipeline_trigger",
+        annotations=_annotations("pipeline_trigger"),
         description=CICD_TOOLS["pipeline_trigger"]["description"],
     )
     def pipeline_trigger(
@@ -192,6 +211,7 @@ def _register_cicd_tools(server):
 
     @server.tool(
         name="webhook_status",
+        annotations=_annotations("webhook_status"),
         description=CICD_TOOLS["webhook_status"]["description"],
     )
     def webhook_status(repo: str) -> str:
@@ -205,6 +225,7 @@ def _register_build_tools(server):
 
     @server.tool(
         name="docker_build",
+        annotations=_annotations("docker_build"),
         description=BUILD_TOOLS["docker_build"]["description"],
     )
     def docker_build(
@@ -225,6 +246,7 @@ def _register_build_tools(server):
 
     @server.tool(
         name="docker_build_preview",
+        annotations=_annotations("docker_build_preview"),
         description=BUILD_TOOLS["docker_build_preview"]["description"],
     )
     def docker_build_preview(
@@ -243,6 +265,7 @@ def _register_gitops_tools(server):
 
     @server.tool(
         name="gitops_set_image",
+        annotations=_annotations("gitops_set_image"),
         description=GITOPS_TOOLS["gitops_set_image"]["description"],
     )
     def gitops_set_image(
@@ -257,6 +280,7 @@ def _register_gitops_tools(server):
 
     @server.tool(
         name="gitops_bootstrap",
+        annotations=_annotations("gitops_bootstrap"),
         description=GITOPS_TOOLS["gitops_bootstrap"]["description"],
     )
     def gitops_bootstrap(
@@ -288,6 +312,7 @@ def _register_k8s_tools(server):
 
     @server.tool(
         name="k8s_set_image",
+        annotations=_annotations("k8s_set_image"),
         description=K8S_TOOLS["k8s_set_image"]["description"],
     )
     def k8s_set_image(
@@ -307,6 +332,7 @@ def _register_sops_tools(server):
 
     @server.tool(
         name="sops_encrypt",
+        annotations=_annotations("sops_encrypt"),
         description=SOPS_TOOLS["sops_encrypt"]["description"],
     )
     def sops_encrypt(
@@ -319,6 +345,7 @@ def _register_sops_tools(server):
 
     @server.tool(
         name="sops_decrypt",
+        annotations=_annotations("sops_decrypt"),
         description=SOPS_TOOLS["sops_decrypt"]["description"],
     )
     def sops_decrypt(
@@ -351,20 +378,8 @@ def _make_resource(server, uri: str, spec: dict):
 
 
 def _setup_audit_log() -> None:
-    """Configure audit logging to ~/.build-q/.mcp-audit.log."""
-    import os
-    from pathlib import Path
-
-    log_dir = Path(os.environ.get("BQ_HOME", Path.home() / ".build-q"))
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / ".mcp-audit.log"
-
-    handler = logging.FileHandler(str(log_file), encoding="utf-8")
-    handler.setFormatter(logging.Formatter(
-        '{"ts":"%(asctime)s","level":"%(levelname)s","msg":"%(message)s"}',
-    ))
-    logger.addHandler(handler)
-    logger.setLevel(logging.INFO)
+    """Configure audit logging to ~/.build-q/.mcp-audit.log (JSON lines, rotasi)."""
+    setup_audit_logger(logger, ".mcp-audit.log")
 
 
 def run_mcp_server(
@@ -375,7 +390,10 @@ def run_mcp_server(
     """Run MCP server with stdio or SSE transport."""
     _setup_audit_log()
     server = create_server()
-    logger.info("bq-mcp-server v%s starting (%s)", __version__, transport)
+    logger.info(
+        "bq-mcp-server v%s starting (%s)", __version__, transport,
+        extra={"audit": {"source": "mcp", "event": "start"}},
+    )
 
     if transport == "sse" and port:
         server.run(transport="sse", host=host, port=port)

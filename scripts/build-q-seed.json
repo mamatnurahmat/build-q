@@ -654,6 +654,26 @@
       "active": true,
       "order": 22,
       "notes": ""
+    },
+    {
+      "name": "bq_e2e",
+      "category": "cicd",
+      "description": "Analisa END-TO-END CI/CD satu commit (read-only): trigger hook / GitHub Action \u2192 PipelineRun Tekton (step gagal + log) \u2192 tag image di YAML GitOps / PR \u2192 ArgoCD sync, health & image live. Menunjukkan titik putus kenapa commit belum live.",
+      "template": "bq --e2e {repo} {ref}",
+      "params": {
+        "repo": {
+          "type": "text",
+          "hint": "nama repo (mis. pay-be-topup-manager)"
+        },
+        "ref": {
+          "type": "text",
+          "hint": "branch atau tag (develop, staging, sandbox, v1.2.3)"
+        }
+      },
+      "risky": false,
+      "active": true,
+      "order": 33,
+      "notes": "Butuh akses GitHub + kubectl context JX_KUBE_CONTEXT (hw-dev) & ARGOCD_KUBE_CONTEXT (hw-pro-p)."
     }
   ],
   "build_q_providers": [

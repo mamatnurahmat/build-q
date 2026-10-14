@@ -269,9 +269,16 @@ Dan terakhir, **interactive prompt** untuk param yang masih berupa placeholder (
 
 ### 6.3 Risk Classification
 
-Tool dianggap **RISKY** bila **salah satu** true:
+Tool dianggap **RISKY** bila **salah satu** true (`tui.assess_risk()`, dipakai juga oleh `bq --serve`):
 1. `risky=true` di PB record (hard flag).
 2. Jev `risky.noul >= 0.5` (model judgment berdasarkan deskripsi tool).
+3. Perintah final dipetakan ke tool MCP ber-tier `local`/`external` di
+   `build_q/tool_policy.py` — tabel yang sama dipakai MCP server untuk
+   `ToolAnnotations` (`readOnlyHint`, `destructiveHint`, …). Mis. `bq --sops-decrypt`
+   → `sops_decrypt` (local) → RISKY walau record PB `risky=false`. Tier MCP hanya
+   bisa menaikkan risiko, tidak menurunkan.
+
+Panel perintah final menampilkan padanan MCP (`mcp__bq__<tool>`) bila ada.
 
 Konsekuensi RISKY:
 - Tag `[red]RISKY[/red]` di verdict line.
@@ -352,9 +359,59 @@ Perintah TUI (prefix `/`) tidak di-forward ke Jev, langsung di-handle `tui.handl
 | `/provider` | Tampilkan provider aktif + URL + model + masked key |
 | `/provider openrouter` | Switch runtime ke OpenRouter |
 | `/provider typesafe` | Switch runtime ke TypeSafe direct |
-| `/set KEY VALUE` | Set env var in-memory (mis. `/set OPENROUTER_API_KEY sk-or-…`) |
+| `/set KEY` | Set env var in-memory, value diketik tersembunyi (direkomendasikan untuk API key) |
+| `/set KEY VALUE` | Set env var in-memory langsung (value terlihat di layar) |
+| `/refresh` | Ambil ulang katalog dari PocketBase tanpa restart |
+| `/e2e REPO REF` | Analisa CI/CD end-to-end satu commit (lihat §8.1) |
+| `/e2e --sim [SKENARIO]` | Simulasi e2e tanpa cluster; tanpa nama → daftar skenario (lihat §8.2) |
 | `/save` | Persist `JEV_PROVIDER` + API key saat ini ke `~/.build-q/.env` |
 | `/quit` / `/exit` / `/q` | Keluar REPL |
+
+---
+
+### 8.1 `/e2e` — Analisa CI/CD End-to-End
+
+`/e2e <repo> <ref>` (juga `bq --e2e <repo> <ref>`, dan tool katalog `bq_e2e` untuk
+request natural seperti *"kenapa develop pay-be-topup-manager belum live?"*) menelusuri
+satu commit dan menunjuk **titik putus** — tahap pertama yang gagal. Read-only.
+
+| # | Tahap | Sumber data | Contoh temuan |
+|---|---|---|---|
+| 1 | Source | GitHub commit API, `cicd.json` | ref → SHA, ENV (aturan Tekton), tag image yang diharapkan |
+| 2 | Trigger | Actions run `trigger-ci.yml` (head_sha), webhook `/hook` | Action gagal (secret belum diset), trigger belum terpasang |
+| 3 | Pipeline | PipelineRun `webhook-<repo>-*` di `JX_KUBE_CONTEXT`/`JX_KUBE_NAMESPACE` (label `repo`/`ref`, anotasi `commit_sha`) + results TaskRun | step gagal + 15 baris log terakhir (secret disamarkan), run untuk commit belum ada |
+| 4 | GitOps | YAML di `GITOPS_REPO` branch ENV (`develop`/`staging`/`sandbox`; tag `v*` → PR ke `main`) | file belum di-bootstrap, PR belum merge, tag ditimpa commit lain |
+| 5 | ArgoCD | Application di `ARGOCD_KUBE_CONTEXT`/`ARGOCD_NAMESPACE` yang memantau folder file tsb | OutOfSync, auto-sync tertahan, override kustomize, image live ≠ GitOps |
+
+Repo FE (`web/…`, Docker Compose) melewati tahap ArgoCD (tidak relevan → tetap bisa
+`healthy`). Context yang tidak terjangkau (VPN/timeout 25 s) menghasilkan status `skip`
+dan verdict **`incomplete`** — laporan tidak pernah menyatakan "sehat" bila ada tahap
+yang tidak bisa diperiksa. Hasil dicatat ke audit log event `e2e` (`stages`,
+`break_point`, `verdict`, `elapsed_ms`).
+
+Verdict & exit code `bq --e2e`:
+
+| Verdict | Arti | Exit |
+|---|---|---|
+| `healthy` | semua tahap relevan ✅ — commit sudah live | 0 |
+| `broken` + titik putus FAIL | ada tahap gagal (trigger/pipeline/GitOps) | 1 |
+| `broken` + titik putus WARN/RUNNING, atau `incomplete` | menunggu (PR, sync, pipeline berjalan) / ada tahap tak terperiksa | 2 |
+
+### 8.2 Simulasi `bq --e2e --simulate`
+
+`build_q/e2e_sim.py` menyediakan dunia tiruan GitHub + Tekton + ArgoCD (bentuk objek
+mengikuti PipelineRun/TaskRun hw-dev dan Application hw-pro-p) — tanpa jaringan.
+
+```bash
+bq --e2e --simulate list                    # 17 skenario + titik putus yang diharapkan
+bq --e2e --simulate                         # self-test semua skenario (exit 1 bila ada yang meleset)
+bq --e2e --simulate pipeline-build-failed   # laporan lengkap 1 skenario, exit code = mode nyata
+```
+
+Tiap skenario mendeklarasikan status tahap, titik putus, verdict, serta frasa yang wajib /
+dilarang muncul di laporan (mis. `pipeline-build-failed` **tidak boleh** menyarankan
+`--gitops-set-image` untuk image yang tidak pernah ter-build). Unit test
+`tests/test_e2e.py` memakai dunia tiruan yang sama.
 
 ---
 
@@ -468,10 +525,26 @@ tokens: in 1240 · out 42 · $0.000312
 
 Ini membantu monitor cost per sesi (OpenRouter) atau burn rate TypeSafe quota.
 
-Error handling:
-- Network timeout (default 30s) → catch, print `[red]Jev error:[/red]`, loop kembali.
-- Missing API key → `RuntimeError` dari `ensure_key()`, user disuruh `/set KEY VALUE`.
+Audit log `~/.build-q/.tui-audit.log` (atau `$BQ_HOME`) — JSON lines, rotasi 5 MB × 3,
+format sama dengan `~/.build-q/.mcp-audit.log` (modul bersama `build_q/audit.py`):
+
+```json
+{"ts": "...", "level": "INFO", "msg": "execute", "source": "tui", "event": "execute",
+ "tool": "bq_doctor", "mcp_tool": "build_doctor", "risky": false, "cmd": "bq --doctor",
+ "exit_code": 0, "elapsed_ms": 812}
+```
+
+Event: `start`, `decide`, `skip`, `execute`, `error`. Token/secret di `cmd` disamarkan.
+
+Riwayat input (panah atas/bawah) disimpan di `~/.build-q/.tui-history` (chmod 600).
+
+Error handling — satu giliran gagal **tidak** mematikan sesi:
+- Error apa pun dalam satu giliran (network timeout, respons Jev tidak valid, tool di luar
+  katalog, template rusak) → print `[red]error:[/red]`, dicatat event `error`, loop kembali.
+- Ctrl+C saat isi param / eksekusi → "dibatalkan", loop kembali.
+- Missing API key → `RuntimeError` dari `ensure_key()`, user disuruh `/set KEY`.
 - Tool `none` dari Jev → print "Tidak ada tool yang cocok. Coba lebih spesifik." tanpa eksekusi.
+- Param kosong di template dirender `<nama>` (bukan crash) + peringatan sebelum konfirmasi.
 
 ---
 
@@ -484,7 +557,11 @@ Error handling:
    - PB admin pakai akun service terpisah (collection rule: `onlyAdmin`).
    - Audit via `git log scripts/build-q-seed.json` (seed adalah source of truth yang di-review).
    - `bq --tui-ls` sebelum tiap sesi penting.
-5. **Prompt injection**: user_request dikirim ke Jev as-is. Risiko rendah karena output constrained ke `criteria` keys — model tidak bisa return tool yang tidak ada di katalog.
+5. **Data ke provider**: user_request dikirim ke Jev setelah `audit.redact()` (token GitHub,
+   `sk-…`, age secret key, `Bearer …`, `*_TOKEN=`/`*_PASS=` disamarkan).
+6. **`.env` cwd tidak dibaca**: fallback legacy hanya `.env` di samping source build-q,
+   sehingga `bq --tui` di dalam repo aplikasi tidak ikut memuat secret aplikasi.
+7. **Prompt injection**: user_request dikirim ke Jev. Risiko rendah karena output constrained ke `criteria` keys — model tidak bisa return tool yang tidak ada di katalog.
 
 ---
 
@@ -492,7 +569,7 @@ Error handling:
 
 | Prio | Fitur | Rationale |
 |---|---|---|
-| P1 | **Session history** (`~/.build-q/.tui-history.json`) | Audit siapa menjalankan apa + rerun shortcut |
+| P1 | **Rerun shortcut** dari audit log (`/last`) | Riwayat input & audit log sudah ada; tinggal shortcut |
 | P1 | **Favorites / aliases** (`/alias deploy-prod bootstrap-k8s …`) | Shortcut untuk pola repetitif |
 | P2 | **Multi-step planning** (chain 2+ tools dgn Jev `type=plan`) | Mis. "bootstrap + trigger pipeline + verify webhook" |
 | P2 | **Shell completion** dari katalog PB (`bq _complete-tui …`) | Bash/zsh completion untuk tool names |
@@ -516,3 +593,6 @@ Error handling:
 | Tanggal | Version | Perubahan |
 |---|---|---|
 | 2026-10-02 | 1.0 | Dokumen awal. Katalog 31 tools / 2 providers / 17 patterns (sync dgn `bq` v0.1.40). |
+| 2026-10-14 | 1.3 | Simulasi `bq --e2e --simulate` / `/e2e --sim` (17 skenario, self-test). Verdict `incomplete` + exit code 0/1/2. Fix: `automated: {}` dibaca auto-sync ON; tidak menyarankan set-image saat build gagal; saran `--cicd-trigger` saat commit belum diproses. |
+| 2026-10-14 | 1.2 | Fitur `/e2e` + `bq --e2e` + tool katalog `bq_e2e`: analisa CI/CD end-to-end (trigger → Tekton → GitOps → ArgoCD) dengan titik putus. Config baru `ARGOCD_KUBE_CONTEXT`, `ARGOCD_NAMESPACE`. |
+| 2026-10-14 | 1.1 | Stabilitas: error per giliran tidak mematikan REPL, validasi respons Jev, template aman. Selaras MCP: `tool_policy` (tier risiko + ToolAnnotations), audit log JSON bersama, `source` katalog akurat (`stale-cache`), TTL in-process, `/refresh`, `/set KEY` tersembunyi, readline history, redaksi request ke Jev. |

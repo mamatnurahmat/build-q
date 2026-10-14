@@ -142,15 +142,23 @@ def load_raw(*, force_refresh: bool = False, allow_fallback: bool = True) -> Dic
       4. PB down + no cache + allow_fallback → bootstrap minimum
       5. Else → raise CatalogError
     """
+    data, _ = _load_raw_with_source(force_refresh=force_refresh, allow_fallback=allow_fallback)
+    return data
+
+
+def _load_raw_with_source(
+    *, force_refresh: bool = False, allow_fallback: bool = True,
+) -> tuple[Dict[str, List[dict]], str]:
+    """Seperti `load_raw`, plus asal data: pb | cache | stale-cache | bootstrap."""
     ttl = _ttl_seconds()
     cache = _read_cache()
     if cache and not force_refresh and _cache_fresh(cache, ttl):
-        return cache.get("collections", {})
+        return cache.get("collections", {}), "cache"
 
     try:
         data = _fetch_all_from_pb()
         _write_cache(data)
-        return data
+        return data, "pb"
     except CatalogError as e:
         if cache:
             print(
@@ -158,7 +166,7 @@ def load_raw(*, force_refresh: bool = False, allow_fallback: bool = True) -> Dic
                 f"(umur {cache_age_seconds()}s)",
                 file=sys.stderr,
             )
-            return cache.get("collections", {})
+            return cache.get("collections", {}), "stale-cache"
         if allow_fallback:
             print(
                 f"⚠️  TUI catalog: {e} — pakai bootstrap minimum "
@@ -169,7 +177,7 @@ def load_raw(*, force_refresh: bool = False, allow_fallback: bool = True) -> Dic
                 "build_q_tools":     _BOOTSTRAP_TOOLS,
                 "build_q_providers": _BOOTSTRAP_PROVIDERS,
                 "build_q_patterns":  _BOOTSTRAP_PATTERNS,
-            }
+            }, "bootstrap"
         raise
 
 
@@ -226,11 +234,11 @@ def load_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
           "patterns":         {field: regex},
           "risky":            set(tool_names),
           "default_provider": "typesafe"|...,
-          "source":           "pb"|"cache"|"bootstrap",
+          "source":           "pb"|"cache"|"stale-cache"|"bootstrap",
           "fetched_at":       epoch_int,
         }
     """
-    raw = load_raw(force_refresh=force_refresh)
+    raw, source = _load_raw_with_source(force_refresh=force_refresh)
     tools = _records_to_tools(raw.get("build_q_tools", []))
     providers = _records_to_providers(raw.get("build_q_providers", []))
     patterns = _records_to_patterns(raw.get("build_q_patterns", []))
@@ -248,8 +256,8 @@ def load_catalog(*, force_refresh: bool = False) -> Dict[str, Any]:
         "patterns": patterns,
         "risky": risky,
         "default_provider": default_provider,
-        "source": "pb" if cache else "bootstrap",
-        "fetched_at": cache.get("fetched_at", 0),
+        "source": source,
+        "fetched_at": cache.get("fetched_at", 0) if source != "bootstrap" else 0,
     }
 
 

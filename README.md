@@ -695,6 +695,7 @@ bq --bootstrap-k8s foo develop \
 - `--tui-pull`: Refresh cache katalog dari PocketBase (manual).
 - `--tui-sync <seed.json>`: Upload katalog seed JSON ke PocketBase (upsert by unique field).
 - `--tui-ls`: Tampilkan ringkasan katalog aktif (tools per-category, providers, patterns).
+- Di dalam TUI: `/e2e REPO REF` (analisa CI/CD end-to-end, lihat bagian 16), `/e2e --sim [SKENARIO]`, `/refresh`, `/set KEY` (input tersembunyi). Riwayat input tersimpan, satu error tidak lagi mematikan sesi, dan setiap eksekusi tercatat di `~/.build-q/.tui-audit.log`.
 
 ### 15. MCP Server — AI Assistant Integration (`--mcp`, sejak v0.1.44)
 
@@ -908,7 +909,40 @@ build_q/mcp/
 
 ---
 
-### 16. Contoh full (customize secret, platform, build-arg)
+### 16. Analisa CI/CD End-to-End (`--e2e`, sejak v0.1.47)
+
+"Commit saya kok belum live?" — `bq --e2e` menelusuri satu commit dari trigger sampai
+ArgoCD dan menunjuk **titik putus** (tahap pertama yang gagal). Read-only.
+
+```bash
+bq --e2e pay-be-topup-manager develop     # repo pendek → GITHUB_ORG
+bq --e2e Qoin-Digital-Indonesia/pay-be-topup-manager v1.4.2
+```
+
+| Tahap | Yang dicek |
+|---|---|
+| Source | ref → commit, ENV & tag image yang diharapkan (aturan sama dgn Tekton), `cicd.json` |
+| Trigger | GitHub Action `trigger-ci.yml` untuk commit tsb, webhook `cicd-hw.qoin.id/hook` |
+| Pipeline | PipelineRun `webhook-<repo>-*` di `JX_KUBE_CONTEXT` — step gagal + 15 baris log terakhir, results build/GitOps |
+| GitOps | tag di YAML branch ENV (`develop`/`staging`/`sandbox`), atau status PR ke `main` untuk tag `v*` |
+| ArgoCD | Application di `ARGOCD_KUBE_CONTEXT` (default `hw-pro-p`): sync, health, image live, override kustomize |
+
+Exit code: `0` sehat · `1` ada tahap gagal · `2` menunggu (PR/sync/pipeline) atau ada tahap
+yang tidak bisa diperiksa (cluster tak terjangkau → verdict *incomplete*, tidak pernah "sehat").
+
+**Simulasi tanpa cluster** — untuk demo, pelatihan, dan self-test:
+
+```bash
+bq --e2e --simulate list                   # 17 skenario (trigger gagal, build gagal, PR belum merge, OutOfSync, …)
+bq --e2e --simulate                        # self-test semua skenario
+bq --e2e --simulate pipeline-build-failed  # laporan lengkap 1 skenario
+```
+
+Config baru di `~/.build-q/.env` (opsional): `ARGOCD_KUBE_CONTEXT=hw-pro-p`, `ARGOCD_NAMESPACE=argocd`.
+
+---
+
+### 17. Contoh full (customize secret, platform, build-arg)
 
 ```bash
 bq plus-be-service staging \
@@ -947,6 +981,9 @@ Subcommands (mutually exclusive):
   --tui-pull                Refresh TUI catalog cache dari PocketBase.
   --tui-sync <seed.json>    Upload katalog JSON ke PocketBase (upsert).
   --tui-ls                  Ringkas katalog TUI aktif.
+  --e2e <repo> <ref>        Analisa CI/CD end-to-end: trigger → Tekton → GitOps → ArgoCD (read-only).
+  --e2e --simulate [list|all|<skenario>]
+                            Simulasi --e2e tanpa cluster/jaringan (demo & self-test).
   --set-image <ns> <dp> <img> Hot-patch deployment live di K8s.
   --gitops-set-image ...    Update image di repo GitOps + push.
   --is-match-image ...      Cek drift image K8s live vs GitOps.

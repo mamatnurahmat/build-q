@@ -7,29 +7,41 @@ Fitur:
   minimum bila PB down + cache kosong.
 - Provider switchable runtime (`/provider openrouter`).
 - Top-3 kandidat tool ditampilkan dengan score + preview perintah.
-- Konfirmasi eksekusi dengan tag RISKY untuk perintah destruktif.
+- Konfirmasi eksekusi dengan tag RISKY untuk perintah destruktif. Penilaian
+  risiko memakai `build_q.tool_policy` — sama dengan tier tool MCP `bq --mcp`.
+- Audit log JSON-lines di `~/.build-q/.tui-audit.log` (format sama dengan MCP).
 
 Butuh: `rich`, `requests`.
 """
 from __future__ import annotations
 
+import atexit
 import contextlib
+import logging
 import os
 import re
 import shlex
+import string
 import subprocess
 import sys
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import requests
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from .config import ENV_FILE, load_config
+from .audit import redact, setup_audit_logger
+from .config import CONFIG_DIR, ENV_FILE, load_config
+from .tool_policy import command_policy
 from . import tui_catalog
+
+audit_log = logging.getLogger("bq-tui")
+HISTORY_FILE = CONFIG_DIR / ".tui-history"
 
 # ---------------------------------------------------------------------------
 # .env handling
@@ -37,11 +49,13 @@ from . import tui_catalog
 
 
 def _candidate_env_paths() -> list[Path]:
-    """Cari .env di cwd lalu di direktori parent (utk kasus run dari examples/)."""
-    here = Path.cwd()
+    """Lokasi .env legacy di samping source build-q (instalasi editable).
+
+    Sengaja TIDAK membaca `.env` di cwd: menjalankan `bq --tui` di dalam repo
+    aplikasi tidak boleh ikut memuat env/secret aplikasi tersebut.
+    """
     script_dir = Path(__file__).resolve().parent
     return [
-        here / ".env",
         script_dir / ".env",
         script_dir.parent / ".env",
     ]
@@ -111,13 +125,21 @@ class Provider:
 
 
 _catalog_cache: dict | None = None
+_catalog_loaded_at = 0.0
 
 
 def catalog(*, force_refresh: bool = False) -> dict:
-    """Lazy-load katalog dari PB (cache per-process + file cache)."""
-    global _catalog_cache
-    if _catalog_cache is None or force_refresh:
+    """Lazy-load katalog dari PB (cache per-process + file cache).
+
+    Cache per-process ikut TTL file cache, jadi sesi panjang tetap
+    mendapat katalog terbaru tanpa restart.
+    """
+    global _catalog_cache, _catalog_loaded_at
+    ttl = tui_catalog._ttl_seconds()
+    expired = ttl > 0 and (time.monotonic() - _catalog_loaded_at) >= ttl
+    if _catalog_cache is None or force_refresh or expired:
         _catalog_cache = tui_catalog.load_catalog(force_refresh=force_refresh)
+        _catalog_loaded_at = time.monotonic()
     return _catalog_cache
 
 
@@ -245,8 +267,71 @@ def extract_params_from_text(user_msg: str, tool_name: str) -> dict:
     return out
 
 
+class _PlaceholderDict(dict):
+    """Param yang tidak ada di dict dirender sebagai `<nama>`, bukan KeyError."""
+
+    def __missing__(self, key: str) -> str:
+        return f"<{key}>"
+
+
 def preview_command(tool_name: str, params: dict) -> str:
-    return TOOLS()[tool_name]["template"].format(**params)
+    template = TOOLS()[tool_name]["template"]
+    try:
+        return string.Formatter().vformat(template, (), _PlaceholderDict(params))
+    except (ValueError, IndexError, AttributeError) as e:
+        raise ValueError(f"template tool '{tool_name}' tidak valid: {template!r} ({e})") from e
+
+
+@dataclass
+class Decision:
+    tool: str
+    confidence: float = 0.0
+    probabilities: dict = field(default_factory=dict)
+    noul: float = 0.0
+
+
+def parse_decision(resp: dict) -> Decision:
+    """Validasi respons Jev; raise ValueError bila bentuknya tidak sesuai."""
+    answers = resp.get("answers") if isinstance(resp, dict) else None
+    if not isinstance(answers, dict):
+        raise ValueError("respons Jev tidak berisi `answers`")
+    tool_ans = answers.get("tool") or {}
+    tool = tool_ans.get("choice") if isinstance(tool_ans, dict) else None
+    if not isinstance(tool, str) or not tool:
+        raise ValueError("respons Jev tidak berisi `answers.tool.choice`")
+    if tool != "none" and tool not in TOOLS():
+        raise ValueError(
+            f"Jev memilih tool '{tool}' yang tidak ada di katalog — coba /refresh"
+        )
+    risky_ans = answers.get("risky") or {}
+    try:
+        noul = float(risky_ans.get("noul", 0.0) or 0.0)
+    except (TypeError, ValueError, AttributeError):
+        noul = 0.0
+    probs = tool_ans.get("probabilities") or {}
+    return Decision(
+        tool=tool,
+        confidence=float(tool_ans.get("confidence", 0.0) or 0.0),
+        probabilities=probs if isinstance(probs, dict) else {},
+        noul=noul,
+    )
+
+
+def assess_risk(tool: str, noul: float, cmd: str | None = None) -> tuple[bool, list[str]]:
+    """Gabungan sinyal risiko (OR): flag katalog, penilaian Jev, tier tool MCP.
+
+    Tier MCP hanya bisa menaikkan risiko, tidak pernah menurunkannya.
+    """
+    reasons: list[str] = []
+    if tool in RISKY_TOOLS():
+        reasons.append("katalog: risky")
+    if noul >= 0.5:
+        reasons.append(f"Jev: destructive noul={noul:.2f}")
+    if cmd:
+        mcp_tool, policy = command_policy(cmd)
+        if policy and policy.risky:
+            reasons.append(f"MCP: {mcp_tool} (tier {policy.tier})")
+    return bool(reasons), reasons
 
 
 def pick_tool(user_msg: str, provider: Provider) -> dict:
@@ -267,7 +352,7 @@ def pick_tool(user_msg: str, provider: Provider) -> dict:
             },
         },
     }
-    return jev_decide({"user_request": user_msg}, questions, provider)
+    return jev_decide({"user_request": redact(user_msg)}, questions, provider)
 
 
 def fill_missing_choice_params(user_msg: str, tool_name: str, provider: Provider) -> dict:
@@ -287,8 +372,13 @@ def fill_missing_choice_params(user_msg: str, tool_name: str, provider: Provider
         }
     if not choice_qs:
         return {}
-    resp = jev_decide({"user_request": user_msg, "tool": tool_name}, choice_qs, provider)
-    return {k: v["choice"] for k, v in resp.get("answers", {}).items()}
+    resp = jev_decide({"user_request": redact(user_msg), "tool": tool_name}, choice_qs, provider)
+    out: dict = {}
+    for k, v in (resp.get("answers") or {}).items():
+        choice = v.get("choice") if isinstance(v, dict) else None
+        if k in choice_qs and choice in meta["params"][k].get("options", []):
+            out[k] = choice
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -303,9 +393,9 @@ def score_bar(prob: float, width: int = 20) -> str:
     return "█" * n + "░" * (width - n)
 
 
-def render_top_suggestions(user_msg: str, tool_answer: dict) -> str:
+def render_top_suggestions(user_msg: str, decision: Decision) -> str:
     """Tampilkan top-3 kandidat tool dengan score bar + preview perintah."""
-    probs: dict[str, float] = tool_answer.get("probabilities", {})
+    probs = {k: float(v) for k, v in decision.probabilities.items() if k == "none" or k in TOOLS()}
     top = sorted(probs.items(), key=lambda x: -x[1])[:3]
 
     tbl = Table(
@@ -337,17 +427,15 @@ def render_top_suggestions(user_msg: str, tool_answer: dict) -> str:
     return winner
 
 
-def render_verdict(tool_answer: dict, risky_answer: dict) -> tuple[str, bool]:
-    tool = tool_answer["choice"]
-    conf = tool_answer.get("confidence", 0.0)
-    noul = float(risky_answer.get("noul", 0.0)) if risky_answer else 0.0
-    risky = noul >= 0.5 or tool in RISKY_TOOLS()
+def render_verdict(decision: Decision) -> bool:
+    risky, _ = assess_risk(decision.tool, decision.noul)
     tag = "[red]RISKY[/red]" if risky else "[green]safe[/green]"
     console.print(
-        f"→ Pilihan Jev: [bold green]{tool}[/bold green] "
-        f"(confidence {conf:.2%}) {tag} (destructive noul={noul:.2f})"
+        f"→ Pilihan Jev: [bold green]{decision.tool}[/bold green] "
+        f"(confidence {decision.confidence:.2%}) {tag} "
+        f"(destructive noul={decision.noul:.2f})"
     )
-    return tool, risky
+    return risky
 
 
 def render_usage(resp: dict) -> None:
@@ -375,9 +463,14 @@ def show_tools() -> None:
     console.print(tbl)
 
 
+def _mask(value: str) -> str:
+    if not value:
+        return "<empty>"
+    return (value[:8] + "…" + value[-4:]) if len(value) > 12 else "<short>"
+
+
 def show_provider(provider: Provider) -> None:
-    key = os.environ.get(provider.key_env, "")
-    masked = (key[:8] + "…" + key[-4:]) if len(key) > 12 else ("<empty>" if not key else "<short>")
+    masked = _mask(os.environ.get(provider.key_env, ""))
     tbl = Table(title="Provider aktif", show_header=False, box=None)
     tbl.add_column("k", style="cyan")
     tbl.add_column("v")
@@ -395,7 +488,11 @@ def show_help() -> None:
         "  [cyan]/provider[/cyan]                 tampilkan provider aktif\n"
         "  [cyan]/provider openrouter[/cyan]      switch ke OpenRouter\n"
         "  [cyan]/provider typesafe[/cyan]        switch ke TypeSafe direct\n"
-        "  [cyan]/set KEY VALUE[/cyan]            set env var (mis. OPENROUTER_API_KEY sk-...)\n"
+        "  [cyan]/set KEY[/cyan]                  set env var, value diketik tersembunyi\n"
+        "  [cyan]/set KEY VALUE[/cyan]            set env var langsung (terlihat di layar)\n"
+        "  [cyan]/refresh[/cyan]                  ambil ulang katalog dari PocketBase\n"
+        "  [cyan]/e2e REPO REF[/cyan]             analisa CI/CD end-to-end: hook → pipeline → GitOps → ArgoCD\n"
+        "  [cyan]/e2e --sim [SKENARIO][/cyan]     simulasi e2e tanpa cluster (tanpa nama: daftar skenario)\n"
         "  [cyan]/save[/cyan]                     persist JEV_PROVIDER + kunci saat ini ke .env\n"
         "  [cyan]/help[/cyan]                     tampilkan bantuan ini\n"
         "  [cyan]/quit[/cyan]                     keluar",
@@ -433,12 +530,37 @@ def handle_slash(cmd: str, provider_ref: list[Provider]) -> bool:
                 console.print(f"[red]{e}[/red]")
         return True
     if head == "/set":
-        if len(parts) < 3:
-            console.print("[red]usage: /set KEY VALUE[/red]")
+        if len(parts) < 2:
+            console.print("[red]usage: /set KEY [VALUE][/red]")
         else:
-            k, v = parts[1], " ".join(parts[2:])
+            k = parts[1]
+            v = " ".join(parts[2:]) if len(parts) > 2 else Prompt.ask(
+                f"  value {k}", password=True,
+            )
             os.environ[k] = v
-            console.print(f"[green]{k} set (in-memory)[/green]")
+            console.print(f"[green]{k} set (in-memory, {_mask(v)})[/green]")
+        return True
+    if head == "/e2e":
+        if len(parts) >= 2 and parts[1] == "--sim":
+            if len(parts) == 2:
+                show_e2e_scenarios()
+            else:
+                run_e2e_sim(parts[2])
+        elif len(parts) < 3:
+            console.print("[red]usage: /e2e REPO REF[/red]  (mis. /e2e pay-be-topup-manager develop)"
+                          "  ·  [red]/e2e --sim [SKENARIO][/red]")
+        else:
+            run_e2e(parts[1], parts[2])
+        return True
+    if head == "/refresh":
+        try:
+            cat = catalog(force_refresh=True)
+            console.print(
+                f"[green]katalog di-refresh ({cat['source']}): "
+                f"{len(cat['tools'])} tools[/green]"
+            )
+        except Exception as e:
+            console.print(f"[red]refresh gagal:[/red] {e}")
         return True
     if head == "/save":
         p = provider_ref[0]
@@ -455,10 +577,237 @@ def handle_slash(cmd: str, provider_ref: list[Provider]) -> bool:
     return False
 
 
+_E2E_STYLE = {
+    "ok": "green", "warn": "yellow", "fail": "red", "skip": "dim", "running": "cyan",
+}
+
+
+def render_e2e(report) -> None:
+    """Render laporan `build_q.e2e.E2EReport` sebagai rantai + panel per tahap."""
+    from .e2e import STATUS_ICON
+
+    head = f"[bold]{escape(report.repo)}[/bold] @ [bold]{escape(report.ref)}[/bold]"
+    if report.sha:
+        head += escape(f"  commit {report.sha[:7]} · ENV={report.env} · "
+                       f"image {report.image}:{report.expected_tag}")
+    console.print(Panel.fit(head, title="[magenta]E2E CI/CD[/magenta]", border_style="magenta"))
+
+    bp = report.break_point
+    chain = "  →  ".join(
+        f"[{_E2E_STYLE[s.status]}]{STATUS_ICON[s.status]} "
+        f"{'[u]' if s is bp else ''}{s.title}{'[/u]' if s is bp else ''}[/{_E2E_STYLE[s.status]}]"
+        for s in report.stages
+    )
+    console.print(chain)
+
+    for s in report.stages:
+        body = [f"[bold]{escape(s.summary)}[/bold]"] + [f"• {escape(d)}" for d in s.details]
+        if s.data.get("log_tail"):
+            body.append("[dim]" + escape(s.data["log_tail"].rstrip()) + "[/dim]")
+        body += [f"💡 {escape(h)}" for h in s.hints]
+        console.print(Panel(
+            "\n".join(body),
+            title=f"{STATUS_ICON[s.status]} {s.title}",
+            title_align="left",
+            border_style=_E2E_STYLE[s.status],
+        ))
+
+    if bp:
+        console.print(
+            f"🎯 [bold]Titik putus:[/bold] [{_E2E_STYLE[bp.status]}]{bp.title}[/] — {escape(bp.summary)}"
+        )
+    elif report.unchecked:
+        names = ", ".join(s.title for s in report.unchecked)
+        console.print(f"[yellow]❔ Analisa tidak lengkap — tidak bisa memeriksa: {escape(names)}. "
+                      "Belum bisa dipastikan live.[/yellow]")
+    else:
+        console.print("[green]🎉 Alur end-to-end sehat — commit ini sudah live.[/green]")
+
+
+def show_e2e_scenarios() -> None:
+    from .e2e_sim import SCENARIOS
+
+    tbl = Table(title="Skenario simulasi /e2e --sim", header_style="bold magenta")
+    tbl.add_column("Skenario", style="cyan", no_wrap=True)
+    tbl.add_column("Titik putus")
+    tbl.add_column("Verdict")
+    tbl.add_column("Keterangan")
+    for sc in SCENARIOS.values():
+        tbl.add_row(sc.name, sc.break_point or "-", sc.verdict, sc.title)
+    console.print(tbl)
+
+
+def run_e2e_sim(name: str) -> None:
+    from .e2e_sim import SCENARIOS, simulate, verify
+
+    if name not in SCENARIOS:
+        console.print(f"[red]skenario '{escape(name)}' tidak dikenal[/red] — ketik /e2e --sim")
+        return
+    console.print(f"[magenta]🧪 SIMULASI[/magenta] {name} — {escape(SCENARIOS[name].title)}")
+    report = simulate(name)
+    render_e2e(report)
+    problems = verify(name, report)
+    if problems:
+        console.print("[red]Tidak sesuai harapan skenario:[/red] " + escape("; ".join(problems)))
+    _audit("e2e_sim", scenario=name, verdict=report.verdict, ok=not problems)
+
+
+def run_e2e(repo: str, ref: str) -> None:
+    from . import e2e
+
+    t0 = time.monotonic()
+    with console.status("[cyan]E2E: source…[/cyan]") as status:
+        report = e2e.analyze(
+            repo, ref,
+            on_stage=lambda name: status.update(f"[cyan]E2E: {name}…[/cyan]"),
+        )
+    render_e2e(report)
+    bp = report.break_point
+    _audit(
+        "e2e", repo=report.repo, ref=ref, sha=report.sha[:7],
+        stages={s.key: s.status for s in report.stages},
+        break_point=bp.key if bp else None, verdict=report.verdict,
+        elapsed_ms=int((time.monotonic() - t0) * 1000),
+    )
+
+
+def _audit(event: str, msg: str = "", **fields) -> None:
+    audit_log.info(msg or event, extra={"audit": {"source": "tui", "event": event, **fields}})
+
+
+def _setup_history() -> None:
+    """Riwayat input (panah atas/bawah) via readline, disimpan antar sesi."""
+    try:
+        import readline
+    except ImportError:  # Windows tanpa pyreadline
+        return
+    with contextlib.suppress(OSError):
+        readline.read_history_file(HISTORY_FILE)
+    readline.set_history_length(1000)
+
+    def _save() -> None:
+        with contextlib.suppress(OSError):
+            HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+            readline.write_history_file(HISTORY_FILE)
+            HISTORY_FILE.chmod(0o600)
+
+    atexit.register(_save)
+
+
+def _collect_params(msg: str, tool: str, provider: Provider) -> dict:
+    """Isi param: regex → Jev (choice) → prompt user, dengan default_template."""
+    params = extract_params_from_text(msg, tool)
+    params.update(fill_missing_choice_params(msg, tool, provider))
+    meta = TOOLS()[tool]
+
+    # Param "sumber" = yang direferensi default_template param lain.
+    # Prompt dulu supaya default_template bisa auto-fill dependent params.
+    referenced: set[str] = set()
+    for pspec in meta["params"].values():
+        tmpl = pspec.get("default_template")
+        if tmpl:
+            referenced.update(re.findall(r"\{(\w+)\}", tmpl))
+
+    def _prompt(pname: str, pspec: dict) -> None:
+        val = params.get(pname, "")
+        if val and not str(val).startswith("<"):
+            return
+        hint = pspec.get("hint", "")
+        default = pspec.get("default", "")
+        params[pname] = Prompt.ask(
+            f"  [cyan]param[/cyan] [bold]{pname}[/bold] [dim]({hint})[/dim]",
+            default=default or None,
+        )
+
+    def _reapply_templates() -> None:
+        for pname, pspec in meta["params"].items():
+            tmpl = pspec.get("default_template")
+            if not tmpl or not str(params.get(pname, "")).startswith("<"):
+                continue
+            try:
+                candidate = tmpl.format(**params)
+            except (KeyError, IndexError, ValueError, AttributeError):
+                continue
+            if "<" in candidate:
+                continue
+            params[pname] = candidate
+
+    # Round 1: prompt source params
+    for pname, pspec in meta["params"].items():
+        if pname in referenced:
+            _prompt(pname, pspec)
+    _reapply_templates()
+
+    # Round 2: prompt sisanya (path_yaml/image ideally sudah auto-derived)
+    for pname, pspec in meta["params"].items():
+        if pname not in referenced:
+            _prompt(pname, pspec)
+    return params
+
+
+def run_turn(msg: str, provider: Provider) -> None:
+    """Satu giliran REPL: pilih tool → isi param → konfirmasi → eksekusi."""
+    with console.status(f"[cyan]Jev ({provider.name}) sedang memutuskan...[/cyan]"):
+        resp = pick_tool(msg, provider)
+    decision = parse_decision(resp)
+
+    render_top_suggestions(msg, decision)
+    render_usage(resp)
+    render_verdict(decision)
+    _audit(
+        "decide", tool=decision.tool, confidence=decision.confidence,
+        noul=decision.noul, provider=provider.name,
+    )
+
+    if decision.tool == "none":
+        console.print("[yellow]Tidak ada tool yang cocok. Coba lebih spesifik.[/yellow]")
+        return
+
+    params = _collect_params(msg, decision.tool, provider)
+    cmd = preview_command(decision.tool, params)
+    risky, reasons = assess_risk(decision.tool, decision.noul, cmd)
+    mcp_tool, _ = command_policy(cmd)
+
+    console.print(Panel(cmd, title="[magenta]Perintah Final[/magenta]", border_style="magenta"))
+    if mcp_tool:
+        console.print(f"[dim]padanan MCP: mcp__bq__{mcp_tool}[/dim]")
+    if risky:
+        console.print(f"[red]RISKY[/red] [dim]({'; '.join(reasons)})[/dim]")
+    if "<" in cmd and ">" in cmd:
+        console.print("[yellow]Masih ada param kosong (<...>) — periksa sebelum menjalankan.[/yellow]")
+
+    prompt_label = "Jalankan?" + (" [red](RISKY)[/red]" if risky else "")
+    audit_fields = {
+        "tool": decision.tool, "mcp_tool": mcp_tool, "risky": risky,
+        "cmd": redact(cmd),
+    }
+    if not Confirm.ask(prompt_label, default=not risky):
+        console.print("[dim]dilewati[/dim]")
+        _audit("skip", **audit_fields)
+        return
+
+    console.print(Panel(cmd, title="[yellow]Menjalankan[/yellow]", border_style="yellow"))
+    t0 = time.monotonic()
+    try:
+        rc = subprocess.run(shlex.split(cmd), check=False).returncode
+    except KeyboardInterrupt:
+        console.print("[red]dibatalkan[/red]")
+        rc = 130
+    except OSError as e:
+        console.print(f"[red]gagal menjalankan:[/red] {e}")
+        rc = 127
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    if rc != 0:
+        console.print(f"[red]exit code {rc}[/red]")
+    _audit("execute", exit_code=rc, elapsed_ms=elapsed_ms, **audit_fields)
+
+
 def repl() -> None:
     loaded = load_env()
     if loaded:
         console.print(f"[dim].env loaded from {loaded}[/dim]")
+    setup_audit_logger(audit_log, ".tui-audit.log")
+    _setup_history()
     try:
         current = resolve_provider()
     except Exception as e:
@@ -470,9 +819,11 @@ def repl() -> None:
         "[bold green]Jev Agent Planner[/bold green]  "
         f"[dim]provider={current.name} model={current.model}[/dim]\n"
         "Ketik request natural (ID/EN). Jev akan usulkan top-3 perintah + skor kecocokan.\n"
+        "[dim]Teks request dikirim ke provider Jev; token/secret yang dikenali disamarkan.[/dim]\n"
         "[cyan]/help[/cyan] daftar perintah TUI",
         border_style="green",
     ))
+    _audit("start", provider=current.name)
 
     while True:
         try:
@@ -482,97 +833,15 @@ def repl() -> None:
             return
         if not msg:
             continue
-        if msg.startswith("/") and handle_slash(msg, provider_ref):
-            continue
-
-        provider = provider_ref[0]
         try:
-            with console.status(f"[cyan]Jev ({provider.name}) sedang memutuskan...[/cyan]"):
-                resp = pick_tool(msg, provider)
-        except Exception as e:
-            console.print(f"[red]Jev error:[/red] {e}")
-            continue
-
-        answers = resp.get("answers", {})
-        tool_ans = answers.get("tool", {})
-        risky_ans = answers.get("risky", {})
-
-        render_top_suggestions(msg, tool_ans)
-        render_usage(resp)
-        tool, risky = render_verdict(tool_ans, risky_ans)
-
-        if tool == "none":
-            console.print("[yellow]Tidak ada tool yang cocok. Coba lebih spesifik.[/yellow]")
-            continue
-
-        params = extract_params_from_text(msg, tool)
-        try:
-            choice_params = fill_missing_choice_params(msg, tool, provider)
-            params.update(choice_params)
-        except Exception as e:
-            console.print(f"[red]fill-param error:[/red] {e}")
-            continue
-
-        meta = TOOLS()[tool]
-
-        # Param "sumber" = yang direferensi default_template param lain.
-        # Prompt dulu supaya default_template bisa auto-fill dependent params.
-        referenced: set[str] = set()
-        for pspec in meta["params"].values():
-            tmpl = pspec.get("default_template")
-            if tmpl:
-                referenced.update(re.findall(r"\{(\w+)\}", tmpl))
-
-        def _prompt(pname: str, pspec: dict, params: dict = params) -> None:
-            val = params.get(pname, "")
-            if val and not str(val).startswith("<"):
-                return
-            hint = pspec.get("hint", "")
-            default = pspec.get("default", "")
-            params[pname] = Prompt.ask(
-                f"  [cyan]param[/cyan] [bold]{pname}[/bold] [dim]({hint})[/dim]",
-                default=default or None,
-            )
-
-        def _reapply_templates(meta: dict = meta, params: dict = params) -> None:
-            for pname, pspec in meta["params"].items():
-                tmpl = pspec.get("default_template")
-                if not tmpl:
-                    continue
-                if not str(params.get(pname, "")).startswith("<"):
-                    continue
-                try:
-                    candidate = tmpl.format(**params)
-                except (KeyError, IndexError):
-                    continue
-                if "<" in candidate:
-                    continue
-                params[pname] = candidate
-
-        # Round 1: prompt source params
-        for pname, pspec in meta["params"].items():
-            if pname in referenced:
-                _prompt(pname, pspec)
-        _reapply_templates()
-
-        # Round 2: prompt sisanya (path_yaml/image ideally sudah auto-derived)
-        for pname, pspec in meta["params"].items():
-            if pname not in referenced:
-                _prompt(pname, pspec)
-
-        cmd = preview_command(tool, params)
-        console.print(Panel(cmd, title="[magenta]Perintah Final[/magenta]", border_style="magenta"))
-
-        default_yes = not risky
-        prompt_label = "Jalankan?" + (" [red](RISKY)[/red]" if risky else "")
-        if Confirm.ask(prompt_label, default=default_yes):
-            console.print(Panel(cmd, title="[yellow]Menjalankan[/yellow]", border_style="yellow"))
-            try:
-                subprocess.run(shlex.split(cmd), check=False)
-            except KeyboardInterrupt:
-                console.print("[red]dibatalkan[/red]")
-        else:
-            console.print("[dim]dilewati[/dim]")
+            if msg.startswith("/") and handle_slash(msg, provider_ref):
+                continue
+            run_turn(msg, provider_ref[0])
+        except KeyboardInterrupt:
+            console.print("\n[red]dibatalkan[/red]")
+        except Exception as e:  # satu giliran gagal tidak boleh mematikan sesi
+            console.print(f"[red]error:[/red] {e}")
+            _audit("error", error=f"{type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
