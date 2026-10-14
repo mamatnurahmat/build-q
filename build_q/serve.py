@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
 
-from . import __version__
+from . import __version__, tool_policy
+from .audit import redact
 from .config import CONFIG_DIR
 
 AUDIT_LOG = CONFIG_DIR / ".serve-audit.log"
@@ -332,11 +333,13 @@ def make_handler(config: dict) -> type:
                     preview = f"<preview error: {e}>"
 
             noul = float(risky_ans.get("noul", 0.0) or 0.0)
-            risky = noul >= 0.5 or tool in tui.RISKY_TOOLS()
+            risky, risk_reasons = tui.assess_risk(tool, noul, preview or None)
+            mcp_tool = tool_policy.classify_command(preview) if preview else None
             _audit({
                 "event": "decide",
-                "user_msg": user_msg[:200],
+                "user_msg": redact(user_msg[:200]),
                 "tool": tool,
+                "mcp_tool": mcp_tool,
                 "confidence": tool_ans.get("confidence"),
                 "risky": risky,
             })
@@ -349,6 +352,8 @@ def make_handler(config: dict) -> type:
                 "preview": preview,
                 "risky": risky,
                 "risky_noul": noul,
+                "risk_reasons": risk_reasons,
+                "mcp_tool": mcp_tool,
                 "usage": resp.get("usage") or {},
                 "params_schema": (
                     tui.TOOLS().get(tool, {}).get("params", {})

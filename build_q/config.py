@@ -97,6 +97,10 @@ def load_config() -> Dict[str, Any]:
             "org": os.getenv("DOCKERHUB_ORG", ""),
             "token": os.getenv("DOCKERHUB_TOKEN", ""),
         },
+        "argocd": {
+            "k8s_context": os.getenv("ARGOCD_KUBE_CONTEXT", "hw-pro-p"),
+            "k8s_namespace": os.getenv("ARGOCD_NAMESPACE", "argocd"),
+        },
         "gitops": {
             "repo": os.getenv("GITOPS_REPO", "Qoin-Digital-Indonesia/gitops"),
             "branch": os.getenv("GITOPS_BRANCH", "main"),
@@ -206,6 +210,10 @@ WEBHOOK_TRIGGER_URL=https://cicd-hw.qoin.id/trigger
 JX_KUBE_CONTEXT=hw-dev
 JX_KUBE_NAMESPACE=jenkins-x
 JX_TOKEN_SECRET=webhook-trigger-token
+# ArgoCD (dibaca `bq --e2e` / `/e2e` di TUI): context & namespace tempat
+# Application ArgoCD berada. Hanya akses baca (get applications).
+ARGOCD_KUBE_CONTEXT=hw-pro-p
+ARGOCD_NAMESPACE=argocd
 # WEBHOOK_TRIGGER_TOKEN: auto-fetched dari k8s pada `bq --pr-fix` preflight
 # (sekali saja; disimpan di sini untuk run selanjutnya).
 WEBHOOK_TRIGGER_TOKEN=
