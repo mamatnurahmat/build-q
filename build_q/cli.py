@@ -123,12 +123,19 @@ def _github_clone(clone_arg: str, ref: str) -> None:
 
 
 def main() -> None:
+    if sys.argv[1:2] == ["auth"]:
+        from .pb_auth import cli_main
+        sys.exit(cli_main(sys.argv[2:]))
+
     parser = argparse.ArgumentParser(
         prog="build-q (bq)",
         description="Simple Docker Buildx CLI — local builds only",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 Examples:
+  # Login PocketBase devops (SSO GitHub) → token di ~/.build-q/auth.json
+  bq auth login            # status | refresh | logout | login --password
+
   # Auto-detect repo & branch from git
   bq --local
 
@@ -856,7 +863,12 @@ Config file: ~/.build-q/.env
                 cache = pb_api._read_cache() or {}
                 secrets = cache.get("secrets", {})
                 print(f"   URL       : {pb_api._base_url()}")
-                print(f"   User      : {os.getenv('PB_API_USER', '(unset)')}")
+                auth = pb_api.read_auth()
+                who = ((auth or {}).get("record") or {}).get("email")
+                if who:
+                    print(f"   Auth      : {who} (bq auth login, s/d {auth.get('expires_at')})")
+                else:
+                    print(f"   Auth      : superuser {os.getenv('PB_API_USER', '(unset)')}")
                 print(f"   Enabled   : {pb_api.is_enabled()}")
                 print(f"   TTL       : {pb_api._ttl_seconds()}s")
                 if age is None:

@@ -126,6 +126,7 @@ class World:
     taskrun: dict = field(default_factory=dict)
     apps: List[dict] = field(default_factory=list)
     kubectl_error: Optional[str] = None
+    argocd_api_ok: bool = False  # fallback REST API ArgoCD saat kubectl gagal
     log_tail: str = ""
 
     @property
@@ -169,6 +170,11 @@ class World:
             return {"items": self.apps}
         raise e2e.KubectlError(f"simulasi: resource tidak dikenal {args}")
 
+    def argocd_api_apps(self, config: dict) -> List[dict]:
+        if not self.argocd_api_ok:
+            raise e2e.ArgocdApiError("HTTP 401 — token SSO ArgoCD tidak valid/kedaluwarsa", auth=True)
+        return self.apps
+
     def kubectl_logs(self, *args, **kwargs) -> str:
         return self.log_tail
 
@@ -208,6 +214,8 @@ def patched(world: World) -> Iterator[World]:
             mock.patch.object(e2e, "gh_raw", world.gh_raw), \
             mock.patch.object(e2e, "kubectl_json", world.kubectl_json), \
             mock.patch.object(e2e, "kubectl_logs", world.kubectl_logs), \
+            mock.patch.object(e2e, "argocd_api_apps", world.argocd_api_apps), \
+            mock.patch.object(e2e, "argocd_token_login", lambda config: False), \
             mock.patch("build_q._common.fetch_cicd_data", world.fetch_cicd_data):
         yield world
 
@@ -369,6 +377,12 @@ def _cluster_unreachable() -> World:
     return w
 
 
+def _cluster_unreachable_argocd_api() -> World:
+    w = _cluster_unreachable()
+    w.argocd_api_ok = True
+    return w
+
+
 def _bad_ref() -> World:
     w = healthy_world(ref="feat/tidak-ada")
     w.commit_ok = False
@@ -415,7 +429,10 @@ SCENARIOS: Dict[str, Scenario] = {s.name: s for s in [
     Scenario("fe-compose", "Repo FE (Docker Compose) — tahap ArgoCD dilewati",
              _fe_compose, None, {"gitops": "ok", "argocd": "skip"}, "healthy"),
     Scenario("cluster-unreachable", "Cluster CI/ArgoCD tidak terjangkau (VPN/timeout)",
-             _cluster_unreachable, None, {"pipeline": "skip", "argocd": "skip"}, "incomplete", must_mention=("Analisa tidak lengkap",), must_not_mention=("sehat",)),
+             _cluster_unreachable, None, {"pipeline": "skip", "argocd": "skip"}, "incomplete", must_mention=("Analisa tidak lengkap", "argocd-app token-login"), must_not_mention=("sehat",)),
+    Scenario("cluster-unreachable-argocd-api", "kubectl timeout, ArgoCD dibaca via REST API",
+             _cluster_unreachable_argocd_api, None, {"pipeline": "skip", "argocd": "ok"}, "incomplete",
+             must_mention=("via ArgoCD API", "sudah live"), must_not_mention=("Belum bisa dipastikan",)),
     Scenario("bad-ref", "Ref tidak ada di GitHub",
              _bad_ref, "source", {"source": "fail"}),
 ]}

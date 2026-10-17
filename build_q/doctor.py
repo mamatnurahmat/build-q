@@ -172,17 +172,14 @@ def _check_pb_api() -> List[Result]:
         return []
     out: List[Result] = []
     base = pb_api._base_url()
-    user = os.environ.get("PB_API_USER", "")
-    password = os.environ.get("PB_API_PASS", "")
-    if not user or not password:
-        out.append(("PB_API creds", False,
-                    "PB_API_USER / PB_API_PASS empty di ~/.build-q/.env", True))
-        return out
+    auth = pb_api.read_auth()
+    who = ((auth or {}).get("record") or {}).get("email") or os.environ.get("PB_API_USER", "")
     try:
-        pb_api.authenticate(base, user, password)
-        out.append((f"PB API {base}", True, f"auth ok as {user}", False))
+        pb_api.get_token(base)
+        via = "bq auth login" if pb_api.user_token(base) else "superuser .env"
+        out.append((f"PB API {base}", True, f"auth ok as {who} ({via})", False))
     except pb_api.PBAPIError as e:
-        out.append((f"PB API {base}", False, str(e)[:100], False))
+        out.append((f"PB API {base}", False, str(e)[:100], True))
         return out
     age = pb_api.cache_age_seconds()
     cache = pb_api._read_cache() or {}
