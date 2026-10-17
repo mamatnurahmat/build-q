@@ -10,6 +10,12 @@ Toggle via `PB_API=true` in ~/.build-q/.env. Resilient: if the API is
 unreachable, a warning is printed and control falls back to whatever is
 already in the local .env (never aborts).
 
+Auth (urutan, lihat `get_token`):
+  1. Token user dari `bq auth login` (SSO GitHub via Dex → collection
+     `devops_users`) yang disimpan di ~/.build-q/auth.json — di-refresh
+     otomatis (auth-refresh) bila mendekati kedaluwarsa.
+  2. Legacy: PB_API_USER/PB_API_PASS (`_superusers`) dari .env.
+
 Kontrak API (PocketBase v0.22+):
     POST /api/collections/_superusers/auth-with-password
          {"identity": "<email>", "password": "<pass>"}
@@ -34,6 +40,9 @@ from typing import Dict, Optional
 
 CONFIG_DIR = Path.home() / ".build-q"
 CACHE_FILE = CONFIG_DIR / ".pb-cache.json"
+AUTH_FILE = CONFIG_DIR / "auth.json"
+AUTH_COLLECTION = "devops_users"
+REFRESH_BEFORE = 24 * 3600  # auth-refresh bila sisa umur token < 1 hari
 DEFAULT_TTL = 900  # 15 menit
 DEFAULT_URL = "https://cicd-hw.qoin.id/devops"
 
@@ -53,7 +62,11 @@ def _parse_bool(value: Optional[str]) -> bool:
 
 
 def is_enabled() -> bool:
-    return _parse_bool(os.getenv("PB_API"))
+    """PB_API=true, atau PB_API tidak diset tapi sudah `bq auth login`."""
+    raw = os.getenv("PB_API")
+    if raw is None or not raw.strip():
+        return AUTH_FILE.exists()
+    return _parse_bool(raw)
 
 
 def _base_url() -> str:
@@ -106,6 +119,108 @@ def authenticate(base_url: str, user: str, password: str) -> str:
     if not token:
         raise PBAPIError("auth response missing 'token'")
     return token
+
+
+# ── Token store (~/.build-q/auth.json) ──────────────────────────────────
+
+def jwt_exp(token: str) -> int:
+    """Klaim `exp` JWT (tanpa verifikasi signature — server yang memverifikasi)."""
+    import base64
+
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return int(json.loads(base64.urlsafe_b64decode(payload)).get("exp") or 0)
+    except (IndexError, ValueError, TypeError):
+        return 0
+
+
+def read_auth() -> Optional[dict]:
+    if not AUTH_FILE.exists():
+        return None
+    try:
+        data = json.loads(AUTH_FILE.read_text() or "{}")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if data.get("token") else None
+
+
+def save_auth(base_url: str, token: str, record: dict, *, method: str,
+              collection: str = AUTH_COLLECTION) -> dict:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    exp = jwt_exp(token)
+    data = {
+        "pb_url": base_url.rstrip("/"),
+        "collection": collection,
+        "method": method,
+        "token": token,
+        "exp": exp,
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)) if exp else "",
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "record": {k: record.get(k) for k in ("id", "email", "full_name", "role", "verified")},
+    }
+    tmp = AUTH_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(data, f, indent=2)
+    os.replace(tmp, AUTH_FILE)
+    return data
+
+
+def clear_auth() -> bool:
+    if AUTH_FILE.exists():
+        AUTH_FILE.unlink()
+        return True
+    return False
+
+
+def refresh_auth(auth: dict) -> dict:
+    """POST auth-refresh → token baru (umur penuh). Raise PBAPIError bila ditolak."""
+    base, col = auth["pb_url"], auth.get("collection") or AUTH_COLLECTION
+    resp = _http_json("POST", f"{base}/api/collections/{col}/auth-refresh",
+                      headers={"Authorization": f"Bearer {auth['token']}"})
+    if not resp.get("token"):
+        raise PBAPIError("auth-refresh response missing 'token'")
+    return save_auth(base, resp["token"], resp.get("record") or auth.get("record") or {},
+                     method=auth.get("method", "oidc"), collection=col)
+
+
+def user_token(base_url: Optional[str] = None) -> Optional[str]:
+    """Token valid dari auth.json untuk `base_url`, atau None.
+
+    Refresh otomatis bila sisa umur < REFRESH_BEFORE. Token yang ditolak
+    server (401/403) dianggap tidak valid → None (fallback / login ulang).
+    """
+    auth = read_auth()
+    base = (base_url or _base_url()).rstrip("/")
+    if not auth or auth.get("pb_url", "").rstrip("/") != base:
+        return None
+    remaining = (auth.get("exp") or jwt_exp(auth["token"])) - time.time()
+    if remaining <= 0:
+        return None
+    if remaining < REFRESH_BEFORE:
+        try:
+            auth = refresh_auth(auth)
+        except PBAPIError as e:
+            if str(e).startswith(("HTTP 401", "HTTP 403")):
+                return None
+            # Jaringan bermasalah: token lama masih berlaku, pakai saja.
+    return auth["token"]
+
+
+def get_token(base_url: Optional[str] = None) -> str:
+    """Token untuk PB API: user SSO (auth.json) → fallback superuser .env."""
+    base = (base_url or _base_url()).rstrip("/")
+    token = user_token(base)
+    if token:
+        return token
+    user = os.getenv("PB_API_USER") or ""
+    password = os.getenv("PB_API_PASS") or ""
+    if user and password:
+        return authenticate(base, user, password)
+    if read_auth():
+        raise PBAPIError("token PocketBase kedaluwarsa/tidak valid — jalankan `bq auth login`")
+    raise PBAPIError("belum login PocketBase — jalankan `bq auth login`")
 
 
 def fetch_secrets(base_url: str, token: str) -> Dict[str, str]:
@@ -181,11 +296,7 @@ def fetch_collection_records(
         PBAPIError: If auth fails or API returns error
     """
     base = _base_url()
-    user = os.getenv("PB_API_USER") or ""
-    password = os.getenv("PB_API_PASS") or ""
-    if not user or not password:
-        raise PBAPIError("PB_API_USER / PB_API_PASS empty")
-    token = authenticate(base, user, password)
+    token = get_token(base)
     url = f"{base}/api/collections/{collection}/records?perPage={min(per_page, 500)}"
     if filter_:
         url += f"&filter={urllib.parse.quote(filter_, safe='=')}"
@@ -210,12 +321,7 @@ def pull(*, force: bool = False) -> Dict[str, str]:
         if cache and _cache_fresh(cache, ttl):
             return cache.get("secrets", {})
     base = _base_url()
-    user = os.getenv("PB_API_USER") or ""
-    password = os.getenv("PB_API_PASS") or ""
-    if not user or not password:
-        raise PBAPIError("PB_API_USER / PB_API_PASS empty — set di ~/.build-q/.env")
-    token = authenticate(base, user, password)
-    secrets = fetch_secrets(base, token)
+    secrets = fetch_secrets(base, get_token(base))
     _write_cache(secrets)
     return secrets
 

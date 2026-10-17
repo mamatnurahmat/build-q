@@ -11,7 +11,7 @@ Selain build, `bq` menyediakan:
 - **Fix** (`--pr-fix` repo legacy template)
 - **Interactive** (`--tui` Jev Agent Planner)
 - **MCP Server** (`--mcp` — 18 tools untuk AI assistant via Model Context Protocol)
-- **Credentials** PocketBase IDP (`--pb-login`, `--pb-status`, dll)
+- **Credentials** PocketBase IDP — login SSO GitHub `bq auth login` (sejak v0.1.48), `--pb-login`, `--pb-status`, dll
 
 Sejak v0.1.17 operasi GitHub berjalan **native** (tanpa `gh` CLI). Sejak v0.1.30 mendukung **PocketBase fallback** untuk `cicd.json`.
 
@@ -219,9 +219,12 @@ bq --config       # tampilkan konfigurasi aktif
 | `GITOPS_INFRA` | `cce` | `cce` (Huawei CCE) atau `k8s` (SLS). Override per-run: `--infra` |
 | `NS_SUFFIX` | `qoin` | Fallback global: `ns = <env>-<suffix>` bila `--ns` tidak diberikan **dan** `cicd.PROJECT` kosong. Sejak v0.1.22 `cicd.PROJECT` menang. |
 | `PB_API_URL` | (kosong) | Endpoint PocketBase IDP (mis. `https://cicd-hw.qoin.id/devops`) |
-| `PB_API_USER` | (kosong) | Username PocketBase |
-| `PB_API_PASS` | (kosong) | Password PocketBase |
-| `PB_API` | `false` | Set `true` untuk fetch secrets / cicd dari PocketBase |
+| `PB_API_USER` | (kosong) | Username superuser PocketBase — **legacy**, fallback bila belum `bq auth login` |
+| `PB_API_PASS` | (kosong) | Password superuser PocketBase — **legacy** |
+| `PB_API` | `false` | Set `true` untuk fetch secrets / cicd dari PocketBase. Tidak diset + sudah `bq auth login` → aktif otomatis |
+| `ARGOCD_API_URL` | `https://cicd-hw.qoin.id/argocd` | REST API ArgoCD — fallback `--e2e` saat kubectl gagal |
+| `ARGOCD_TOKEN` | (kosong) | Token SSO ArgoCD; kosong → dibaca dari `ARGOCD_AUTH_FILE` (`~/.pi/agent/auth.json`) |
+| `ARGOCD_AUTO_LOGIN` | `true` | Token ArgoCD 401 → jalankan `argocd-app token-login` otomatis (terminal interaktif saja) |
 
 #### Toggle native (tanpa `gh` CLI)
 
@@ -940,9 +943,36 @@ bq --e2e --simulate pipeline-build-failed  # laporan lengkap 1 skenario
 
 Config baru di `~/.build-q/.env` (opsional): `ARGOCD_KUBE_CONTEXT=hw-pro-p`, `ARGOCD_NAMESPACE=argocd`.
 
+**Cluster tak terjangkau (sejak v0.1.48):** bila kubectl ke `ARGOCD_KUBE_CONTEXT` timeout, tahap
+ArgoCD dibaca via REST API (`ARGOCD_API_URL`, token SSO yang sama dengan MCP `argocd` /
+`argocd-app`). Token kedaluwarsa → `argocd-app token-login` dijalankan otomatis di terminal.
+
 ---
 
-### 17. Contoh full (customize secret, platform, build-arg)
+### 17. Login PocketBase devops — SSO GitHub (`bq auth`, sejak v0.1.48)
+
+Login sekali dengan akun GitHub (Dex, sama dengan ArgoCD); token per-user disimpan di
+`~/.build-q/auth.json` (perm 600) dan dipakai otomatis untuk semua request PocketBase —
+tidak perlu lagi `PB_API_USER`/`PB_API_PASS` superuser di laptop.
+
+```bash
+bq auth login                 # SSO GitHub via browser (default)
+bq auth login --no-browser    # tampilkan URL saja
+bq auth login --password      # alternatif email/password akun devops_users
+bq auth status                # validasi token ke server
+bq auth refresh               # perpanjang token
+bq auth logout                # hapus token + cache secrets
+```
+
+- Token berlaku 5 hari, **di-refresh otomatis** bila sisa umur < 1 hari.
+- Prioritas auth: token `bq auth login` → fallback `PB_API_USER`/`PB_API_PASS` (legacy).
+- Secrets yang diterima mengikuti hak akses user di server (role `view` / `admin`,
+  credential berbasis owner).
+- `bq --doctor` dan `bq --pb-status` menampilkan identitas & sumber auth yang dipakai.
+
+---
+
+### 18. Contoh full (customize secret, platform, build-arg)
 
 ```bash
 bq plus-be-service staging \
@@ -987,6 +1017,7 @@ Subcommands (mutually exclusive):
   --set-image <ns> <dp> <img> Hot-patch deployment live di K8s.
   --gitops-set-image ...    Update image di repo GitOps + push.
   --is-match-image ...      Cek drift image K8s live vs GitOps.
+  auth login|status|refresh|logout  Login PocketBase devops (SSO GitHub) → ~/.build-q/auth.json.
   --pb-login/status/pull/logout PocketBase IDP operations.
   --mcp                     Run MCP server (stdio transport). 18 tools untuk AI assistant.
   --mcp --mcp-transport sse --mcp-port PORT

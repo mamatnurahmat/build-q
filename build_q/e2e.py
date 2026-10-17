@@ -12,7 +12,9 @@ Alur Qoin yang ditelusuri (read-only, tidak mengubah apa pun):
   4. GitOps   — tag image di YAML GitOps pada branch ENV (develop/staging/
                 sandbox → push langsung; tag v* → PR ke main).
   5. ArgoCD   — Application yang memantau folder file GitOps di branch tsb:
-                sync/health + image live (`status.summary.images`).
+                sync/health + image live (`status.summary.images`). Dibaca
+                via kubectl; bila cluster tak terjangkau, fallback ke REST
+                API ArgoCD (ARGOCD_API_URL + token SSO).
 
 Hasil: `E2EReport` berisi status per tahap dan *titik putus* (tahap pertama
 yang gagal) beserta saran tindak lanjut.
@@ -20,12 +22,15 @@ yang gagal) beserta saran tindak lanjut.
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import re
 import subprocess
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, List, Optional
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 from . import github_api
 from .audit import redact
@@ -117,6 +122,69 @@ def kubectl_logs(context: str, ns: str, pod: str, container: str, tail: int = 15
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return ""
     return redact(res.stdout) if res.returncode == 0 else ""
+
+
+class ArgocdApiError(RuntimeError):
+    def __init__(self, msg: str, *, auth: bool = False):
+        super().__init__(msg)
+        self.auth = auth  # token tidak ada / kedaluwarsa → bisa login ulang
+
+
+def _argocd_token(config: dict) -> str:
+    acfg = config.get("argocd") or {}
+    if acfg.get("token"):
+        return acfg["token"]
+    auth_file = os.path.expanduser(acfg.get("auth_file") or "")
+    if not auth_file or not os.path.isfile(auth_file):
+        return ""
+    try:
+        with open(auth_file, encoding="utf-8") as f:
+            return str(json.load(f).get("ARGOCD_TOKEN") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def argocd_api_apps(config: dict) -> List[dict]:
+    """GET /api/v1/applications — bentuk item sama dgn Application k8s."""
+    acfg = config.get("argocd") or {}
+    base = (acfg.get("api_url") or "").rstrip("/")
+    if not base:
+        raise ArgocdApiError("ARGOCD_API_URL kosong")
+    token = _argocd_token(config)
+    if not token:
+        raise ArgocdApiError(f"token ArgoCD tidak ada (ARGOCD_TOKEN / {acfg.get('auth_file')})", auth=True)
+    req = Request(f"{base}/api/v1/applications",
+                  headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    try:
+        with urlopen(req, timeout=_KUBECTL_TIMEOUT) as res:
+            return (json.loads(res.read() or b"{}") or {}).get("items") or []
+    except HTTPError as e:
+        if e.code in (401, 403):
+            raise ArgocdApiError(f"HTTP {e.code} — token SSO ArgoCD tidak valid/kedaluwarsa", auth=True) from e
+        raise ArgocdApiError(f"HTTP {e.code} {e.reason}") from e
+    except (URLError, TimeoutError, OSError) as e:
+        raise ArgocdApiError(f"tidak bisa menghubungi {base}: {getattr(e, 'reason', e)}") from e
+    except ValueError as e:
+        raise ArgocdApiError("respons ArgoCD API bukan JSON") from e
+
+
+def argocd_token_login(config: dict) -> bool:
+    """Jalankan `argocd-app token-login` (SSO via browser) — hanya di terminal
+    interaktif & ARGOCD_AUTO_LOGIN aktif. Return True bila login sukses."""
+    import shutil
+    import sys
+
+    if not (config.get("argocd") or {}).get("auto_login", True) or not sys.stdin.isatty():
+        return False
+    exe = shutil.which("argocd-app")
+    if not exe:
+        return False
+    print("🔐 Token ArgoCD kedaluwarsa — menjalankan `argocd-app token-login` ...", file=sys.stderr)
+    try:
+        # Output diteruskan ke terminal: user perlu melihat URL login SSO.
+        return subprocess.run([exe, "token-login"], timeout=300).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
 
 
 def gh_get(path: str) -> Any:
@@ -492,10 +560,29 @@ def _stage_argocd(rep: E2EReport, config: dict, gitops: Stage) -> Stage:
     ns = config["argocd"]["k8s_namespace"]
     try:
         apps = kubectl_json(ctx, ["-n", ns, "get", "applications.argoproj.io"]).get("items", [])
+        st.data["via"] = "kubectl"
     except KubectlError as e:
-        st.summary = f"tidak bisa baca Application ArgoCD ({ctx}/{ns})"
-        st.details.append(str(e))
-        return st
+        api_url = (config["argocd"].get("api_url") or "").rstrip("/")
+        try:
+            try:
+                apps = argocd_api_apps(config)
+            except ArgocdApiError as first:
+                if not (first.auth and argocd_token_login(config)):
+                    raise
+                # Token baru ditulis ke auth file; env ARGOCD_TOKEN lama diabaikan.
+                apps = argocd_api_apps({**config, "argocd": {**config["argocd"], "token": ""}})
+                st.details.append("token ArgoCD diperbarui via `argocd-app token-login`")
+        except ArgocdApiError as api_err:
+            st.summary = f"tidak bisa baca Application ArgoCD ({ctx}/{ns} maupun API)"
+            st.details.append(f"kubectl: {e}")
+            st.details.append(f"ArgoCD API {api_url}: {api_err}")
+            if api_err.auth:
+                st.hints.append("Perbarui token SSO ArgoCD: `argocd-app token-login` "
+                                "(atau set ARGOCD_TOKEN), lalu ulangi.")
+            return st
+        st.data["via"] = "api"
+        ctx = api_url
+        st.details.append(f"kubectl {config['argocd']['k8s_context']} gagal ({e}) — dibaca via ArgoCD API {api_url}")
 
     folder = posixpath.dirname(path)
     branch = gitops.data.get("branch", "main")
@@ -626,7 +713,10 @@ def verdict_line(rep: E2EReport) -> str:
         return f"🎯 Titik putus: {bp.title} — {bp.summary}"
     if rep.unchecked:
         names = ", ".join(s.title for s in rep.unchecked)
-        return f"❔ Analisa tidak lengkap — tidak bisa memeriksa: {names}. Belum bisa dipastikan live."
+        argocd = next((s for s in rep.stages if s.key == "argocd"), None)
+        tail = (f"ArgoCD mengonfirmasi {rep.expected_tag} sudah live." if argocd and argocd.status == OK
+                else "Belum bisa dipastikan live.")
+        return f"❔ Analisa tidak lengkap — tidak bisa memeriksa: {names}. {tail}"
     return "🎉 Alur end-to-end sehat."
 
 
