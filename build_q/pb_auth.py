@@ -17,12 +17,17 @@ di-refresh otomatis. Opsi `--password` untuk login email/password.
     bq auth status
     bq auth refresh
     bq auth logout
+    bq auth list                         # key credential yang boleh diakses (tanpa isi)
+    bq auth get <KEY> [--scope S] [--env E] [--raw] > <lokasi>
 """
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import getpass
 import json
+import re
 import queue
 import sys
 import threading
@@ -149,6 +154,46 @@ def verify(auth: dict) -> dict:
                              headers={"Authorization": f"Bearer {auth['token']}"})
 
 
+_KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,200}$")
+
+
+def list_secrets(base: str, token: str, fields: str = "key,scope,env,type,owner,tags,description") -> list:
+    """Credential yang boleh dibaca user ini (aturan server), langsung dari server."""
+    resp = pb_api._http_json(
+        "GET", f"{base}/api/collections/secrets/records?perPage=500&sort=key&fields={fields}",
+        headers={"Authorization": f"Bearer {token}"})
+    return resp.get("items") or []
+
+
+def get_secret(base: str, token: str, key: str, scope: str = "", env: str = "") -> dict:
+    """Satu record credential berdasarkan key (+ scope/env bila ambigu)."""
+    if not _KEY_RE.match(key) or any(v and not _KEY_RE.match(v) for v in (scope, env)):
+        raise PBAPIError(f"key/scope/env tidak valid: {key!r}")
+    flt = f"key='{key}'" + (f" && scope='{scope}'" if scope else "") + (f" && env='{env}'" if env else "")
+    resp = pb_api._http_json(
+        "GET", f"{base}/api/collections/secrets/records?perPage=50&filter={urllib.parse.quote(flt)}",
+        headers={"Authorization": f"Bearer {token}"})
+    items = resp.get("items") or []
+    if not items:
+        raise PBAPIError(f"credential {key} tidak ditemukan (atau bukan milik Anda)")
+    if len(items) > 1:
+        opts = ", ".join(f"--scope {i.get('scope')} --env {i.get('env')}" for i in items)
+        raise PBAPIError(f"{key} ada {len(items)} record — pilih salah satu: {opts}")
+    return items[0]
+
+
+def secret_bytes(record: dict, *, raw: bool = False) -> bytes:
+    """Isi credential. Key berakhiran _B64 / tag `base64` di-decode kecuali `raw`."""
+    value = str(record.get("value") or "")
+    tags = record.get("tags") or []
+    if not raw and (record.get("key", "").upper().endswith("_B64") or "base64" in tags):
+        try:
+            return base64.b64decode(value, validate=True)
+        except (binascii.Error, ValueError) as e:
+            raise PBAPIError(f"{record.get('key')}: value bukan base64 valid (pakai --raw)") from e
+    return value.encode("utf-8")
+
+
 def _describe(auth: dict) -> str:
     rec = auth.get("record") or {}
     return (f"{rec.get('email') or rec.get('id')} (role={rec.get('role') or '?'}) "
@@ -168,6 +213,12 @@ def cli_main(argv: Optional[list] = None) -> int:
     sub.add_parser("status", help="Tampilkan & validasi token tersimpan")
     sub.add_parser("refresh", help="Perpanjang token (auth-refresh)")
     sub.add_parser("logout", help="Hapus token & cache secrets")
+    sub.add_parser("list", help="Daftar credential yang boleh diakses (tanpa isi)")
+    p_get = sub.add_parser("get", help="Tulis isi credential ke stdout, mis. `bq auth get KEY > lokasi`")
+    p_get.add_argument("key", help="Nama key credential")
+    p_get.add_argument("--scope", default="", help="Pilih scope bila key ada di beberapa scope")
+    p_get.add_argument("--env", default="", help="Pilih env bila key ada di beberapa env")
+    p_get.add_argument("--raw", action="store_true", help="Jangan decode base64 (key _B64 / tag base64)")
     args = parser.parse_args(argv)
 
     if ENV_FILE.exists():
@@ -196,6 +247,24 @@ def cli_main(argv: Optional[list] = None) -> int:
         if not auth:
             print("❌ Belum login — jalankan `bq auth login`", file=sys.stderr)
             return 1
+        if args.cmd in ("list", "get"):
+            token = pb_api.get_token(auth["pb_url"])
+            if args.cmd == "list":
+                items = list_secrets(auth["pb_url"], token)
+                for i in items:
+                    print(f"{i.get('key'):32} scope={i.get('scope'):9} env={i.get('env') or '-':10} "
+                          f"type={i.get('type'):14} owner={i.get('owner') or '-'}")
+                print(f"({len(items)} credential)", file=sys.stderr)
+                return 0
+            data = secret_bytes(get_secret(auth["pb_url"], token, args.key, args.scope, args.env),
+                                raw=args.raw)
+            if sys.stdout.isatty():
+                print(f"⚠️  Isi {args.key} tampil di layar — arahkan ke file: "
+                      f"bq auth get {args.key} > <lokasi>", file=sys.stderr)
+            sys.stdout.buffer.write(data)
+            sys.stdout.buffer.flush()
+            return 0
+
         if args.cmd == "refresh":
             auth = pb_api.refresh_auth(auth)
             print(f"✅ Token diperpanjang: {_describe(auth)}")
