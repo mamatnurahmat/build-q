@@ -149,3 +149,50 @@ class TestLoginSSO:
         with pytest.raises(pb_api.PBAPIError, match="state"):
             self._run(monkeypatch, {"state": "lain", "code": "c0de"})
         assert pb_api.read_auth() is None
+
+
+class TestGetSecret:
+    def _fake(self, monkeypatch, items):
+        seen = []
+
+        def fake(method, url, **kw):
+            seen.append(url)
+            return {"items": items}
+        monkeypatch.setattr(pb_api, "_http_json", fake)
+        return seen
+
+    def test_b64_key_decoded_and_raw_kept(self):
+        rec = {"key": "KUBECONFIG_X_B64", "value": base64.b64encode(b"apiVersion: v1\n").decode()}
+        assert pb_auth.secret_bytes(rec) == b"apiVersion: v1\n"
+        assert pb_auth.secret_bytes(rec, raw=True) == rec["value"].encode()
+        assert pb_auth.secret_bytes({"key": "X", "value": "aGk=", "tags": ["base64"]}) == b"hi"
+        assert pb_auth.secret_bytes({"key": "TOKEN", "value": "aGk="}) == b"aGk="
+
+    def test_invalid_base64_errors(self):
+        with pytest.raises(pb_api.PBAPIError, match="--raw"):
+            pb_auth.secret_bytes({"key": "A_B64", "value": "bukan base64!"})
+
+    def test_filter_and_not_found(self, monkeypatch):
+        seen = self._fake(monkeypatch, [])
+        with pytest.raises(pb_api.PBAPIError, match="tidak ditemukan"):
+            pb_auth.get_secret(BASE, "t", "GITHUB_TOKEN", scope="github")
+        assert "key%3D%27GITHUB_TOKEN%27%20%26%26%20scope%3D%27github%27" in seen[0]
+
+    def test_ambiguous_asks_scope_env(self, monkeypatch):
+        self._fake(monkeypatch, [{"key": "K", "scope": "a", "env": "all"},
+                                 {"key": "K", "scope": "b", "env": "all"}])
+        with pytest.raises(pb_api.PBAPIError, match="--scope a --env all"):
+            pb_auth.get_secret(BASE, "t", "K")
+
+    @pytest.mark.parametrize("key", ["A' || key!='", "x y", ""])
+    def test_rejects_filter_injection(self, key):
+        with pytest.raises(pb_api.PBAPIError, match="tidak valid"):
+            pb_auth.get_secret(BASE, "t", key)
+
+    def test_cli_get_writes_only_content_to_stdout(self, monkeypatch, capsysbinary):
+        pb_api.save_auth(BASE, _jwt(int(time.time()) + 5 * 86400), REC, method="oidc")
+        content = b"apiVersion: v1\nkind: Config\n"
+        self._fake(monkeypatch, [{"key": "KC_B64", "value": base64.b64encode(content).decode()}])
+        monkeypatch.setattr("build_q.config.ENV_FILE", pb_api.CONFIG_DIR / "nope.env")
+        assert pb_auth.cli_main(["get", "KC_B64"]) == 0
+        assert capsysbinary.readouterr().out == content

@@ -962,7 +962,16 @@ bq auth login --password      # alternatif email/password akun devops_users
 bq auth status                # validasi token ke server
 bq auth refresh               # perpanjang token
 bq auth logout                # hapus token + cache secrets
+
+# Ambil credential milik sendiri (isi saja ke stdout — arahkan ke file)
+bq auth list                                              # key yang boleh diakses (tanpa isi)
+bq auth get KUBECONFIG_READONLY_HW_B64 > ~/.kube/config-readonly-hw
+bq auth get GITHUB_TOKEN --scope github --env all         # pilih scope/env bila key ambigu
+bq auth get SOME_B64 --raw > file.b64                     # tanpa decode base64
 ```
+
+`bq auth get` otomatis men-decode value dengan key berakhiran `_B64` atau ber-tag
+`base64`. Pesan/error ditulis ke stderr, sehingga file tujuan hanya berisi credential.
 
 - Token berlaku 5 hari, **di-refresh otomatis** bila sisa umur < 1 hari.
 - Prioritas auth: token `bq auth login` → fallback `PB_API_USER`/`PB_API_PASS` (legacy).
@@ -1018,6 +1027,7 @@ Subcommands (mutually exclusive):
   --gitops-set-image ...    Update image di repo GitOps + push.
   --is-match-image ...      Cek drift image K8s live vs GitOps.
   auth login|status|refresh|logout  Login PocketBase devops (SSO GitHub) → ~/.build-q/auth.json.
+  auth list | auth get <KEY> > <lokasi>  Daftar / ambil isi credential milik sendiri.
   --pb-login/status/pull/logout PocketBase IDP operations.
   --mcp                     Run MCP server (stdio transport). 18 tools untuk AI assistant.
   --mcp --mcp-transport sse --mcp-port PORT
