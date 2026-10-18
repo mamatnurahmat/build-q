@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import github_api
 from ._common import (
-    INIT_ARTIFACTS, LEGACY_ARTIFACTS_TO_REMOVE,
+    INIT_ARTIFACTS, LEGACY_ARTIFACTS_TO_REMOVE, LEGACY_INIT_ARTIFACTS,
     fetch_cicd_data, init_ctx_from_cicd, normalize_text,
 )
 from .config import cicd_candidates, load_config, save_env_value
@@ -94,8 +94,14 @@ def run_pr_fix(
     dry_run: bool = False,
     keep_workdir: bool = False,
     pr_branch: Optional[str] = None,
+    legacy: bool = False,
 ) -> int:
+    """`legacy=True` (`--pr-fix --init-legacy`): regenerate Makefile + compose.yaml
+    pola legacy (setara `bq --init-legacy --force` di dalam clone). Dockerfile
+    dipertahankan, issue-nya hanya di-report di PR body.
+    """
     config = load_config()
+    mode_label = "init-legacy" if legacy else "jx-init"
 
     print("🔐 Preflight:")
     err = _preflight(config)
@@ -135,17 +141,28 @@ def run_pr_fix(
     print(f"   ↪ HEAD {head_sha[:12]}")
 
     # Determine branch name
-    branch_name = pr_branch or f"{config['pr_fix']['branch_prefix']}{ts}"
+    default_prefix = "fix/init-legacy-" if legacy else config["pr_fix"]["branch_prefix"]
+    branch_name = pr_branch or f"{default_prefix}{ts}"
     print(f"\n🌿 Branch: {branch_name} (dari {ref})")
     _sh(["git", "checkout", "-b", branch_name], cwd=str(repo_dir))
 
     # Render + write artifacts
     from .templates import load_template, render
     ctx = init_ctx_from_cicd(cicd, config)
-    print(f"\n📝 Regenerating artifacts (ctx: IMAGE={ctx['IMAGE']} PROJECT={ctx['PROJECT']} PORT={ctx['PORT']}):")
+    if legacy:
+        # Samakan default dgn builder.init_legacy (PORT 80, IMAGE = nama repo)
+        ctx["PORT"] = cicd.get("PORT", "80")
+        ctx["IMAGE"] = ctx["IMAGE"] or api_repo.split("/")[-1]
+    artifacts = LEGACY_INIT_ARTIFACTS if legacy else INIT_ARTIFACTS
+    print(f"\n📝 Regenerating {mode_label} artifacts (ctx: IMAGE={ctx['IMAGE']} PROJECT={ctx['PROJECT']} PORT={ctx['PORT']}):")
     changes: List[str] = []
     dockerfile_issues: List[Dict] = []
-    for path_str, tpl_name in INIT_ARTIFACTS:
+    if legacy:
+        dockerfile = repo_dir / "Dockerfile"
+        if dockerfile.exists():
+            dockerfile_issues = analyze_dockerfile(dockerfile.read_text())
+            print(f"   ⏭  Dockerfile (preserved — legacy, {len(dockerfile_issues)} issue di-report)")
+    for path_str, tpl_name in artifacts:
         target = repo_dir / path_str
         # Dockerfile: default preserve (kustomisasi tim), TAPI cek issue known.
         # Kalau ada issue `severity=error` (mis. compose/Dockerfile secret
@@ -210,11 +227,11 @@ def run_pr_fix(
     if removals:
         commit_parts.append(f"Removed (legacy Fase 3): {', '.join(removals)}")
     commit_msg = (
-        "chore: sync jx-init artifacts to latest template + Fase 3 cleanup\n\n"
+        f"chore: sync {mode_label} artifacts to latest template + Fase 3 cleanup\n\n"
         + "\n".join(commit_parts) + "\n\n"
         f"Base: {ref} @ {head_sha[:12]}\n"
         "Standar trigger: GitHub webhook cicd-hw.qoin.id/hook (bukan action).\n"
-        "Generated with bq --pr-fix (build-q)"
+        f"Generated with bq --pr-fix{' --init-legacy' if legacy else ''} (build-q)"
     )
     _sh(
         ["git", "-c", "user.name=build-q bot", "-c", "user.email=bq@build-q.local",
@@ -266,7 +283,7 @@ def run_pr_fix(
         pass
 
     body_lines = [
-        "Regenerate jx-init artifacts agar match template terkini + Fase 3 cleanup migrasi CI/CD trigger.",
+        f"Regenerate {mode_label} artifacts agar match template terkini + Fase 3 cleanup migrasi CI/CD trigger.",
         "",
         f"**Base:** `{ref}` @ `{head_sha[:12]}`",
     ]
@@ -285,14 +302,14 @@ def run_pr_fix(
         f"bq --cicd-webhook {api_repo.split('/')[-1]}",
         f"```",
         "",
-        "Generated with `bq --pr-fix`.",
+        f"Generated with `bq --pr-fix{' --init-legacy' if legacy else ''}`.",
     ]
     body = "\n".join(body_lines)
     total = len(changes) + len(removals)
     try:
         pr = github_api.create_pull_request(
             api_repo, base=ref, head=branch_name,
-            title=f"chore: sync jx-init + Fase 3 cleanup ({total} file)",
+            title=f"chore: sync {mode_label} + Fase 3 cleanup ({total} file)",
             body=body,
         )
         print(f"   ✅ {pr.get('html_url')}")
