@@ -8,6 +8,8 @@ Preflight ringan untuk memastikan environment siap dipakai `bq`:
        - Docker login (~/.docker/config.json auths) — untuk push image
   4. Buildx builder (BUILDER_NAME) exist di `docker buildx ls`
   5. kubectl context JX_KUBE_CONTEXT reachable (opsional — dipakai HMAC/JX secret)
+  6. (opsional, `bq --doctor --cloud`) kesiapan build Docker Build Cloud: buildx resmi
+     dengan driver cloud, kredensial Docker Hub, login, dan builder cloud.
 
 Exit code:
   0 = semua cek esensial lulus (warning tidak menggagalkan)
@@ -163,6 +165,13 @@ def _check_docker_login() -> List[Result]:
     if reg_hint:
         detail += f"  (target hint: {reg_hint})"
     return [("docker login", True, detail, False)]
+
+
+def _check_bq_login() -> List[Result]:
+    """Login bq wajib (v0.2.0): token `bq auth login` harus ada dan valid di server."""
+    from . import pb_auth
+    ok, msg = pb_auth.check_login()
+    return [("Login bq (bq auth login)", ok, msg[:100], True)]
 
 
 def _check_pb_api() -> List[Result]:
@@ -357,12 +366,111 @@ def _run_fixers(sections) -> int:
     return fixed
 
 
-def run_doctor() -> int:
-    """Jalankan semua cek. Return 0 bila blocker-free, 1 bila ada blocker."""
+def _buildx_asset(version: str) -> str:
+    """Nama aset release buildx untuk OS & arsitektur laptop ini (mis. buildx-v0.38.0.darwin-arm64)."""
+    import platform
+
+    os_name = {"Darwin": "darwin", "Linux": "linux"}.get(platform.system(), platform.system().lower())
+    arch = {"arm64": "arm64", "aarch64": "arm64", "x86_64": "amd64", "amd64": "amd64"}.get(
+        platform.machine().lower(), platform.machine().lower())
+    return f"buildx-{version}.{os_name}-{arch}"
+
+
+def _check_cloud_build() -> List[Result]:
+    """Kesiapan `bq --cloud` (Docker Build Cloud). Hanya dijalankan dengan `--doctor --cloud`."""
+    from . import cloud_build as cb
+    from .builder import BuildError
+
+    out: List[Result] = []
+    buildx = ""
+    try:
+        buildx = cb.resolve_buildx()
+        _, ver, _ = _run([buildx, "version"])
+        out.append(("Cloud: buildx resmi (driver cloud)", True, (ver.splitlines() or [buildx])[0][:60], False))
+    except BuildError:
+        out.append(("Cloud: buildx resmi (driver cloud)", False,
+                    f"tidak ditemukan / tanpa driver cloud (perlu {cb.MIN_BUILDX_HINT})", True))
+
+    creds = None
+    try:
+        creds = cb.load_dockerhub_creds()
+        out.append(("Cloud: kredensial Docker Hub", True, f"user={creds[0]} (dari PocketBase/env)", False))
+    except BuildError as e:
+        out.append(("Cloud: kredensial Docker Hub", False, str(e)[:90], True))
+
+    if creds:
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="bq-doctor-")
+        env = {**os.environ, "DOCKER_CONFIG": tmp}
+        try:
+            res = subprocess.run(["docker", "login", "-u", creds[0], "--password-stdin"],
+                                 input=creds[1], capture_output=True, text=True, env=env, timeout=30)
+            ok = res.returncode == 0
+            out.append(("Cloud: login Docker Hub", ok,
+                        "login berhasil" if ok else (res.stderr or res.stdout).strip()[-90:], True))
+        except (OSError, subprocess.TimeoutExpired) as e:
+            out.append(("Cloud: login Docker Hub", False, str(e)[:90], True))
+        finally:
+            subprocess.run(["docker", "logout"], capture_output=True, env=env)
+            import shutil as _sh
+            _sh.rmtree(tmp, ignore_errors=True)
+
+    if buildx and creds:
+        local = cb.endpoint_to_local_name(cb.resolve_endpoint())
+        rc, _, _ = _run([buildx, "inspect", local], timeout=30)
+        if rc == 0:
+            out.append((f"Cloud: builder {local}", True, "sudah ada", False))
+        else:
+            out.append((f"Cloud: builder {local}", False,
+                        "belum ada — dibuat otomatis oleh `bq --cloud`", False))
+    return out
+
+
+def _print_cloud_suggestions(results: List[Result]) -> None:
+    """Saran setup untuk setiap cek cloud yang belum lulus."""
+    from . import cloud_build as cb
+
+    failed = {label: detail for label, ok, detail, _ in results if not ok}
+    if not failed:
+        return
+    print("💡 Cara setup build cloud:\n")
+    step = 0
+
+    def next_step() -> int:
+        nonlocal step
+        step += 1
+        return step
+
+    if any(k.startswith("Cloud: buildx") for k in failed):
+        asset = _buildx_asset(cb.MIN_BUILDX_HINT)
+        dest = cb.CONFIG_DIR / "bin" / "docker-buildx"
+        print(f"   {next_step()}) Pasang buildx resmi (driver cloud) — bawaan OrbStack/Homebrew tidak memilikinya:")
+        print(f"      mkdir -p {dest.parent}")
+        print(f"      curl -fL -o {dest} https://github.com/docker/buildx/releases/download/{cb.MIN_BUILDX_HINT}/{asset}")
+        print(f"      chmod +x {dest} && {dest} version   # harus >= {cb.MIN_BUILDX_HINT}\n")
+    if any(k.startswith("Cloud: kredensial") for k in failed):
+        print(f"   {next_step()}) Kredensial Docker Hub (PAT dengan akses write ke org builder):")
+        print("      - Buat PAT di https://hub.docker.com/settings/personal-access-tokens")
+        print("      - Simpan di PocketBase (collection `secrets`): key DOCKERHUB_USER & DOCKERHUB_TOKEN,")
+        print("        scope `docker`, env `all`, owner = email Anda, lalu `bq auth login`.\n")
+    if any(k.startswith("Cloud: login") for k in failed):
+        print(f"   {next_step()}) Login gagal: cek token belum kedaluwarsa dan masih punya akses ke org loyaltolpi.\n")
+    if any(k.startswith("Cloud: builder") for k in failed):
+        print(f"   {next_step()}) Builder cloud (opsional, otomatis dibuat saat build). Manual:")
+        print(f"      {cb.CONFIG_DIR / 'bin' / 'docker-buildx'} create --driver cloud "
+              f"--name {cb.endpoint_to_local_name(cb.resolve_endpoint())} {cb.resolve_endpoint()}\n")
+
+
+def run_doctor(cloud: bool = False) -> int:
+    """Jalankan semua cek. Return 0 bila blocker-free, 1 bila ada blocker.
+
+    cloud=True menambahkan pemeriksaan kesiapan build Docker Build Cloud (`--doctor --cloud`).
+    """
     print("🩺 bq doctor — cek kesiapan tools & credentials\n")
 
     sections = [
         ("Tools", _check_tools()),
+        ("Login bq", _check_bq_login()),
         ("Config", _check_config()),
         ("PB API (opsional)", _check_pb_api()),
         ("GitHub credentials", _check_github_credentials()),
@@ -370,6 +478,9 @@ def run_doctor() -> int:
         ("Buildx builder", _check_buildx_builder()),
         ("Kubernetes (opsional)", _check_kube_context()),
     ]
+    cloud_results = _check_cloud_build() if cloud else []
+    if cloud_results:
+        sections.append(("Build cloud (Docker Build Cloud)", cloud_results))
 
     blockers = 0
     warnings = 0
@@ -392,8 +503,11 @@ def run_doctor() -> int:
     if blockers:
         print("\n💡 Fix blocker dulu sebelum jalankan `bq` build / --pr-fix / --bootstrap-k8s.")
 
+    if cloud_results:
+        _print_cloud_suggestions(cloud_results)
+
     if blockers or warnings:
         print()
-        _run_fixers(sections)
+        _run_fixers([sec for sec in sections if sec[0] != "Build cloud (Docker Build Cloud)"])
 
     return 1 if blockers else 0
