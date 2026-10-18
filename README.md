@@ -952,6 +952,10 @@ ArgoCD dibaca via REST API (`ARGOCD_API_URL`, token SSO yang sama dengan MCP `ar
 
 ### 17. Login PocketBase devops — SSO GitHub (`bq auth`, sejak v0.1.48)
 
+> 🔒 **Wajib login (sejak v0.2.0):** setiap perintah `bq` membutuhkan sesi `bq auth login` yang
+> valid. Token diverifikasi ke server (di-cache 1 jam). Yang tetap bebas login: `bq --help`,
+> `bq --version`, `bq auth …`, dan `bq --doctor` (yang justru melaporkan statusnya).
+
 Login sekali dengan akun GitHub (Dex, sama dengan ArgoCD); token per-user disimpan di
 `~/.build-q/auth.json` (perm 600) dan dipakai otomatis untuk semua request PocketBase —
 tidak perlu lagi `PB_API_USER`/`PB_API_PASS` superuser di laptop.
@@ -983,6 +987,11 @@ bq auth get SOME_B64 --raw > file.b64                     # tanpa decode base64
 ---
 
 ### 18. Build via Docker Build Cloud (`--cloud`, sejak v0.1.50)
+
+**Cek kesiapan build cloud:** `bq --doctor --cloud` (opsional, tidak ikut `bq --doctor` biasa)
+memeriksa buildx resmi dengan driver `cloud`, kredensial Docker Hub, login, dan builder cloud.
+Setiap cek yang belum lulus disertai saran perintah setup sesuai OS dan arsitektur laptop.
+
 
 Build & push image memakai **Docker Build Cloud** (produk Docker Hub, org `loyaltolpi`), dengan
 builder cloud dari laptop. Tidak ada VM tambahan yang terlibat.

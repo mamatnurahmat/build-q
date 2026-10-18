@@ -127,6 +127,11 @@ def main() -> None:
         from .pb_auth import cli_main
         sys.exit(cli_main(sys.argv[2:]))
 
+    # Gate login (sejak v0.2.0): perintah bq wajib login dengan token yang valid.
+    from .pb_auth import requires_login, require_login
+    if requires_login(sys.argv[1:]):
+        require_login()
+
     parser = argparse.ArgumentParser(
         prog="build-q (bq)",
         description="Simple Docker Buildx CLI — local builds only",
@@ -270,6 +275,7 @@ Config file: ~/.build-q/.env
         action="store_true",
         help="Cek kesiapan tools (git/docker/buildx/kubectl) & credentials "
              "(GITHUB_TOKEN, docker login, buildx builder, kubectl context). "
+             "Tambahkan --cloud untuk cek kesiapan Docker Build Cloud + saran setup. "
              "Exit 0 bila blocker-free.",
     )
     parser.add_argument(
@@ -851,7 +857,7 @@ Config file: ~/.build-q/.env
 
         if args.doctor:
             from .doctor import run_doctor
-            sys.exit(run_doctor())
+            sys.exit(run_doctor(cloud=args.cloud))
 
         if args.pb_login or args.pb_status or args.pb_pull or args.pb_logout:
             from . import pb_api

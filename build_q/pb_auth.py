@@ -194,6 +194,59 @@ def secret_bytes(record: dict, *, raw: bool = False) -> bytes:
     return value.encode("utf-8")
 
 
+# ── Gate login: setiap perintah bq wajib login & token harus valid ───────
+
+LOGIN_VERIFY_TTL = 3600  # verifikasi ke server di-cache 1 jam
+_EXEMPT_FLAGS = {"-h", "--help", "--version", "--doctor"}
+
+
+def requires_login(argv: list) -> bool:
+    """Perlu login? Tidak untuk --help/--version/--doctor (--doctor melaporkan statusnya)."""
+    return not any(a in _EXEMPT_FLAGS for a in argv)
+
+
+def check_login() -> tuple[bool, str]:
+    """Status login bq: (ok, pesan). Memperpanjang token bila perlu, dan memverifikasi ke server.
+
+    - Tidak ada token / kedaluwarsa / ditolak server → ok=False.
+    - Server tidak bisa dijangkau → ok=True dengan catatan (token lokal masih berlaku).
+    """
+    auth = pb_api.read_auth()
+    if not auth:
+        return False, "belum login — jalankan `bq auth login`"
+    if (auth.get("exp") or 0) <= time.time():
+        return False, "sesi kedaluwarsa — jalankan `bq auth login`"
+    try:
+        token = pb_api.user_token(auth.get("pb_url"))
+    except pb_api.PBAPIError:
+        token = auth.get("token")
+    if not token:
+        return False, "token ditolak server / tidak valid — jalankan `bq auth login`"
+    auth = pb_api.read_auth() or auth  # mungkin sudah di-refresh
+    if time.time() - auth.get("verified_at", 0) < LOGIN_VERIFY_TTL:
+        return True, _describe(auth)
+    try:
+        verify(auth)
+    except pb_api.PBAPIError as e:
+        msg = str(e)
+        if msg.startswith(("HTTP 401", "HTTP 403", "HTTP 404")):
+            return False, "token ditolak server — jalankan `bq auth login`"
+        return True, f"server tidak terjangkau ({msg[:80]}); memakai sesi lokal — {_describe(auth)}"
+    auth["verified_at"] = int(time.time())
+    pb_api.write_auth(auth)
+    return True, _describe(auth)
+
+
+def require_login() -> None:
+    """Gate CLI: hentikan perintah bila belum login atau token tidak valid."""
+    ok, msg = check_login()
+    if not ok:
+        print(f"🔒 bq membutuhkan login: {msg}", file=sys.stderr)
+        sys.exit(1)
+    if msg.startswith("server tidak terjangkau"):
+        print(f"⚠️  {msg}", file=sys.stderr)
+
+
 def _describe(auth: dict) -> str:
     rec = auth.get("record") or {}
     return (f"{rec.get('email') or rec.get('id')} (role={rec.get('role') or '?'}) "
