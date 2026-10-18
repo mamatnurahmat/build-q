@@ -667,6 +667,17 @@ Config file: ~/.build-q/.env
         help="Run make build & release instead of buildx",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print command without executing")
+    parser.add_argument(
+        "--cloud",
+        action="store_true",
+        help="Build & push via Docker Build Cloud (produk Docker Hub) memakai buildx resmi. "
+             "Kredensial Docker Hub dari PocketBase (bq auth).",
+    )
+    parser.add_argument("--cloud-builder", default=None, metavar="ORG/NAME",
+                        help="Endpoint Docker Build Cloud (default: $CLOUD_BUILDER / loyaltolpi/qoin-build)")
+    parser.add_argument("--cloud-buildx", default=None, metavar="PATH",
+                        help="Path buildx resmi (>= v0.38.0) dengan driver cloud "
+                             "(default: $BQ_BUILDX_BIN / ~/.build-q/bin/docker-buildx)")
 
     # ── Rollout suggestion overrides (dipakai pasca-build sukses) ────────────
     parser.add_argument(
@@ -1337,7 +1348,10 @@ Config file: ~/.build-q/.env
                         print("⚠️ Could not fetch remote info, skipping pre-clone check.", file=sys.stderr)
                 
                 if preview_tag:
-                    from .builder import check_image_exists
+                    if args.cloud:
+                        from .cloud_build import image_exists_on_hub as check_image_exists
+                    else:
+                        from .builder import check_image_exists
                     print(f"🔍 Checking registry for existing image: {preview_tag} ...")
                     if check_image_exists(preview_tag):
                         print(f"✅ Image {preview_tag} already exists in the registry.")
@@ -1463,6 +1477,25 @@ Config file: ~/.build-q/.env
                     rollout_ns=args.ns,
                     rollout_infra=args.infra,
                     rollout_path=args.gitops_path,
+                )
+            elif args.cloud:
+                from .cloud_build import run_cloud_build
+                rc = run_cloud_build(
+                    repo=repo,
+                    ref=ref,
+                    cicd_path=args.cicd,
+                    cicd_dict=cicd_data,
+                    endpoint=args.cloud_builder,
+                    buildx_bin=args.cloud_buildx,
+                    platform=args.platform,
+                    push=args.push,
+                    tag=args.tag,
+                    dockerfile=args.dockerfile,
+                    context=args.context,
+                    extra_build_args=args.build_args,
+                    secrets=args.secret,
+                    dry_run=args.dry_run,
+                    image_check=args.image_check,
                 )
             else:
                 rc = run_build(

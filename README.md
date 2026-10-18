@@ -12,6 +12,7 @@ Selain build, `bq` menyediakan:
 - **Interactive** (`--tui` Jev Agent Planner)
 - **MCP Server** (`--mcp` — 18 tools untuk AI assistant via Model Context Protocol)
 - **Credentials** PocketBase IDP — login SSO GitHub `bq auth login` (sejak v0.1.48), `--pb-login`, `--pb-status`, dll
+- **Cloud build** Docker Build Cloud (`--cloud`, sejak v0.1.50)
 
 Sejak v0.1.17 operasi GitHub berjalan **native** (tanpa `gh` CLI). Sejak v0.1.30 mendukung **PocketBase fallback** untuk `cicd.json`.
 
@@ -981,7 +982,58 @@ bq auth get SOME_B64 --raw > file.b64                     # tanpa decode base64
 
 ---
 
-### 18. Contoh full (customize secret, platform, build-arg)
+### 18. Build via Docker Build Cloud (`--cloud`, sejak v0.1.50)
+
+Build & push image memakai **Docker Build Cloud** (produk Docker Hub, org `loyaltolpi`), dengan
+builder cloud dari laptop. Tidak ada VM tambahan yang terlibat.
+
+```bash
+bq my-service develop --remote --cloud             # build dari git (context = remote repo#ref)
+bq my-service develop --remote --cloud --rebuild   # paksa build walau image sudah ada
+bq --cloud                                         # folder kerja saat ini
+bq my-service v1.2.3 --cloud --cloud-builder loyaltolpi/qoin-build
+bq my-service develop --remote --cloud --dry-run   # tampilkan perintah, tanpa kredensial
+```
+
+**Skip otomatis:** sebelum build, `bq` mengecek apakah image sudah ada di Docker Hub memakai
+kredensial PocketBase Anda. Jika sudah ada, build di-skip. Build hanya berjalan lagi dengan
+`--rebuild`. Dengan `--clone`/`--remote`, pengecekan dilakukan sebelum clone agar tidak membuang waktu.
+
+**Prasyarat**
+- **buildx resmi ≥ v0.38.0** (yang punya driver `cloud`). buildx bawaan OrbStack/Homebrew tidak
+  punya driver itu (`failed to find driver "cloud"`). Pasang ke `~/.build-q/bin/docker-buildx`,
+  atau set `BQ_BUILDX_BIN` / `--cloud-buildx`.
+- Akun Docker Hub yang punya akses ke org builder.
+- Kredensial `DOCKERHUB_USER` / `DOCKERHUB_TOKEN` di PocketBase (lihat `bq auth`).
+
+**Engine lokal bebas:** `docker login` dan build dijalankan lewat buildx resmi; OrbStack,
+Docker Desktop, atau colima sama-sama bisa dipakai.
+
+**Alurnya**
+1. Cek image di Docker Hub (skip bila sudah ada, kecuali `--rebuild`).
+2. Cari buildx resmi (driver `cloud` harus tersedia).
+3. Ambil kredensial Docker Hub dari PocketBase (owner-only).
+4. Login ke `DOCKER_CONFIG` sementara. Token dikirim lewat stdin, tidak masuk argumen.
+5. Buat builder cloud `cloud-<org>-<name>` bila belum ada.
+6. `buildx build --builder <cloud> --push` dari context (remote git `repo#ref`, atau folder kerja).
+7. Logout dan hapus config sementara.
+
+**Keamanan**
+- Token Docker tidak pernah muncul di argumen perintah atau log.
+- `--build-arg GITHUB_*` diambil dari environment, jadi nilainya tidak masuk argumen.
+- Secret `netrc` dan `github_token` / `github_user` tetap dipakai seperti build lokal biasa.
+- Di mode `--remote`, `GIT_AUTH_TOKEN` diteruskan sebagai secret untuk repo privat.
+
+**Konfigurasi (opsional)**
+
+| Env | Flag | Default |
+|---|---|---|
+| `CLOUD_BUILDER` | `--cloud-builder` | `loyaltolpi/qoin-build` |
+| `BQ_BUILDX_BIN` | `--cloud-buildx` | `~/.build-q/bin/docker-buildx` |
+
+---
+
+### 19. Contoh full (customize secret, platform, build-arg)
 
 ```bash
 bq plus-be-service staging \
@@ -1028,6 +1080,7 @@ Subcommands (mutually exclusive):
   --is-match-image ...      Cek drift image K8s live vs GitOps.
   auth login|status|refresh|logout  Login PocketBase devops (SSO GitHub) → ~/.build-q/auth.json.
   auth list | auth get <KEY> > <lokasi>  Daftar / ambil isi credential milik sendiri.
+  --cloud                   Build & push via Docker Build Cloud (buildx resmi), kredensial dari PB.
   --pb-login/status/pull/logout PocketBase IDP operations.
   --mcp                     Run MCP server (stdio transport). 18 tools untuk AI assistant.
   --mcp --mcp-transport sse --mcp-port PORT
