@@ -609,6 +609,7 @@ def run_dockerfile_pr_fix(
     use_jev: bool = True,
     export_csv_path: Optional[str] = None,
     export_md_path: Optional[str] = None,
+    pr_branch: Optional[str] = None,
 ) -> int:
     """Scan remote Dockerfile, jika ada error-level → clone → fix → buat PR.
 
@@ -709,7 +710,7 @@ def run_dockerfile_pr_fix(
 
     head_sha = _sh(["git", "rev-parse", "HEAD"], cwd=str(repo_dir)).stdout.strip()
 
-    branch_name = f"fix/dockerfile-{ts}"
+    branch_name = pr_branch or f"fix/dockerfile-{ts}"
     _sh(["git", "checkout", "-b", branch_name], cwd=str(repo_dir))
 
     # Apply fixes

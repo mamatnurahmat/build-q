@@ -27,6 +27,13 @@ INIT_ARTIFACTS: List[Tuple[str, str]] = [
     ("Dockerfile", "dockerfile"),
 ]
 
+# Artifact pola legacy (netrc via build-args) — dipakai `--pr-fix --init-legacy`.
+# Dockerfile TIDAK di-regenerate: repo legacy masih pakai ARG GITHUB_USER/TOKEN.
+LEGACY_INIT_ARTIFACTS: List[Tuple[str, str]] = [
+    ("Makefile", "makefile_legacy"),
+    ("compose.yaml", "compose_legacy"),
+]
+
 # File-file lama yang harus DIHAPUS saat pr-fix (Fase 3 cleanup).
 # Dihapus via `git rm` supaya masuk PR sebagai perubahan yg jelas.
 LEGACY_ARTIFACTS_TO_REMOVE: List[str] = [

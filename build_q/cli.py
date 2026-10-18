@@ -346,7 +346,8 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--init-legacy",
         action="store_true",
-        help="Scaffold Makefile + compose.yaml pola legacy (GITHUB_USER/TOKEN build-args, auto gh auth token)",
+        help="Scaffold Makefile + compose.yaml pola legacy (GITHUB_USER/TOKEN build-args, auto gh auth token). "
+             "Dengan --pr-fix: regenerate artifact legacy di clone remote → PR (setara --init-legacy --force).",
     )
     parser.add_argument(
         "--init-secrets",
@@ -901,6 +902,7 @@ Config file: ~/.build-q/.env
                         use_jev=use_jev,
                         export_csv_path=getattr(args, "export_csv", None),
                         export_md_path=getattr(args, "export_md", None),
+                        pr_branch=args.pr_branch,
                     ))
                 from .dockerfile_scanner import run_dockerfile_scan_remote
                 sys.exit(run_dockerfile_scan_remote(
@@ -925,7 +927,8 @@ Config file: ~/.build-q/.env
             ok = init_jx(cicd_path=args.cicd, force=args.force)
             sys.exit(0 if ok else 1)
 
-        if args.init_legacy:
+        # `--pr-fix --init-legacy` → mode legacy di dalam pr-fix (bukan scaffold lokal)
+        if args.init_legacy and not args.pr_fix:
             ok = init_legacy(cicd_path=args.cicd, force=args.force)
             sys.exit(0 if ok else 1)
 
@@ -951,6 +954,7 @@ Config file: ~/.build-q/.env
                 dry_run=args.dry_run,
                 keep_workdir=args.keep_workdir,
                 pr_branch=args.pr_branch,
+                legacy=args.init_legacy,
             )
             # Note: --pr-fix now runs webhook SETUP internally (skip bila ada,
             # soft-fail bila error). Flag --cicd-webhook di sini menjadi
