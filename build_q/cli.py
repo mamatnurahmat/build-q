@@ -766,10 +766,11 @@ Config file: ~/.build-q/.env
             ))
 
         if args.tui_pull:
-            from . import tui_catalog
+            from . import kube_contexts, tui_catalog
             load_config()  # hydrate PB_API_* ke os.environ
             tui_catalog.clear_cache()
             cat = tui_catalog.load_catalog(force_refresh=True)
+            cxs, cx_src = kube_contexts.load(force_refresh=True)
             print(
                 f"✅ TUI catalog refreshed from PocketBase:\n"
                 f"   tools    : {len(cat['tools'])}\n"
@@ -777,6 +778,8 @@ Config file: ~/.build-q/.env
                 f"(default: {cat['default_provider']})\n"
                 f"   patterns : {len(cat['patterns'])}\n"
                 f"   risky    : {len(cat['risky'])}\n"
+                f"   kube_cx  : {len(cxs)} context ({cx_src}) "
+                f"→ {kube_contexts.CACHE_FILE}\n"
                 f"   cache    : {tui_catalog.CACHE_FILE}"
             )
             return

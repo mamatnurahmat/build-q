@@ -271,10 +271,13 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
           "build_q_tools":     [ {...}, ... ],
           "build_q_providers": [ {...}, ... ],
           "build_q_patterns":  [ {...}, ... ],
+          "kube_cx":           [ {name, cluster, server, environment, note} ],
+          "namespace":         [ {name, description, kube_cx: "<nama context>"} ],
         }
 
-    Upsert strategy: lookup by unique key (name for tools/providers,
-    field for patterns) → PATCH jika ada, POST jika belum.
+    Upsert strategy: lookup by unique key (name for tools/providers/kube_cx,
+    field for patterns, name+kube_cx for namespace) → PATCH jika ada, POST
+    jika belum.
 
     Return summary {collection: {"created": N, "updated": M, "failed": K}}.
     """
@@ -305,19 +308,37 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
                 return e.code, {}
 
     unique_field = {
-        "build_q_tools":     "name",
-        "build_q_providers": "name",
-        "build_q_patterns":  "field",
+        "build_q_tools":     ("name",),
+        "build_q_providers": ("name",),
+        "build_q_patterns":  ("field",),
+        # Knowledge kube context (lihat kube_contexts.py). `kube_cx` harus
+        # di-upsert sebelum `namespace` agar relation bisa di-resolve.
+        "kube_cx":           ("name",),
+        "namespace":         ("name", "kube_cx"),
     }
 
+    def cx_ids() -> Dict[str, str]:
+        s, resp = http("GET", "/api/collections/kube_cx/records?perPage=500")
+        return {r["name"]: r["id"] for r in resp.get("items", [])} if s == 200 else {}
+
     summary: Dict[str, Dict[str, int]] = {}
-    for coll, records in seed.items():
-        if coll not in unique_field:
+    for coll in unique_field:
+        records = seed.get(coll)
+        if not records:
             continue
-        key = unique_field[coll]
+        keys = unique_field[coll]
+        ids = cx_ids() if coll == "namespace" else {}
         created = updated = failed = 0
         for rec in records:
-            filter_ = urllib.parse.quote(f"{key}='{rec[key]}'", safe="=")
+            if coll == "namespace":
+                # Seed menulis kube_cx = nama context → ganti dgn record id.
+                cx = ids.get(rec.get("kube_cx", ""))
+                if not cx:
+                    failed += 1
+                    continue
+                rec = {**rec, "kube_cx": cx}
+            expr = " && ".join(f"{k}='{rec[k]}'" for k in keys)
+            filter_ = urllib.parse.quote(expr, safe="=")
             s, resp = http("GET", f"/api/collections/{coll}/records?filter={filter_}")
             items = resp.get("items", []) if s == 200 else []
             if items:
@@ -336,4 +357,7 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
         summary[coll] = {"created": created, "updated": updated, "failed": failed}
 
     clear_cache()
+    from . import kube_contexts
+    if kube_contexts.CACHE_FILE.exists():
+        kube_contexts.CACHE_FILE.unlink()
     return summary

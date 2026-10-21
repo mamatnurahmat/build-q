@@ -350,7 +350,7 @@
         },
         "kube_context": {
           "type": "text",
-          "hint": "kube context (mis. hw-pro-p) — pakai dgn --apply-secret"
+          "hint": "kube context hw-dev|hw-pro-p|hw-pro-q|hw-pro-u (auto dari namespace) \u2014 pakai dgn --apply-secret"
         },
         "namespace": {
           "type": "text",
@@ -815,6 +815,118 @@
       "description": "",
       "active": true,
       "order": 16
+    }
+  ],
+  "kube_cx": [
+    {
+      "name": "hw-dev",
+      "cluster": "hw-dev-cluster",
+      "server": "https://10.2.20.121:5443",
+      "environment": "development",
+      "note": "Huawei CCE develop/sandbox + Jenkins X (pipeline CI). Nodepool develop-qoin-*, develop-qoincash-*, sandbox-qoin-*"
+    },
+    {
+      "name": "hw-pro-p",
+      "cluster": "hw-pro-p-cluster",
+      "server": "https://10.7.20.103:5443",
+      "environment": "production",
+      "note": "Huawei CCE production payout + ArgoCD. Nodepool production-payout-nodepool-*"
+    },
+    {
+      "name": "hw-pro-q",
+      "cluster": "hw-pro-q-cluster",
+      "server": "https://10.5.20.23:5443",
+      "environment": "production",
+      "note": "Huawei CCE production Qoin (AP/QA) + staging Qoin. Nodepool production-nodepool-*"
+    },
+    {
+      "name": "hw-pro-u",
+      "cluster": "hw-pro-u-cluster",
+      "server": "https://10.6.20.45:5443",
+      "environment": "production",
+      "note": "Huawei CCE production UE region (ngenwal, saas) + staging ngenwal. Nodepool production-ue-nodepool-*"
+    }
+  ],
+  "namespace": [
+    {
+      "name": "default",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "develop-qoin",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "sandbox-qoin",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "develop-ngenwal",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "develop-payout",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "develop-saas",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "develop-qoinhub",
+      "kube_cx": "hw-dev",
+      "description": ""
+    },
+    {
+      "name": "jenkins-x",
+      "kube_cx": "hw-dev",
+      "description": "Jenkins X (pipeline CI)"
+    },
+    {
+      "name": "production-payout",
+      "kube_cx": "hw-pro-p",
+      "description": ""
+    },
+    {
+      "name": "develop-payout",
+      "kube_cx": "hw-pro-p",
+      "description": ""
+    },
+    {
+      "name": "argocd",
+      "kube_cx": "hw-pro-p",
+      "description": "ArgoCD (cicd-hw.qoin.id/argocd)"
+    },
+    {
+      "name": "production-qoin",
+      "kube_cx": "hw-pro-q",
+      "description": "production-qoin (hw-pro-q)"
+    },
+    {
+      "name": "staging-qoin",
+      "kube_cx": "hw-pro-q",
+      "description": ""
+    },
+    {
+      "name": "production-saas",
+      "kube_cx": "hw-pro-u",
+      "description": ""
+    },
+    {
+      "name": "production-ngenwal",
+      "kube_cx": "hw-pro-u",
+      "description": ""
+    },
+    {
+      "name": "staging-ngenwal",
+      "kube_cx": "hw-pro-u",
+      "description": ""
     }
   ]
 }

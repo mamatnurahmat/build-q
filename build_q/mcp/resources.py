@@ -29,6 +29,12 @@ RESOURCES: dict[str, dict] = {
         "description": "Available tools, providers, and patterns from Jev catalog",
         "mimeType": "application/json",
     },
+    "bq://kube-contexts": {
+        "uri": "bq://kube-contexts",
+        "name": "Kube context ↔ namespace map",
+        "description": "Mapping context Huawei CCE (hw-dev, hw-pro-p/q/u) ke namespace + nodepool",
+        "mimeType": "application/json",
+    },
 }
 
 
@@ -68,5 +74,13 @@ def handle_resource(uri: str) -> dict:
             }
         except Exception as exc:
             return {"error": f"{type(exc).__name__}: {exc}"}
+
+    if uri == "bq://kube-contexts":
+        from build_q import kube_contexts
+        return {
+            "source": kube_contexts.load()[1],
+            "contexts": kube_contexts.knowledge(),
+            "namespaces": kube_contexts.namespace_map(),
+        }
 
     return {"error": f"Unknown resource URI: {uri}"}
