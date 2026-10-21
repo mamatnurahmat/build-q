@@ -59,7 +59,8 @@ class TestToolSchemas:
 class TestResources:
     def test_all_resources_registered(self):
         from build_q.mcp.resources import RESOURCES
-        expected = {"bq://version", "bq://config", "bq://doctor", "bq://catalog"}
+        expected = {"bq://version", "bq://config", "bq://doctor", "bq://catalog",
+                    "bq://kube-contexts"}
         assert set(RESOURCES.keys()) == expected
 
     def test_version_resource(self):

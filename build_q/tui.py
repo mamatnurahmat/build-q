@@ -38,7 +38,7 @@ from rich.table import Table
 from .audit import redact, setup_audit_logger
 from .config import CONFIG_DIR, ENV_FILE, load_config
 from .tool_policy import command_policy
-from . import tui_catalog
+from . import kube_contexts, tui_catalog
 
 audit_log = logging.getLogger("bq-tui")
 HISTORY_FILE = CONFIG_DIR / ".tui-history"
@@ -264,6 +264,12 @@ def extract_params_from_text(user_msg: str, tool_name: str) -> dict:
         if "<" in candidate:
             continue  # required upstream param still missing
         out[pname] = candidate
+
+    # Pass 3: kube_context dari namespace (mapping hw-* di kube_contexts).
+    if "kube_context" in meta["params"] and str(out.get("kube_context", "<")).startswith("<"):
+        ctx, _ = kube_contexts.resolve(str(out.get("namespace", "")))
+        if ctx:
+            out["kube_context"] = ctx
     return out
 
 
@@ -370,13 +376,33 @@ def fill_missing_choice_params(user_msg: str, tool_name: str, provider: Provider
             "instructions": f"Pilih nilai param '{pname}' sesuai request user.",
             "criteria": {opt: f"{pname} = {opt}" for opt in pspec["options"]},
         }
+    # kube_context belum ter-resolve dari namespace → Jev pilih context terdekat.
+    # Namespace ambigu (>1 context di PB) → pilihan dibatasi ke kandidatnya.
+    if "kube_context" in meta["params"] and str(already.get("kube_context", "<")).startswith("<"):
+        choice_qs["kube_context"] = {
+            "type": "choice",
+            "instructions": (
+                "Pilih kube context Huawei CCE terdekat untuk request user, "
+                "berdasarkan namespace/environment/produk yang disebut."
+            ),
+            "criteria": kube_contexts.jev_criteria(
+                kube_contexts.candidates(str(already.get("namespace", ""))) or None,
+            ),
+        }
     if not choice_qs:
         return {}
-    resp = jev_decide({"user_request": redact(user_msg), "tool": tool_name}, choice_qs, provider)
+    state = {"user_request": redact(user_msg), "tool": tool_name}
+    if "kube_context" in choice_qs:
+        state["namespace"] = already.get("namespace", "")
+        state["kube_contexts"] = kube_contexts.knowledge()
+    resp = jev_decide(state, choice_qs, provider)
     out: dict = {}
     for k, v in (resp.get("answers") or {}).items():
         choice = v.get("choice") if isinstance(v, dict) else None
-        if k in choice_qs and choice in meta["params"][k].get("options", []):
+        if k == "kube_context" and k in choice_qs:
+            if choice in choice_qs[k]["criteria"]:
+                out[k] = choice
+        elif k in choice_qs and choice in meta["params"][k].get("options", []):
             out[k] = choice
     return out
 
@@ -555,9 +581,10 @@ def handle_slash(cmd: str, provider_ref: list[Provider]) -> bool:
     if head == "/refresh":
         try:
             cat = catalog(force_refresh=True)
+            cxs, cx_src = kube_contexts.load(force_refresh=True)
             console.print(
                 f"[green]katalog di-refresh ({cat['source']}): "
-                f"{len(cat['tools'])} tools[/green]"
+                f"{len(cat['tools'])} tools · kube_cx ({cx_src}): {len(cxs)} context[/green]"
             )
         except Exception as e:
             console.print(f"[red]refresh gagal:[/red] {e}")
