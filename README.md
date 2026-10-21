@@ -942,6 +942,20 @@ bq --e2e --simulate                        # self-test semua skenario
 bq --e2e --simulate pipeline-build-failed  # laporan lengkap 1 skenario
 ```
 
+**Mode web (`bq --serve`)** — tombol **🔭 E2E** di header, atau ketik di chat
+`/e2e REPO REF` · `/e2e --sim [SKENARIO]`. Rantai tahap terisi live (SSE) lalu tiap tahap
+tampil sebagai kartu (detail, log tail, saran), titik putus di-highlight. Read-only, jadi tetap
+aktif dengan `--serve-no-exec`. API: `POST /api/e2e` `{repo, ref}` | `{simulate}` → `job_id`,
+`GET /api/e2e/stream/<id>` (event `stage` / `report` / `error` / `done`), `GET /api/e2e/scenarios`.
+
+Credential web E2E **stateless & per-user**: klik **🔐 Login** (SSO GitHub/Dex ke PocketBase, sama
+dengan `bq auth login`); token disimpan di browser dan dikirim sebagai header `X-PB-Token`. Tiap
+request, server membaca secret milik user itu langsung dari PocketBase — `GITHUB_TOKEN`,
+`KUBECONFIG*_B64` (kubeconfig ditulis ke dir temp 0700 selama job, lalu dihapus), `ARGOCD_TOKEN`,
+dan config (`GITHUB_ORG`, `JX_KUBE_CONTEXT`, `ARGOCD_*`, …). Tidak ada fallback ke `.env`,
+`auth.json`, `.pb-cache.json`, `~/.kube/config`, atau env proses server; credential yang tidak
+ada di PocketBase user → tahap terkait dilaporkan tidak bisa diperiksa.
+
 Config baru di `~/.build-q/.env` (opsional): `ARGOCD_KUBE_CONTEXT=hw-pro-p`, `ARGOCD_NAMESPACE=argocd`.
 
 **Cluster tak terjangkau (sejak v0.1.48):** bila kubectl ke `ARGOCD_KUBE_CONTEXT` timeout, tahap

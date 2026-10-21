@@ -16,6 +16,14 @@ M1 scope (sinkronus):
   - POST /api/execute     → {cmd, confirm, risky} → run subprocess sync
   - POST /api/provider    → {name} → switch provider runtime
 
+E2E CI/CD (`bq --e2e` di web, read-only):
+  - GET  /api/e2e/scenarios     → daftar skenario simulasi
+  - POST /api/e2e               → {repo, ref} | {simulate} → job_id
+                                  (wajib header X-PB-Token: token PocketBase user;
+                                  GITHUB_TOKEN & KUBECONFIG*_B64 diambil per-request
+                                  dari PB milik user — lihat user_creds.py)
+  - GET  /api/e2e/stream/<id>   → SSE `stage` / `report` / `error` / `done`
+
 M2 (next): async subprocess + SSE stream.
 """
 from __future__ import annotations
@@ -122,6 +130,85 @@ def _spawn_job(cmd: str) -> str:
     return job_id
 
 
+# ─── E2E CI/CD (bq --e2e) — analisa in-process + SSE progres per tahap ─────
+# Satu analisa sekaligus: simulasi mem-patch global modul `e2e`
+# (mock.patch.object), sehingga analisa sungguhan yang berjalan paralel
+# akan ikut membaca dunia tiruan.
+_E2E_RUN_LOCK = threading.Lock()
+
+
+def _e2e_payload(report: Any) -> dict:
+    from . import e2e
+    d = report.to_dict()
+    d["verdict_line"] = e2e.verdict_line(report)
+    d["exit_code"] = e2e.exit_code(report)
+    d["text"] = e2e.render_text(report)
+    return d
+
+
+def _spawn_e2e_job(creds: Any, *, repo: str = "", ref: str = "", simulate: str = "") -> str:
+    """Jalankan `e2e.analyze` / `e2e_sim.simulate` di thread; event ke queue.
+
+    `creds` (`user_creds.UserCreds`) = credential PocketBase milik user yang
+    me-request; analisa sungguhan HANYA memakai credential ini (stateless).
+
+    Event queue: ("stage", {"name"}), ("report", {...}), ("error", {"error"}),
+    lalu sentinel None.
+    """
+    _reap_old_jobs()
+    # Job id 128-bit: EventSource tidak bisa kirim header, jadi stream hanya
+    # dilindungi oleh id yang tak bisa ditebak.
+    job_id = uuid.uuid4().hex
+    q: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=1_000)
+    label = f"--simulate {simulate}" if simulate else f"{repo} {ref}"
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "cmd": f"bq --e2e {label}", "proc": None, "q": q, "kind": "e2e",
+            "returncode": None, "done_at": None, "started_at": time.time(),
+        }
+
+    def _worker() -> None:
+        rc: Optional[int] = None
+        try:
+            on_stage = lambda name: q.put(("stage", {"name": name}))  # noqa: E731
+            with _E2E_RUN_LOCK:
+                if simulate:
+                    from .e2e_sim import simulate as sim_run, verify
+                    report = sim_run(simulate, on_stage=on_stage)
+                    payload = _e2e_payload(report)
+                    payload["simulate"] = simulate
+                    payload["sim_problems"] = verify(simulate, report)
+                else:
+                    from . import e2e, user_creds
+                    with user_creds.kubeconfig_path(creds) as kubeconfig, \
+                            e2e.use_credentials(github_token=creds.get("GITHUB_TOKEN"),
+                                                kubeconfig=kubeconfig):
+                        report = e2e.analyze(repo, ref, config=user_creds.user_config(creds),
+                                             on_stage=on_stage)
+                    payload = _e2e_payload(report)
+            rc = payload["exit_code"]
+            q.put(("report", payload))
+            _audit({
+                "event": "e2e", "job_id": job_id, "user": creds.email, "repo": payload["repo"],
+                "ref": payload["ref"], "simulate": simulate or None,
+                "verdict": payload["verdict"], "break_point": payload["break_point"],
+            })
+        except Exception as e:  # analisa tak boleh menjatuhkan server
+            rc = 1
+            q.put(("error", {"error": redact(str(e))}))
+            _audit({"event": "e2e_error", "job_id": job_id, "user": creds.email,
+                    "error": redact(str(e))})
+        finally:
+            q.put(None)
+            with _JOBS_LOCK:
+                if job_id in _JOBS:
+                    _JOBS[job_id]["returncode"] = rc
+                    _JOBS[job_id]["done_at"] = time.time()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return job_id
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
@@ -221,6 +308,11 @@ def make_handler(config: dict) -> type:
             if route.startswith("/api/stream/"):
                 job_id = route.split("/api/stream/", 1)[1].strip("/")
                 return self._api_stream(job_id)
+            if route == "/api/e2e/scenarios":
+                return self._api_e2e_scenarios()
+            if route.startswith("/api/e2e/stream/"):
+                job_id = route.split("/api/e2e/stream/", 1)[1].strip("/")
+                return self._api_e2e_stream(job_id)
             return _json_response(self, 404, {"error": f"not found: {route}"})
 
         def do_POST(self):
@@ -237,6 +329,8 @@ def make_handler(config: dict) -> type:
                 return self._api_execute_stream(body)
             if route == "/api/provider":
                 return self._api_provider(body)
+            if route == "/api/e2e":
+                return self._api_e2e(body)
             return _json_response(self, 404, {"error": f"not found: {route}"})
 
         # ── Routes ──────────────────────────────────────────────────────────
@@ -264,6 +358,9 @@ def make_handler(config: dict) -> type:
                 "allow_exec": config.get("allow_exec", True),
                 "host": config.get("host", "127.0.0.1"),
                 "auth_required": bool(config.get("token")),
+                # Login PocketBase user (SSO) dilakukan langsung dari browser;
+                # credential /api/e2e diambil per-request dari PB user tsb.
+                "pb_url": config.get("pb_url", ""),
             })
 
         def _api_catalog(self):
@@ -510,6 +607,87 @@ def make_handler(config: dict) -> type:
                     "event": "execute_stream_abort", "job_id": job_id,
                 })
 
+        # ── E2E CI/CD (read-only — tetap aktif walau --serve-no-exec) ────────
+        def _api_e2e_scenarios(self):
+            from .e2e_sim import SCENARIOS
+            _json_response(self, 200, {"scenarios": [
+                {"name": sc.name, "title": sc.title,
+                 "break_point": sc.break_point, "verdict": sc.verdict}
+                for sc in SCENARIOS.values()
+            ]})
+
+        def _api_e2e(self, body: dict):
+            """{repo, ref} | {simulate} → job_id; progres via /api/e2e/stream/<id>."""
+            simulate = (body.get("simulate") or "").strip()
+            repo = (body.get("repo") or "").strip()
+            ref = (body.get("ref") or "").strip()
+            if simulate:
+                from .e2e_sim import SCENARIOS
+                if simulate not in SCENARIOS:
+                    return _json_response(self, 400, {
+                        "error": f"skenario tidak dikenal: {simulate}",
+                    })
+            elif not repo or not ref:
+                return _json_response(self, 400, {
+                    "error": "repo & ref wajib (atau simulate=<skenario>)",
+                })
+            elif any(c.isspace() for c in repo + ref):
+                return _json_response(self, 400, {"error": "repo/ref tidak boleh mengandung spasi"})
+            # Credential diambil per-request dari PocketBase milik user (stateless)
+            from . import user_creds
+            try:
+                creds = user_creds.resolve(self.headers.get("X-PB-Token", ""),
+                                           base_url=config.get("pb_url", ""))
+            except user_creds.UserAuthError as e:
+                return _json_response(self, 401, {"error": str(e), "pb_login": True})
+            except user_creds.PBAPIError as e:
+                return _json_response(self, 502, {"error": f"PocketBase: {e}"})
+            job_id = _spawn_e2e_job(creds, repo=repo, ref=ref, simulate=simulate)
+            _audit({"event": "e2e_start", "job_id": job_id, "user": creds.email,
+                    "repo": repo, "ref": ref, "simulate": simulate or None})
+            _json_response(self, 200, {
+                "job_id": job_id,
+                "stream_url": f"/api/e2e/stream/{job_id}",
+            })
+
+        def _api_e2e_stream(self, job_id: str):
+            """SSE: event `stage` per tahap, `report` (E2EReport JSON) / `error`, lalu `done`."""
+            with _JOBS_LOCK:
+                job = _JOBS.get(job_id)
+            if not job or job.get("kind") != "e2e":
+                return _json_response(self, 404, {"error": f"job not found: {job_id}"})
+            q = job["q"]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-cache, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "keep-alive")
+            self.end_headers()
+            try:
+                self.wfile.write(b"retry: 2000\n\n")
+                self.wfile.flush()
+                while True:
+                    try:
+                        item = q.get(timeout=30)
+                    except queue.Empty:
+                        self.wfile.write(b": ping\n\n")
+                        self.wfile.flush()
+                        continue
+                    if item is None:
+                        with _JOBS_LOCK:
+                            rc = _JOBS.get(job_id, {}).get("returncode")
+                        self.wfile.write(
+                            f"event: done\ndata: {json.dumps({'exit': rc})}\n\n".encode()
+                        )
+                        self.wfile.flush()
+                        return
+                    event, data = item
+                    payload = json.dumps(data, default=str)
+                    self.wfile.write(f"event: {event}\ndata: {payload}\n\n".encode())
+                    self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # analisa tetap selesai di thread; hasil dibuang saat reap
+
         def _api_provider(self, body: dict):
             from . import tui
             name = (body.get("name") or "").strip().lower()
@@ -548,11 +726,13 @@ def run_serve(
     from .tui import load_env
     load_env()
 
+    from .pb_api import _base_url
     config = {
         "host": host,
         "port": port,
         "allow_exec": allow_exec,
         "token": token,
+        "pb_url": _base_url(),
     }
     handler_cls = make_handler(config)
     server = ThreadingHTTPServer((host, port), handler_cls)
@@ -563,6 +743,7 @@ def run_serve(
     print(f"   host       : {host}")
     print(f"   exec mode  : {'enabled' if allow_exec else 'disabled (--serve-no-exec)'}")
     print(f"   auth       : {'Bearer token required' if token else 'none (localhost trust)'}")
+    print(f"   e2e creds  : per-user dari PocketBase {config['pb_url']} (login SSO di browser)")
     print(f"   rate limit : {_RATE_MAX} req/menit per IP (API)")
     print(f"   audit log  : {AUDIT_LOG}")
     if host == "0.0.0.0":

@@ -61,59 +61,68 @@ def load_config() -> Dict[str, Any]:
     ):
         pb_api.hydrate_env(quiet=True)
 
+    return build_config(os.getenv)
+
+
+def build_config(getenv) -> Dict[str, Any]:
+    """Susun dict config dari `getenv(key, default)` — tanpa efek samping.
+
+    `load_config()` memakai `os.getenv`; `bq --serve` memakai secret PocketBase
+    milik user yang me-request (lihat `user_creds.user_config`).
+    """
     return {
         "builder": {
-            "name": os.getenv("BUILDER_NAME", "mybuilder"),
-            "memory": os.getenv("DEFAULT_MEMORY", "4g"),
-            "cpu_period": os.getenv("DEFAULT_CPU_PERIOD", "100000"),
-            "cpu_quota": os.getenv("DEFAULT_CPU_QUOTA", "200000"),
+            "name": getenv("BUILDER_NAME", "mybuilder"),
+            "memory": getenv("DEFAULT_MEMORY", "4g"),
+            "cpu_period": getenv("DEFAULT_CPU_PERIOD", "100000"),
+            "cpu_quota": getenv("DEFAULT_CPU_QUOTA", "200000"),
         },
         "registry": {
-            "url": os.getenv("REGISTRY_URL", ""),
+            "url": getenv("REGISTRY_URL", ""),
         },
         "git": {
-            "ssh_prefix": os.getenv("GIT_SSH_PREFIX", "git@github.com:"),
-            "org": os.getenv("GITHUB_ORG", ""),
+            "ssh_prefix": getenv("GIT_SSH_PREFIX", "git@github.com:"),
+            "org": getenv("GITHUB_ORG", ""),
         },
         "webhook": {
-            "trigger_url": os.getenv("WEBHOOK_TRIGGER_URL", "https://cicd-hw.qoin.id/trigger"),
-            "trigger_token": os.getenv("WEBHOOK_TRIGGER_TOKEN", ""),
-            "k8s_context": os.getenv("JX_KUBE_CONTEXT", "hw-dev"),
-            "k8s_namespace": os.getenv("JX_KUBE_NAMESPACE", "jenkins-x"),
-            "k8s_secret": os.getenv("JX_TOKEN_SECRET", "webhook-trigger-token"),
+            "trigger_url": getenv("WEBHOOK_TRIGGER_URL", "https://cicd-hw.qoin.id/trigger"),
+            "trigger_token": getenv("WEBHOOK_TRIGGER_TOKEN", ""),
+            "k8s_context": getenv("JX_KUBE_CONTEXT", "hw-dev"),
+            "k8s_namespace": getenv("JX_KUBE_NAMESPACE", "jenkins-x"),
+            "k8s_secret": getenv("JX_TOKEN_SECRET", "webhook-trigger-token"),
         },
         "pr_fix": {
-            "branch_prefix": os.getenv("PR_FIX_BRANCH_PREFIX", "fix/jx-init-"),
-            "base_workdir": os.getenv("PR_FIX_BASE_WORKDIR", "/tmp"),
+            "branch_prefix": getenv("PR_FIX_BRANCH_PREFIX", "fix/jx-init-"),
+            "base_workdir": getenv("PR_FIX_BASE_WORKDIR", "/tmp"),
         },
         "github": {
-            "use_cli": _parse_bool(os.getenv("GH_CLI", "false"), default=False),
-            "user": os.getenv("GITHUB_USER", ""),
-            "token": os.getenv("GITHUB_TOKEN", ""),
-            "api_base": os.getenv("GITHUB_API_BASE", "https://api.github.com"),
+            "use_cli": _parse_bool(getenv("GH_CLI", "false"), default=False),
+            "user": getenv("GITHUB_USER", ""),
+            "token": getenv("GITHUB_TOKEN", ""),
+            "api_base": getenv("GITHUB_API_BASE", "https://api.github.com"),
         },
         "dockerhub": {
-            "user": os.getenv("DOCKERHUB_USER", ""),
-            "org": os.getenv("DOCKERHUB_ORG", ""),
-            "token": os.getenv("DOCKERHUB_TOKEN", ""),
+            "user": getenv("DOCKERHUB_USER", ""),
+            "org": getenv("DOCKERHUB_ORG", ""),
+            "token": getenv("DOCKERHUB_TOKEN", ""),
         },
         "argocd": {
-            "k8s_context": os.getenv("ARGOCD_KUBE_CONTEXT", "hw-pro-p"),
-            "k8s_namespace": os.getenv("ARGOCD_NAMESPACE", "argocd"),
+            "k8s_context": getenv("ARGOCD_KUBE_CONTEXT", "hw-pro-p"),
+            "k8s_namespace": getenv("ARGOCD_NAMESPACE", "argocd"),
             # Fallback bila cluster tak terjangkau kubectl: REST API ArgoCD
             # (sama dgn MCP argocd / skill argocd-app). Token SSO dari env
             # ARGOCD_TOKEN, atau key ARGOCD_TOKEN di ARGOCD_AUTH_FILE.
-            "api_url": os.getenv("ARGOCD_API_URL", "https://cicd-hw.qoin.id/argocd"),
-            "token": os.getenv("ARGOCD_TOKEN", ""),
-            "auth_file": os.getenv("ARGOCD_AUTH_FILE", "~/.pi/agent/auth.json"),
+            "api_url": getenv("ARGOCD_API_URL", "https://cicd-hw.qoin.id/argocd"),
+            "token": getenv("ARGOCD_TOKEN", ""),
+            "auth_file": getenv("ARGOCD_AUTH_FILE", "~/.pi/agent/auth.json"),
             # Token kedaluwarsa → jalankan `argocd-app token-login` (TTY saja).
-            "auto_login": _parse_bool(os.getenv("ARGOCD_AUTO_LOGIN", "true"), default=True),
+            "auto_login": _parse_bool(getenv("ARGOCD_AUTO_LOGIN", "true"), default=True),
         },
         "gitops": {
-            "repo": os.getenv("GITOPS_REPO", "Qoin-Digital-Indonesia/gitops"),
-            "branch": os.getenv("GITOPS_BRANCH", "main"),
-            "infra": os.getenv("GITOPS_INFRA", "cce"),
-            "ns_suffix": os.getenv("NS_SUFFIX", "qoin"),
+            "repo": getenv("GITOPS_REPO", "Qoin-Digital-Indonesia/gitops"),
+            "branch": getenv("GITOPS_BRANCH", "main"),
+            "infra": getenv("GITOPS_INFRA", "cce"),
+            "ns_suffix": getenv("NS_SUFFIX", "qoin"),
         },
     }
 
