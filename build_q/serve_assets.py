@@ -101,6 +101,41 @@ INDEX_HTML = r"""<!DOCTYPE html>
   footer button { align-self: flex-end; }
 
   .usage { color: var(--muted); font-size: 11px; margin-top: 6px; font-family: var(--mono); }
+
+  /* ── E2E CI/CD ───────────────────────────────────────────────────── */
+  .e2e-form { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; align-items: center; }
+  .e2e-form input, .e2e-form select {
+    background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 4px; padding: 5px 8px; font-family: var(--mono); font-size: 12px;
+  }
+  .e2e-form input { min-width: 200px; }
+  .e2e-form .or { color: var(--muted); font-size: 12px; }
+  .e2e-head { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .e2e-chain { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 10px; }
+  .e2e-chain .node {
+    padding: 4px 10px; border-radius: 999px; border: 1px solid var(--border);
+    font-size: 12px; font-family: var(--mono); background: var(--bg);
+  }
+  .e2e-chain .arrow { color: var(--muted); }
+  .e2e-chain .node.bp { outline: 2px solid currentColor; outline-offset: 1px; }
+  .st-ok { color: var(--green); border-color: var(--green) !important; }
+  .st-warn, .st-running { color: var(--yellow); border-color: var(--yellow) !important; }
+  .st-fail { color: var(--red); border-color: var(--red) !important; }
+  .st-skip, .st-pending { color: var(--muted); }
+  .st-active { color: var(--accent); border-color: var(--accent) !important; }
+  .e2e-stage {
+    margin-top: 8px; border: 1px solid var(--border); border-left-width: 3px;
+    border-radius: 6px; padding: 8px 12px; background: var(--bg); font-size: 13px;
+  }
+  .e2e-stage summary { cursor: pointer; font-weight: 600; }
+  .e2e-stage summary .sum { font-weight: 400; color: var(--fg); }
+  .e2e-stage ul { margin: 6px 0 0 0; padding-left: 18px; font-family: var(--mono); font-size: 12px; }
+  .e2e-stage .hint { margin-top: 4px; font-size: 12px; }
+  .e2e-stage pre {
+    margin: 6px 0 0 0; padding: 6px 8px; background: #010409; border-radius: 4px;
+    font-size: 11px; white-space: pre-wrap; max-height: 220px; overflow-y: auto; color: var(--muted);
+  }
+  .e2e-verdict { margin-top: 10px; font-weight: 600; }
 </style>
 </head>
 <body>
@@ -108,6 +143,9 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <h1>Jev Web Chat</h1>
   <span class="meta" id="meta">connecting…</span>
   <span class="spacer"></span>
+  <span class="meta" id="pb-user"></span>
+  <button id="btn-pb" title="Login PocketBase (SSO GitHub) — credential E2E diambil dari akun Anda">🔐 Login</button>
+  <button id="btn-e2e" title="Analisa CI/CD end-to-end: trigger → pipeline → GitOps → ArgoCD">🔭 E2E</button>
   <button id="btn-export" title="Export chat ke Markdown">📄 Export</button>
   <button id="btn-clear" title="Hapus riwayat chat">🗑 Clear</button>
   <label class="meta" for="provider-select">provider</label>
@@ -118,7 +156,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <footer>
   <form id="chat-form">
-    <textarea id="input" placeholder="Ketik request natural (ID/EN) — contoh: bootstrap pay-be-topup develop ke gitops cce production-qoin" autofocus></textarea>
+    <textarea id="input" placeholder="Ketik request natural (ID/EN) — contoh: bootstrap pay-be-topup develop ke gitops cce production-qoin · /e2e REPO REF · /e2e --sim [SKENARIO]" autofocus></textarea>
     <button type="submit" id="send-btn">Kirim</button>
   </form>
 </footer>
@@ -142,11 +180,19 @@ const providerSelect = $('#provider-select');
 function getToken() { return localStorage.getItem('bq_serve_token') || ''; }
 
 async function api(path, opts) {
-  const headers = {'Content-Type': 'application/json'};
+  opts = Object.assign({}, opts || {});
+  const headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
   const tok = getToken();
   if (tok) headers['Authorization'] = 'Bearer ' + tok;
-  const r = await fetch(path, Object.assign({ headers }, opts || {}));
+  opts.headers = headers;
+  const r = await fetch(path, opts);
   const data = await r.json().catch(() => ({ error: 'invalid JSON' }));
+  if (r.status === 401 && data.pb_login) {
+    pbLogout();
+    const err = new Error(data.error || 'login PocketBase dibutuhkan');
+    err.pbLogin = true;
+    throw err;
+  }
   if (r.status === 401) {
     const inp = prompt('Server butuh Bearer token. Masukkan token:');
     if (inp) { localStorage.setItem('bq_serve_token', inp); return api(path, opts); }
@@ -177,9 +223,102 @@ function appendMsg(role, builder) {
 
 function fmtPct(x) { return (x * 100).toFixed(1) + '%'; }
 
+// ─── Login PocketBase user (SSO GitHub via Dex) — credential E2E per-user ──
+// Alur sama dengan `bq auth login` (realtime @oauth2 + PKCE dari server).
+// Token disimpan di browser ini saja; server tidak menyimpan apa pun.
+const PB_AUTH_KEY = 'bq_pb_auth';
+const PB_COLLECTION = 'devops_users';
+let pbUrl = '';
+
+function jwtExp(token) {
+  try {
+    const p = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    return JSON.parse(atob(p + '='.repeat((4 - p.length % 4) % 4))).exp || 0;
+  } catch (_) { return 0; }
+}
+function pbAuth() {
+  try {
+    const a = JSON.parse(localStorage.getItem(PB_AUTH_KEY) || 'null');
+    return a && a.token && jwtExp(a.token) * 1000 > Date.now() ? a : null;
+  } catch (_) { return null; }
+}
+function pbLogout() {
+  try { localStorage.removeItem(PB_AUTH_KEY); } catch (_) {}
+  renderPbUser();
+}
+function renderPbUser() {
+  const a = pbAuth();
+  $('#pb-user').textContent = a ? '👤 ' + (a.email || a.id) : '';
+  $('#btn-pb').textContent = a ? 'Logout' : '🔐 Login';
+}
+
+function pbLoginSSO() {
+  if (!pbUrl) return Promise.reject(new Error('PocketBase URL tidak diketahui (cek /api/health)'));
+  // Popup dibuka sinkron di handler klik agar tidak diblokir browser.
+  const popup = window.open('', 'bq-pb-oauth2', 'width=520,height=680');
+  return new Promise((resolve, reject) => {
+    let es, timer;
+    const finish = (err, val) => {
+      clearTimeout(timer);
+      if (es) es.close();
+      if (popup && !popup.closed) popup.close();
+      err ? reject(err) : resolve(val);
+    };
+    timer = setTimeout(() => finish(new Error('timeout login SSO (5 menit)')), 300000);
+    fetch(pbUrl + '/api/collections/' + PB_COLLECTION + '/auth-methods')
+      .then(r => r.json())
+      .then(methods => {
+        const providers = ((methods.oauth2 || {}).providers) || [];
+        const prov = providers.find(p => p.name === 'oidc') || providers[0];
+        if (!prov) throw new Error('provider OAuth2 tidak tersedia');
+        const redirect = pbUrl + '/api/oauth2-redirect';
+        es = new EventSource(pbUrl + '/api/realtime');
+        es.addEventListener('PB_CONNECT', async (ev) => {
+          try {
+            const clientId = JSON.parse(ev.data).clientId;
+            await fetch(pbUrl + '/api/realtime', { method: 'POST',
+              headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({ clientId, subscriptions: ['@oauth2'] })});
+            const url = new URL(prov.authURL + encodeURIComponent(redirect));
+            url.searchParams.set('state', clientId);
+            if (popup && !popup.closed) popup.location = url.toString();
+            else window.open(url.toString(), 'bq-pb-oauth2');
+            es.addEventListener('@oauth2', async (ev2) => {
+              try {
+                const msg = JSON.parse(ev2.data || '{}');
+                if (msg.error) throw new Error('OAuth2 ditolak: ' + msg.error);
+                if (msg.state !== clientId) throw new Error('state OAuth2 tidak cocok');
+                const r = await fetch(pbUrl + '/api/collections/' + PB_COLLECTION + '/auth-with-oauth2', {
+                  method: 'POST', headers: {'Content-Type': 'application/json'},
+                  body: JSON.stringify({ provider: prov.name, code: msg.code,
+                    codeVerifier: prov.codeVerifier, redirectURL: redirect,
+                    createData: { role: 'view' } })});
+                const d = await r.json();
+                if (!r.ok || !d.token) throw new Error(d.message || ('HTTP ' + r.status));
+                const rec = d.record || {};
+                const auth = { token: d.token, id: rec.id, email: rec.email || '' };
+                localStorage.setItem(PB_AUTH_KEY, JSON.stringify(auth));
+                renderPbUser();
+                finish(null, auth);
+              } catch (e) { finish(e); }
+            });
+          } catch (e) { finish(e); }
+        });
+        es.onerror = () => { if (es.readyState === EventSource.CLOSED) finish(new Error('koneksi realtime PocketBase terputus')); };
+      })
+      .catch(e => finish(e));
+  });
+}
+
+$('#btn-pb').addEventListener('click', () => {
+  if (pbAuth()) return pbLogout();
+  pbLoginSSO().catch(e => alert('login gagal: ' + e.message));
+});
+
 async function loadHealth() {
   try {
     const h = await api('/api/health');
+    pbUrl = h.pb_url || '';
     $('#meta').textContent = `v${h.version} · ${h.provider.name || '?'} · ${h.provider.model || '?'}`;
   } catch (e) {
     $('#meta').textContent = 'health error';
@@ -377,6 +516,189 @@ function renderBotResponse(parent, data) {
   });
 }
 
+// ─── E2E CI/CD: trigger → pipeline → GitOps → ArgoCD (read-only) ─────────
+const E2E_STAGES = [
+  ['source', 'Source'], ['trigger', 'Trigger'], ['pipeline', 'Pipeline'],
+  ['gitops', 'GitOps'], ['argocd', 'ArgoCD'],
+];
+const E2E_ICON = { ok: '✅', warn: '⚠️', fail: '❌', skip: '⏭️', running: '⏳' };
+let e2eScenarios = null;
+
+async function loadE2EScenarios() {
+  if (!e2eScenarios) e2eScenarios = (await api('/api/e2e/scenarios')).scenarios;
+  return e2eScenarios;
+}
+
+function withToken(url) {
+  const tok = getToken();
+  return tok ? url + (url.includes('?') ? '&' : '?') + 'token=' + encodeURIComponent(tok) : url;
+}
+
+function renderE2EChain(chain, stages, activeKey, bpKey) {
+  chain.innerHTML = '';
+  E2E_STAGES.forEach(([key, title], i) => {
+    if (i) chain.appendChild(el('span', 'arrow', '→'));
+    const st = stages[key];
+    let cls = 'st-pending', icon = '○';
+    if (st) { cls = 'st-' + st.status; icon = E2E_ICON[st.status] || '?'; }
+    else if (key === activeKey) { cls = 'st-active'; icon = '⏳'; }
+    const node = el('span', 'node ' + cls + (key === bpKey ? ' bp' : ''), `${icon} ${st ? st.title : title}`);
+    chain.appendChild(node);
+  });
+}
+
+function renderE2EStage(s, isBp) {
+  const box = el('details', 'e2e-stage st-' + s.status);
+  if (isBp || s.status === 'fail' || s.status === 'warn') box.open = true;
+  const sum = el('summary');
+  sum.appendChild(document.createTextNode(`${E2E_ICON[s.status] || ''} ${s.title}: `));
+  sum.appendChild(el('span', 'sum', s.summary || ''));
+  box.appendChild(sum);
+  if (s.details && s.details.length) {
+    const ul = el('ul');
+    s.details.forEach(d => ul.appendChild(el('li', '', d)));
+    box.appendChild(ul);
+  }
+  const logTail = s.data && s.data.log_tail;
+  if (logTail) box.appendChild(el('pre', '', String(logTail).trimEnd()));
+  (s.hints || []).forEach(h => box.appendChild(el('div', 'hint', '💡 ' + h)));
+  return box;
+}
+
+async function runE2E(parent, req) {
+  const label = req.simulate ? `🧪 simulasi ${req.simulate}` : `${req.repo} @ ${req.ref}`;
+  parent.appendChild(el('div', 'e2e-head', '🔭 E2E CI/CD — ' + label));
+  const chain = el('div', 'e2e-chain');
+  parent.appendChild(chain);
+  const stages = {};
+  renderE2EChain(chain, stages, 'source', null);
+  const body = el('div');
+  parent.appendChild(body);
+  try {
+    const auth = pbAuth();
+    if (!auth) {
+      const err = new Error('Login PocketBase dulu — credential E2E (GITHUB_TOKEN, kubeconfig) diambil dari akun Anda.');
+      err.pbLogin = true;
+      throw err;
+    }
+    const spawn = await api('/api/e2e', { method: 'POST', body: JSON.stringify(req),
+      headers: { 'X-PB-Token': auth.token } });
+    const es = new EventSource(withToken(spawn.stream_url));
+    es.addEventListener('stage', (ev) => {
+      renderE2EChain(chain, stages, JSON.parse(ev.data).name, null);
+      chat.scrollTop = chat.scrollHeight;
+    });
+    es.addEventListener('report', (ev) => {
+      const r = JSON.parse(ev.data);
+      r.stages.forEach(s => { stages[s.key] = s; });
+      renderE2EChain(chain, stages, null, r.break_point);
+      if (r.sha) {
+        parent.insertBefore(el('div', 'e2e-head',
+          `commit ${r.sha.slice(0, 7)} · ENV=${r.env} · image ${r.image}:${r.expected_tag}`), chain);
+      }
+      r.stages.forEach(s => body.appendChild(renderE2EStage(s, s.key === r.break_point)));
+      const vcls = r.verdict === 'healthy' ? 'st-ok' : (r.verdict === 'broken' ? 'st-fail' : 'st-warn');
+      body.appendChild(el('div', 'e2e-verdict ' + vcls, r.verdict_line));
+      if (r.simulate) {
+        const ok = !(r.sim_problems || []).length;
+        body.appendChild(el('div', 'usage', ok ? '🧪 sesuai harapan skenario'
+          : '🧪 tidak sesuai skenario: ' + r.sim_problems.join('; ')));
+      }
+      const copy = el('button', 'secondary', 'Copy laporan');
+      copy.style.marginTop = '8px';
+      copy.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(r.text);
+        copy.textContent = '✓ copied';
+        setTimeout(() => copy.textContent = 'Copy laporan', 1200);
+      });
+      body.appendChild(copy);
+      pushHistory('bot', { tool: 'e2e', confidence: 1, preview: 'bq --e2e ' +
+        (r.simulate ? '--simulate ' + r.simulate : `${r.repo} ${r.ref}`),
+        exit: r.exit_code, output: r.text });
+      chat.scrollTop = chat.scrollHeight;
+    });
+    es.addEventListener('error', (ev) => {
+      if (ev.data) body.appendChild(el('div', 'st-fail', 'error: ' + JSON.parse(ev.data).error));
+    });
+    es.addEventListener('done', () => es.close());
+    es.onerror = () => es.close();
+  } catch (e) {
+    body.appendChild(el('div', 'st-fail', 'error: ' + e.message));
+    if (e.pbLogin) {
+      const login = el('button', '', '🔐 Login PocketBase & ulangi');
+      login.style.marginTop = '8px';
+      login.addEventListener('click', () => pbLoginSSO().then(() => {
+        parent.innerHTML = '';
+        runE2E(parent, req);
+      }).catch(err => alert('login gagal: ' + err.message)));
+      body.appendChild(login);
+    }
+  }
+}
+
+async function openE2EForm() {
+  appendMsg('bot', (m) => {
+    m.appendChild(el('div', '', '🔭 Analisa CI/CD end-to-end (read-only): trigger → pipeline → GitOps → ArgoCD'));
+    const form = el('form', 'e2e-form');
+    const repo = el('input'); repo.placeholder = 'repo (mis. pay-be-topup-manager)';
+    const ref = el('input'); ref.placeholder = 'ref (develop / v1.2.3)'; ref.style.minWidth = '140px';
+    const go = el('button', '', 'Analisa');
+    const sim = document.createElement('select');
+    sim.appendChild(new Option('— simulasi —', ''));
+    const simBtn = el('button', 'secondary', '🧪 Simulasi');
+    simBtn.type = 'button';
+    [repo, ref, go, el('span', 'or', 'atau'), sim, simBtn].forEach(n => form.appendChild(n));
+    m.appendChild(form);
+    const out = el('div');
+    m.appendChild(out);
+    loadE2EScenarios().then(list => list.forEach(sc =>
+      sim.appendChild(new Option(`${sc.name} — ${sc.title}`, sc.name)))).catch(() => {});
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      if (!repo.value.trim() || !ref.value.trim()) return;
+      const res = el('div'); out.appendChild(res);
+      runE2E(res, { repo: repo.value.trim(), ref: ref.value.trim() });
+    });
+    simBtn.addEventListener('click', () => {
+      if (!sim.value) return;
+      const res = el('div'); out.appendChild(res);
+      runE2E(res, { simulate: sim.value });
+    });
+    setTimeout(() => repo.focus(), 0);
+  });
+}
+
+// `/e2e REPO REF` · `/e2e --sim [SKENARIO]` → true bila pesan ditangani di sini
+async function handleE2ECommand(msg) {
+  const parts = msg.split(/\s+/);
+  if (parts[0] !== '/e2e') return false;
+  if (parts.length === 1) { openE2EForm(); return true; }
+  if (parts[1] === '--sim' || parts[1] === '--simulate') {
+    if (!parts[2]) {
+      appendMsg('bot', (m) => {
+        m.appendChild(el('div', '', 'Skenario simulasi — ketik /e2e --sim <nama>:'));
+        const ul = el('ul');
+        m.appendChild(ul);
+        loadE2EScenarios().then(list => list.forEach(sc =>
+          ul.appendChild(el('li', '', `${sc.name} — ${sc.title} (titik putus: ${sc.break_point || '-'}, ${sc.verdict})`))))
+          .catch(e => ul.appendChild(el('li', 'st-fail', e.message)));
+      });
+      return true;
+    }
+    appendMsg('bot', (m) => runE2E(m, { simulate: parts[2] }));
+    return true;
+  }
+  if (parts.length < 3) {
+    appendMsg('bot', (m) => m.appendChild(el('div', 'st-fail',
+      'usage: /e2e REPO REF  ·  /e2e --sim [SKENARIO]  ·  /e2e (form)')));
+    return true;
+  }
+  appendMsg('bot', (m) => runE2E(m, { repo: parts[1], ref: parts[2] }));
+  return true;
+}
+
+$('#btn-e2e').addEventListener('click', openE2EForm);
+
 // ─── Toolbar: Export markdown, Clear chat (M4) ───────────────────────────
 $('#btn-export').addEventListener('click', () => {
   if (!chatHistory.length) return alert('Chat kosong');
@@ -447,6 +769,7 @@ $('#chat-form').addEventListener('submit', async (ev) => {
   pushHistory('user', { text: msg });
   appendMsg('user', (m) => { m.textContent = msg; });
   input.value = '';
+  if (await handleE2ECommand(msg)) return;
   const bot = appendMsg('bot', (m) => { m.innerHTML = '<em>Jev memutuskan…</em>'; });
   try {
     const data = await api('/api/decide', { method: 'POST',
@@ -482,6 +805,7 @@ $('#input').addEventListener('keydown', (e) => {
   }
 });
 
+renderPbUser();
 loadHealth();
 loadCatalog();
 </script>

@@ -9,7 +9,9 @@ import json
 import os
 import subprocess
 from base64 import b64encode
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Dict, Iterator, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -21,7 +23,28 @@ class GitHubAPIError(RuntimeError):
     """Raised when a native GitHub API call fails."""
 
 
+# Token per-konteks (thread/request) — dipakai `bq --serve` agar tiap request
+# memakai GITHUB_TOKEN milik user dari PocketBase, bukan env proses server.
+# None = perilaku CLI biasa; "" = user tidak punya token (tanpa fallback).
+_TOKEN_OVERRIDE: ContextVar[Optional[str]] = ContextVar("github_token_override", default=None)
+
+
+@contextmanager
+def use_token(token: str) -> Iterator[None]:
+    """Pakai `token` untuk semua request GitHub di konteks ini (tanpa fallback env)."""
+    reset = _TOKEN_OVERRIDE.set(token or "")
+    try:
+        yield
+    finally:
+        _TOKEN_OVERRIDE.reset(reset)
+
+
 def _token() -> str:
+    override = _TOKEN_OVERRIDE.get()
+    if override is not None:
+        if not override:
+            raise GitHubAPIError("GITHUB_TOKEN tidak ada di credential PocketBase Anda")
+        return override
     tok = get_github_credentials()["token"] or os.getenv("GITHUB_TOKEN", "")
     if not tok:
         raise GitHubAPIError(
@@ -32,6 +55,9 @@ def _token() -> str:
 
 
 def _api_base() -> str:
+    if _TOKEN_OVERRIDE.get() is not None:
+        # Mode credential per-user: jangan load_config() (hydrate env/cache PB server).
+        return os.getenv("GITHUB_API_BASE", "https://api.github.com").rstrip("/")
     return load_config()["github"]["api_base"].rstrip("/")
 
 

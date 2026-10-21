@@ -26,8 +26,10 @@ import os
 import posixpath
 import re
 import subprocess
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -102,10 +104,38 @@ class KubectlError(RuntimeError):
     pass
 
 
+# KUBECONFIG per-konteks — dipakai `bq --serve` (kubeconfig milik user dari
+# PocketBase). None = kubeconfig lokal (CLI); "" = user tidak punya kubeconfig.
+_KUBECONFIG: ContextVar[Optional[str]] = ContextVar("e2e_kubeconfig", default=None)
+
+
+@contextmanager
+def use_credentials(*, github_token: str, kubeconfig: str) -> Iterator[None]:
+    """Jalankan analisa hanya dengan credential ini — tanpa fallback env/file lokal."""
+    reset = _KUBECONFIG.set(kubeconfig or "")
+    try:
+        with github_api.use_token(github_token):
+            yield
+    finally:
+        _KUBECONFIG.reset(reset)
+
+
+def _kubectl_env() -> Optional[Dict[str, str]]:
+    kubeconfig = _KUBECONFIG.get()
+    if kubeconfig is None:
+        return None
+    if not kubeconfig:
+        raise KubectlError("kubeconfig tidak ada di credential PocketBase Anda (KUBECONFIG_*_B64)")
+    # Env minimal: jangan wariskan credential proses server ke kubectl.
+    keep = ("PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT")
+    return {**{k: os.environ[k] for k in keep if k in os.environ}, "KUBECONFIG": kubeconfig}
+
+
 def kubectl_json(context: str, args: List[str]) -> dict:
     cmd = ["kubectl"] + (["--context", context] if context else []) + args + ["-o", "json"]
+    env = _kubectl_env()
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=_KUBECTL_TIMEOUT)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=_KUBECTL_TIMEOUT, env=env)
     except FileNotFoundError as e:
         raise KubectlError("kubectl tidak ditemukan di PATH") from e
     except subprocess.TimeoutExpired as e:
@@ -118,8 +148,9 @@ def kubectl_json(context: str, args: List[str]) -> dict:
 def kubectl_logs(context: str, ns: str, pod: str, container: str, tail: int = 15) -> str:
     cmd = ["kubectl", "--context", context, "-n", ns, "logs", pod, "-c", container, f"--tail={tail}"]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=_KUBECTL_TIMEOUT)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=_KUBECTL_TIMEOUT,
+                             env=_kubectl_env())
+    except (FileNotFoundError, subprocess.TimeoutExpired, KubectlError):
         return ""
     return redact(res.stdout) if res.returncode == 0 else ""
 
