@@ -24,6 +24,10 @@ E2E CI/CD (`bq --e2e` di web, read-only):
                                   dari PB milik user — lihat user_creds.py)
   - GET  /api/e2e/stream/<id>   → SSE `stage` / `report` / `error` / `done`
 
+Manifest check satu namespace (`bq --manifest-check` di web, read-only):
+  - POST /api/manifest-check            → {namespace, branch?} → job_id (X-PB-Token wajib)
+  - GET  /api/manifest-check/stream/<id> → SSE `progress` / `report` (+ markdown) / `error` / `done`
+
 M2 (next): async subprocess + SSE stream.
 """
 from __future__ import annotations
@@ -32,6 +36,7 @@ import datetime
 import json
 import os
 import queue
+import re
 import shlex
 import subprocess
 import sys
@@ -209,6 +214,61 @@ def _spawn_e2e_job(creds: Any, *, repo: str = "", ref: str = "", simulate: str =
     return job_id
 
 
+_NAMESPACE_RE = re.compile(r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?")
+_BRANCH_RE = re.compile(r"[\w./-]{1,100}")
+
+
+def _spawn_manifest_job(creds: Any, *, namespace: str, branch: str = "") -> str:
+    """Jalankan `manifest_scan.scan` di thread dgn credential PB milik user (stateless).
+
+    Event queue: ("progress", {done, total, app}), ("report", {...report, markdown, text}),
+    ("error", {"error"}), lalu sentinel None.
+    """
+    _reap_old_jobs()
+    job_id = uuid.uuid4().hex
+    q: "queue.Queue[Optional[tuple]]" = queue.Queue(maxsize=5_000)
+    with _JOBS_LOCK:
+        _JOBS[job_id] = {
+            "cmd": f"bq --manifest-check {namespace}" + (f" --gitops-branch {branch}" if branch else ""),
+            "proc": None, "q": q, "kind": "manifest",
+            "returncode": None, "done_at": None, "started_at": time.time(),
+        }
+
+    def _worker() -> None:
+        rc: Optional[int] = None
+        try:
+            from . import e2e, manifest_scan, user_creds
+            # Lock yg sama dgn e2e: simulasi mem-patch IO global modul e2e.
+            with _E2E_RUN_LOCK, user_creds.kubeconfig_path(creds) as kubeconfig, \
+                    e2e.use_credentials(github_token=creds.get("GITHUB_TOKEN"), kubeconfig=kubeconfig):
+                report = manifest_scan.scan(
+                    namespace, branch=branch or None, config=user_creds.user_config(creds),
+                    on_progress=lambda done, total, app: q.put(
+                        ("progress", {"done": done, "total": total, "app": app})),
+                )
+            payload = report.to_dict()
+            payload.update(markdown=manifest_scan.render_markdown(report),
+                           text=manifest_scan.render_text(report))
+            rc = report.exit_code
+            q.put(("report", payload))
+            _audit({"event": "manifest_check", "job_id": job_id, "user": creds.email,
+                    "namespace": report.namespace, "branch": report.branch, "totals": report.totals})
+        except Exception as e:  # scan tak boleh menjatuhkan server
+            rc = 1
+            q.put(("error", {"error": redact(str(e))}))
+            _audit({"event": "manifest_check_error", "job_id": job_id, "user": creds.email,
+                    "error": redact(str(e))})
+        finally:
+            q.put(None)
+            with _JOBS_LOCK:
+                if job_id in _JOBS:
+                    _JOBS[job_id]["returncode"] = rc
+                    _JOBS[job_id]["done_at"] = time.time()
+
+    threading.Thread(target=_worker, daemon=True).start()
+    return job_id
+
+
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: Any) -> None:
@@ -313,6 +373,9 @@ def make_handler(config: dict) -> type:
             if route.startswith("/api/e2e/stream/"):
                 job_id = route.split("/api/e2e/stream/", 1)[1].strip("/")
                 return self._api_e2e_stream(job_id)
+            if route.startswith("/api/manifest-check/stream/"):
+                job_id = route.split("/api/manifest-check/stream/", 1)[1].strip("/")
+                return self._api_e2e_stream(job_id, kind="manifest")
             return _json_response(self, 404, {"error": f"not found: {route}"})
 
         def do_POST(self):
@@ -331,6 +394,8 @@ def make_handler(config: dict) -> type:
                 return self._api_provider(body)
             if route == "/api/e2e":
                 return self._api_e2e(body)
+            if route == "/api/manifest-check":
+                return self._api_manifest_check(body)
             return _json_response(self, 404, {"error": f"not found: {route}"})
 
         # ── Routes ──────────────────────────────────────────────────────────
@@ -650,11 +715,35 @@ def make_handler(config: dict) -> type:
                 "stream_url": f"/api/e2e/stream/{job_id}",
             })
 
-        def _api_e2e_stream(self, job_id: str):
-            """SSE: event `stage` per tahap, `report` (E2EReport JSON) / `error`, lalu `done`."""
+        def _api_manifest_check(self, body: dict):
+            """{namespace, branch?} → job_id; progres via /api/manifest-check/stream/<id>."""
+            namespace = (body.get("namespace") or "").strip()
+            branch = (body.get("branch") or "").strip()
+            if not _NAMESPACE_RE.fullmatch(namespace):
+                return _json_response(self, 400, {"error": "namespace wajib & valid (mis. develop-qoin)"})
+            if branch and not _BRANCH_RE.fullmatch(branch):
+                return _json_response(self, 400, {"error": f"branch tidak valid: {branch}"})
+            from . import user_creds
+            try:
+                creds = user_creds.resolve(self.headers.get("X-PB-Token", ""),
+                                           base_url=config.get("pb_url", ""))
+            except user_creds.UserAuthError as e:
+                return _json_response(self, 401, {"error": str(e), "pb_login": True})
+            except user_creds.PBAPIError as e:
+                return _json_response(self, 502, {"error": f"PocketBase: {e}"})
+            job_id = _spawn_manifest_job(creds, namespace=namespace, branch=branch)
+            _audit({"event": "manifest_check_start", "job_id": job_id, "user": creds.email,
+                    "namespace": namespace, "branch": branch or None})
+            _json_response(self, 200, {
+                "job_id": job_id,
+                "stream_url": f"/api/manifest-check/stream/{job_id}",
+            })
+
+        def _api_e2e_stream(self, job_id: str, kind: str = "e2e"):
+            """SSE job e2e (`stage`/`report`/`error`/`done`) atau manifest (`progress`/…)."""
             with _JOBS_LOCK:
                 job = _JOBS.get(job_id)
-            if not job or job.get("kind") != "e2e":
+            if not job or job.get("kind") != kind:
                 return _json_response(self, 404, {"error": f"job not found: {job_id}"})
             q = job["q"]
             self.send_response(200)

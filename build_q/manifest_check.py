@@ -430,8 +430,13 @@ def suggest_deployment(
     rules: Dict[str, dict], *, app: str, ns: str, image: str, port: int = 80,
     stack: str = "go", infra: str = "cce", base: Optional[dict] = None,
     add_pull_secret: bool = True, add_file_config: bool = True,
+    file_config_secret: Optional[str] = None,
 ) -> dict:
-    """Deployment standar Qoin; `base` (YAML lama) dipertahankan bila ada."""
+    """Deployment standar Qoin; `base` (YAML lama) dipertahankan bila ada.
+
+    `file_config_secret`: nama Secret config yang sudah ada (mis. `file-config-<app>-develop`);
+    default `<secret_prefix><app>`.
+    """
     env = env_from_namespace(ns)
     labels = {**standard_labels(app, ns), **(_pod_labels(base) if base else {})}
     doc = copy.deepcopy(base) if base else {
@@ -468,7 +473,7 @@ def suggest_deployment(
     fc = rules.get("missing_file_config_volume")
     if add_file_config and fc and _applies(fc, app):
         p = fc["params"]
-        secret = f"{p['secret_prefix']}{app}"
+        secret = file_config_secret or f"{p['secret_prefix']}{app}"
         key = p["key_dotnet" if stack == "dotnet" else "key_go"].format(env=env)
         mount = p["mount_dotnet" if stack == "dotnet" else "mount_go"].format(env=env)
         vols = pod.setdefault("volumes", [])
@@ -724,13 +729,26 @@ def check(
 
     fc = rules.get("missing_file_config_volume")
     refs = referenced_secrets(deploy)
-    fc_missing = ""
+    fc_missing, fc_existing = "", ""
     if fc and _applies(fc, app):
         want = f"{fc['params']['secret_prefix']}{app}"
-        if want not in refs:
-            add("missing_file_config_volume", f"tidak ada volume Secret {want} — config kemungkinan baked di image")
+        variants = [want, f"{want}-{env}"]
+        if not any(v in refs for v in variants):
+            # Secret config bisa sudah ada dgn nama lain (mis. file-config-<app>-develop) tapi tak di-mount.
+            if secrets_in_cluster is not None:
+                fc_existing = next((v for v in variants if v in secrets_in_cluster), "")
+            msg = f"tidak ada volume Secret {want} — config kemungkinan baked di image"
+            if fc_existing:
+                msg += f"; Secret {fc_existing} sudah ada di namespace tetapi tidak di-mount"
+            elif secrets_in_repo:
+                files = sorted(f for f in secrets_in_repo
+                               if any(secret_in_repo(v, env, {f}) for v in variants))
+                if files:
+                    res.notes.append(f"di repo ada {', '.join(files)} — pastikan nama Secret-nya "
+                                     f"(mis. {variants[1]}) sebelum menerapkan saran mount")
+            add("missing_file_config_volume", msg)
             fix_deploy = True
-            fc_missing = want
+            fc_missing = fc_existing or want
 
     # Keberadaan Secret yang DIRUJUK: cluster (pasti) → repo (indikasi) → tidak diketahui.
     for name in refs + ([pull] if pull and pull in pulls else []):
@@ -749,7 +767,7 @@ def check(
         else:
             add("secret_missing", f"Secret {name} belum ada di namespace {ns}")
             res.suggestions.append(_secret_suggestion(rules, name=name, app=app, ns=ns, stack=stack, infra=infra))
-    if fc_missing:
+    if fc_missing and not fc_existing:
         res.suggestions.append(_secret_suggestion(rules, name=fc_missing, app=app, ns=ns, stack=stack, infra=infra))
 
     fixed_deploy = deploy
@@ -758,6 +776,7 @@ def check(
         fixed_deploy = suggest_deployment(
             rules, app=app, ns=ns, image=image, stack=stack, infra=infra, base=raw_deploy,
             add_pull_secret=pull not in pulls, add_file_config=bool(fc_missing),
+            file_config_secret=fc_missing or None,
         )
     add_ports: List[dict] = []  # containerPort bernama yang belum dideklarasikan
 

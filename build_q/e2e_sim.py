@@ -128,7 +128,8 @@ class World:
     apps: List[dict] = field(default_factory=list)
     kubectl_error: Optional[str] = None
     # Secret di namespace target (hanya nama) — default: standar lengkap.
-    secrets: List[str] = field(default_factory=lambda: [f"file-config-{SIM_REPO}", "regcred"])
+    secrets: List[str] = field(default_factory=lambda: [
+        f"file-config-{SIM_REPO}", f"file-config-{SAMPLE_APP}", "regcred"])
     argocd_api_ok: bool = False  # fallback REST API ArgoCD saat kubectl gagal
     log_tail: str = ""
 
