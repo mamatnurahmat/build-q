@@ -938,6 +938,9 @@ prefix image privat). Severity `critical` = memutus deploy/traffic (titik putus)
 saran standar (mis. config masih baked di image) — tahap tetap ✅. Ubah lewat
 `scripts/anomaly-rules-seed.json` + `bq --tui-sync scripts/anomaly-rules-seed.json`.
 
+📖 Dokumentasi lengkap tahap Manifest (rule, evaluasi kustomization, pemilihan cluster,
+sample YAML, Jev, format data, troubleshooting): [E2E-MANIFEST.md](./E2E-MANIFEST.md).
+
 **Sample YAML** — saran manifest baru (Deployment/Service yang belum ada) disalin dari
 tetangga terdekat di repo GitOps `main:cce/<namespace>` (role `-manager`/`-module` & project
 sama, punya Service, lolos rule critical), lalu nama/label/image/port/stack/secret disesuaikan
