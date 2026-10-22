@@ -273,6 +273,7 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
           "build_q_patterns":  [ {...}, ... ],
           "kube_cx":           [ {name, cluster, server, environment, note} ],
           "namespace":         [ {name, description, kube_cx: "<nama context>"} ],
+          "nodepool":          [ {kube_cx: "<nama context>", namespace, role: front|back, label, value} ],
           "build_q_anomaly_rules": [ {rule_name, severity, ..., params, active} ],
         }
 
@@ -316,6 +317,8 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
         # di-upsert sebelum `namespace` agar relation bisa di-resolve.
         "kube_cx":           ("name",),
         "namespace":         ("name", "kube_cx"),
+        # nodeSelector standar per cluster × namespace × role (lihat kube_contexts.py).
+        "nodepool":          ("kube_cx", "namespace", "role"),
         # Rule standar manifest/anomali (lihat manifest_check.py).
         "build_q_anomaly_rules": ("rule_name",),
         # Template standar Deployment + Service (lihat manifest_template.py).
@@ -332,10 +335,10 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
         if not records:
             continue
         keys = unique_field[coll]
-        ids = cx_ids() if coll == "namespace" else {}
+        ids = cx_ids() if coll in ("namespace", "nodepool") else {}
         created = updated = failed = 0
         for rec in records:
-            if coll == "namespace":
+            if coll in ("namespace", "nodepool"):
                 # Seed menulis kube_cx = nama context → ganti dgn record id.
                 cx = ids.get(rec.get("kube_cx", ""))
                 if not cx:

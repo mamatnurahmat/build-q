@@ -123,7 +123,7 @@ DEFAULT_RULES: Dict[str, dict] = {
                 "develop-qoin": "develop-qoin", "develop-payout": "develop-qoin",
                 "develop-qoinhub": "develop-qoin", "develop-saas": "develop-qoin",
                 "develop-ngenwal": "develop-qoincash", "sandbox-qoin": "sandbox-qoin",
-                "production-payout": "production-payout-nodepool",
+                "production-payout": "production-payout-nodepool", "staging-payout": "production-payout-nodepool",
                 "production-qoin": "production-nodepool", "staging-qoin": "production-nodepool",
                 "production-ngenwal": "production-ue-nodepool", "production-saas": "production-ue-nodepool",
                 "staging-ngenwal": "production-ue-nodepool",
@@ -424,7 +424,33 @@ def standard_labels(app: str, ns: str) -> dict:
     return {"app": app, "env": env_from_namespace(ns), "project": project, "role": role_for(app)}
 
 
-def nodepool_for(rules: Dict[str, dict], app: str, ns: str) -> str:
+def node_selector(rules: Dict[str, dict], app: str, ns: str, ctx: Optional[str] = None) -> Tuple[str, str]:
+    """(label, nilai) nodeSelector standar: mapping PB per namespace × cluster (label bisa
+    `nodetype` mis. production-payout), cadangan params rule nodepool_mismatch_cce."""
+    try:
+        from . import kube_contexts
+
+        label, value = kube_contexts.node_selector_for(ns, role_for(app), ctx)
+    except Exception:
+        label, value = "", ""
+    if value:
+        return label, value
+    pool = nodepool_for(rules, app, ns, ctx)
+    cce_label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label") or ""
+    return (cce_label, pool) if pool and cce_label else ("", "")
+
+
+def nodepool_for(rules: Dict[str, dict], app: str, ns: str, ctx: Optional[str] = None) -> str:
+    """Nodepool CCE: mapping PB `namespace.nodepool_front/back` per cluster (kube_contexts),
+    cadangan `params.by_namespace` rule nodepool_mismatch_cce."""
+    try:
+        from . import kube_contexts
+
+        pool = kube_contexts.nodepool_for(ns, role_for(app), ctx)
+    except Exception:  # PB/cache tak tersedia → pakai params rule
+        pool = ""
+    if pool:
+        return pool
     rule = rules.get("nodepool_mismatch_cce")
     prefix = ((rule or {}).get("params", {}).get("by_namespace") or {}).get(ns, "")
     if not prefix:
@@ -494,10 +520,13 @@ def suggest_deployment(
                 mounts.append({"name": p["volume_name"], "mountPath": mount, "subPath": key})
 
     if infra == "cce":
-        pool = nodepool_for(rules, app, ns)
-        label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label")
-        if pool and label:
-            pod.setdefault("nodeSelector", {})[label] = pool
+        label, value = node_selector(rules, app, ns)
+        if value:
+            selector = pod.setdefault("nodeSelector", {})
+            cce_label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label")
+            if label != cce_label:
+                selector.pop(cce_label, None)  # konvensi lain (mis. nodetype) → buang label nodepool CCE
+            selector[label] = value
     return doc if base else tidy(doc)
 
 
@@ -758,9 +787,9 @@ def adapt_sample_deployment(
         if not pod.get("nodeSelector"):
             pod.pop("nodeSelector", None)
     elif role_for(app) != role_for(s_app):
-        pool = nodepool_for(rules, app, ns)
-        if pool and label and label in (pod.get("nodeSelector") or {}):
-            pod["nodeSelector"][label] = pool
+        # nodeSelector role sample tidak berlaku → diganti standar (suggest_deployment di bawah).
+        for key in ("nodetype", label):
+            (pod.get("nodeSelector") or {}).pop(key, None)
 
     pull_params = (rules.get("missing_image_pullsecret") or {}).get("params", {})
     pull = pull_params.get("name")

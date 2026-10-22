@@ -84,7 +84,7 @@
       "detect_hint": "nodeSelector[cce.cloud.com/cce-nodepool] != expected pattern",
       "fix_hint": "Pakai pool <prefix>-manager (manager/apigateway) atau <prefix>-service (module/workflow).",
       "source": "skill:gitops-cce-bootstrap",
-      "params": {"label": "cce.cloud.com/cce-nodepool", "by_namespace": {"develop-qoin": "develop-qoin", "develop-payout": "develop-qoin", "develop-qoinhub": "develop-qoin", "develop-saas": "develop-qoin", "develop-ngenwal": "develop-qoincash", "sandbox-qoin": "sandbox-qoin", "production-payout": "production-payout-nodepool", "production-qoin": "production-nodepool", "staging-qoin": "production-nodepool", "production-ngenwal": "production-ue-nodepool", "production-saas": "production-ue-nodepool", "staging-ngenwal": "production-ue-nodepool"}},
+      "params": {"label": "cce.cloud.com/cce-nodepool", "by_namespace": {"develop-qoin": "develop-qoin", "develop-payout": "develop-qoin", "develop-qoinhub": "develop-qoin", "develop-saas": "develop-qoin", "develop-ngenwal": "develop-qoincash", "sandbox-qoin": "sandbox-qoin", "production-payout": "production-payout-nodepool", "staging-payout": "production-payout-nodepool", "production-qoin": "production-nodepool", "staging-qoin": "production-nodepool", "production-ngenwal": "production-ue-nodepool", "production-saas": "production-ue-nodepool", "staging-ngenwal": "production-ue-nodepool"}},
       "active": true, "order": 5 },
 
     { "rule_name": "nodetype_mismatch_sls",

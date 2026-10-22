@@ -177,7 +177,7 @@ def init(
     if secrets is not None and not secrets:
         res.details.append(f"namespace {res.namespace} belum punya Secret apa pun (mungkin belum dibuat) — "
                            "siapkan namespace + imagePullSecret regcred sebelum deploy")
-    if infra_final == "cce" and not mc.nodepool_for(rules, app, res.namespace):
+    if infra_final == "cce" and not mc.node_selector(rules, app, res.namespace)[1]:
         res.details.append(f"nodepool CCE untuk {res.namespace} belum ada di params rule nodepool_mismatch_cce "
                            "— isi nodeSelector manual atau tambahkan ke seed")
     in_repo = None
@@ -381,8 +381,7 @@ def _standard_core(rules: dict, app: str, ns: str, real: dict, kz: Optional[dict
     from . import manifest_check as mc
 
     std_labels = mc.standard_labels(app, ns)
-    label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label")
-    pool = mc.nodepool_for(rules, app, ns)
+    label, pool = mc.node_selector(rules, app, ns)
     prefix = rules["missing_file_config_volume"]["params"]["secret_prefix"]
     env = mc.env_from_namespace(ns)
     vols = real["secret_volumes"]
@@ -392,7 +391,9 @@ def _standard_core(rules: dict, app: str, ns: str, real: dict, kz: Optional[dict
         "labels": std_labels,
         "selector": std_labels,
         "container": app,
-        "node_selector": {label: pool} if pool and label else real["node_selector"],
+        "node_selector": {**{k: v for k, v in real["node_selector"].items()
+                             if k not in (label, "cce.cloud.com/cce-nodepool")}, label: pool}
+                         if pool else real["node_selector"],
         "replicas": 2 if env == "production" else 1,
         "secret_volumes": std_vols,
     }

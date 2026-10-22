@@ -76,7 +76,7 @@ class TestLoad:
         assert kube_contexts.load()[1] == "pb"
         kube_contexts._loaded = None
         assert kube_contexts.load()[1] == "cache"
-        assert fake_pb == ["kube_cx", "namespace"]
+        assert fake_pb == ["kube_cx", "namespace", "nodepool"]
 
     def test_pb_down_uses_bootstrap(self, monkeypatch):
         def boom(*a, **k):
@@ -153,3 +153,56 @@ class TestPlannerWiring:
     def test_no_jev_call_when_resolved(self, monkeypatch):
         monkeypatch.setattr(tui, "jev_decide", lambda *a, **k: pytest.fail("Jev dipanggil"))
         assert tui.fill_missing_choice_params("bootstrap develop-qoin", "bq_bootstrap", PROVIDER) == {}
+
+
+class TestNodepool:
+    """Nodepool CCE per namespace × cluster dari PB (`namespace.nodepool_front/back`)."""
+
+    @pytest.fixture(autouse=True)
+    def pb_with_nodepools(self, monkeypatch, tmp_path):
+        cx = [{"id": "c1", "name": "hw-dev", "environment": "development",
+               "nodepools": ["develop-qoin-manager", "develop-qoin-service"]},
+              {"id": "c2", "name": "hw-pro-p", "environment": "production",
+               "nodepools": ["production-payout-nodepool-manager", "production-payout-nodepool-service"]}]
+        ns = [{"name": "develop-payout", "kube_cx": "c1"}, {"name": "develop-payout", "kube_cx": "c2"},
+              {"name": "jenkins-x", "kube_cx": "c1"}, {"name": "production-payout", "kube_cx": "c2"}]
+        label = kube_contexts.NODEPOOL_LABEL
+        pools = [{"kube_cx": "c1", "namespace": "develop-payout", "role": "front", "label": label,
+                  "value": "develop-qoin-manager"},
+                 {"kube_cx": "c1", "namespace": "develop-payout", "role": "back", "label": label,
+                  "value": "develop-qoin-service"},
+                 {"kube_cx": "c2", "namespace": "develop-payout", "role": "front", "label": label,
+                  "value": "production-payout-nodepool-manager"},
+                 {"kube_cx": "c2", "namespace": "develop-payout", "role": "back", "label": label,
+                  "value": "production-payout-nodepool-service"},
+                 {"kube_cx": "c2", "namespace": "production-payout", "role": "front", "label": "nodetype",
+                  "value": "front"}]
+        monkeypatch.setattr(kube_contexts.pb_api, "fetch_collection_records",
+                            lambda coll, **k: {"kube_cx": cx, "namespace": ns, "nodepool": pools}[coll])
+        monkeypatch.setattr(kube_contexts, "CACHE_FILE", tmp_path / "cx.json")
+        monkeypatch.setattr(kube_contexts, "_loaded", None)
+
+    def test_loaded_from_pb(self):
+        data = kube_contexts.contexts()
+        assert data["hw-pro-p"]["nodepools"] == ["production-payout-nodepool-manager",
+                                                 "production-payout-nodepool-service"]
+        assert "jenkins-x" not in data["hw-dev"]["nodepool"]
+
+    def test_ambiguous_namespace_uses_matching_environment(self):
+        assert kube_contexts.nodepool_for("develop-payout", "front") == "develop-qoin-manager"
+        assert kube_contexts.nodepool_for("develop-payout", "back", "hw-pro-p") == \
+            "production-payout-nodepool-service"
+
+    def test_nodepool_collection_label(self):
+        assert kube_contexts.node_selector_for("production-payout", "front") == ("nodetype", "front")
+        assert kube_contexts.node_selector_for("develop-payout", "back") == (
+            kube_contexts.NODEPOOL_LABEL, "develop-qoin-service")
+
+    def test_unknown_returns_empty_and_generator_falls_back_to_rule(self):
+        from build_q import manifest_check as mc
+        assert kube_contexts.nodepool_for("production-baru", "front") == ""
+        assert mc.nodepool_for(mc.DEFAULT_RULES, "x-manager", "production-qoin") == "production-nodepool-manager"
+
+    def test_cache_v2_is_refetched(self):
+        kube_contexts.CACHE_FILE.write_text(json.dumps({"v": 2, "fetched_at": 9e18, "contexts": {}}))
+        assert kube_contexts.load()[1] == "pb"

@@ -14,6 +14,13 @@ PATH = f"cce/{NS}/{APP}_deployment.yaml"
 SVC = f"cce/{NS}/{APP}_services.yaml"
 
 
+@pytest.fixture(autouse=True)
+def bootstrap_kube_cx(monkeypatch):
+    """Mapping cluster/nodepool dari data bootstrap — test tidak menyentuh PB/cache lokal."""
+    from build_q import kube_contexts
+    monkeypatch.setattr(kube_contexts, "load", lambda **k: (kube_contexts._BOOTSTRAP, "bootstrap"))
+
+
 @pytest.fixture
 def rules():
     return copy.deepcopy(mc.DEFAULT_RULES)
