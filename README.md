@@ -950,8 +950,19 @@ Di TUI: `/manifest-check NAMESPACE [BRANCH]` (laporan otomatis ke `~/.build-q/re
 di web: tombol **🧩 Namespace** dengan unduhan `.md` / `.json`. Exit code: `0` semua OK,
 `1` ada FAIL, `2` ada SKIP.
 
+**Saran manifest satu aplikasi** mengikuti konsep GitOps saat ini (path dari `cicd.json`,
+sample tetangga `main:cce/<namespace>`). Bila manifest sudah ada, yang ditampilkan hasil cek:
+
+```bash
+bq --manifest-init pay-be-topup-manager sandbox-payout --out-dir ./gitops-draft   # <repo> <namespace>
+bq --manifest-template all && bq --tui-sync ~/.build-q/manifest-templates-seed.json  # template standar → PB
+bq --manifest-verify production-qoin          # skenario uji: generate vs core existing (exit 1 bila beda)
+```
+
+📐 Desain & keputusan: [PRD-manifest.md](./PRD-manifest.md).
+
 📖 Dokumentasi lengkap tahap Manifest (rule, evaluasi kustomization, pemilihan cluster,
-sample YAML, Jev, uji satu namespace & isi laporan, format data, troubleshooting):
+sample YAML, Jev, uji satu namespace & isi laporan, `--manifest-init`, format data, troubleshooting):
 [E2E-MANIFEST.md](./E2E-MANIFEST.md).
 
 **Sample YAML** — saran manifest baru (Deployment/Service yang belum ada) disalin dari
@@ -1129,6 +1140,14 @@ Subcommands (mutually exclusive):
   --tui-sync <seed.json>    Upload katalog JSON ke PocketBase (upsert).
   --tui-ls                  Ringkas katalog TUI aktif.
   --e2e <repo> <ref>        Analisa CI/CD end-to-end: trigger → Tekton → GitOps → ArgoCD (read-only).
+  --manifest-init <repo> <namespace>
+                            Saran YAML Deployment + Service (+ Secret, kustomization) satu aplikasi
+                            sesuai konsep GitOps saat ini (template PB → sample → generator).
+                            Opsi: --out-dir DIR, --export-md PATH, --infra, --gitops-branch, --gitops-repo.
+  --manifest-template <ns,...|all>
+                            Bangun template standar dari GitOps main → seed lokal (lalu --tui-sync).
+  --manifest-verify <namespace>
+                            Skenario uji leave-one-out: generate vs core manifest existing.
   --manifest-check NAMESPACE
                             Uji manifest (selector deploy↔service, Secret, kustomization) semua
                             Deployment di folder GitOps <infra>/<NAMESPACE>/ (read-only).

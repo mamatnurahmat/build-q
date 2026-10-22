@@ -318,6 +318,8 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
         "namespace":         ("name", "kube_cx"),
         # Rule standar manifest/anomali (lihat manifest_check.py).
         "build_q_anomaly_rules": ("rule_name",),
+        # Template standar Deployment + Service (lihat manifest_template.py).
+        "build_q_manifest_templates": ("name",),
     }
 
     def cx_ids() -> Dict[str, str]:
@@ -361,7 +363,7 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
 
     clear_cache()
     from . import kube_contexts, manifest_check
-    for cache in (kube_contexts.CACHE_FILE, manifest_check.CACHE_FILE):
+    for cache in (kube_contexts.CACHE_FILE, manifest_check.CACHE_FILE, manifest_check.TEMPLATE_CACHE):
         if cache.exists():
             cache.unlink()
     return summary

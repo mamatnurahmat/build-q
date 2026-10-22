@@ -205,6 +205,37 @@ Config file: ~/.build-q/.env
              "Exit: 0 semua OK, 1 ada FAIL, 2 ada SKIP.",
     )
     parser.add_argument(
+        "--manifest-init",
+        action="store_true",
+        help="Saran YAML Deployment + Service (+ Secret, kustomization) untuk satu aplikasi "
+             "mengikuti konsep GitOps saat ini (path dari cicd.json, sample tetangga "
+             "main:cce/<ns>). Usage: bq --manifest-init <repo> <namespace> (mis. production-qoin; "
+             "env dari prefix namespace; <env> saja juga diterima → namespace dari cicd.json). "
+             "Opsi: --ns, --infra, --gitops-branch, --gitops-repo, --out-dir, --export-md. "
+             "Bila manifest sudah ada → hasil cek + saran perbaikan. Read-only.",
+    )
+    parser.add_argument(
+        "--manifest-template",
+        metavar="NAMESPACES",
+        help="Bangun template standar Deployment+Service per namespace × jenis aplikasi dari "
+             "manifest GitOps yang lolos standar (default branch main). NAMESPACES dipisah koma, "
+             "atau `all` (semua folder <infra>/). Seed → ~/.build-q/manifest-templates-seed.json "
+             "(override --export-json), lalu `bq --tui-sync <seed>` ke PB build_q_manifest_templates.",
+    )
+    parser.add_argument(
+        "--manifest-verify",
+        metavar="NAMESPACE",
+        help="Skenario uji --manifest-init (leave-one-out): tiap Deployment di <infra>/<NAMESPACE>/ "
+             "(default branch main) dianggap belum ada, di-generate dari template/sample lain, lalu "
+             "field inti dibandingkan dgn aslinya. Exit 1 bila generator berbeda. "
+             "Ekspor: --export-md / --export-json.",
+    )
+    parser.add_argument(
+        "--out-dir",
+        metavar="DIR",
+        help="Dengan --manifest-init: tulis saran YAML ke DIR/<path GitOps> (siap disalin ke repo GitOps).",
+    )
+    parser.add_argument(
         "--export",
         action="store_true",
         help="Dengan --manifest-check: ekspor laporan Markdown + JSON ke direktori kerja "
@@ -848,6 +879,74 @@ Config file: ~/.build-q/.env
                                  use_jev=not args.no_jev)
             print(e2e.render_text(report))
             sys.exit(e2e.exit_code(report))
+
+        if args.manifest_verify:
+            import json as _json
+            from pathlib import Path
+            from . import manifest_init
+            config = load_config()
+            branch = args.gitops_branch or "main"
+            try:
+                items = manifest_init.verify_folder(
+                    args.manifest_verify, branch=branch,
+                    infra=args.infra or config["gitops"].get("infra") or "cce", config=config)
+            except manifest_init.ManifestInitError as e:
+                print(f"❌ {e}", file=sys.stderr)
+                sys.exit(2)
+            text = manifest_init.render_verify(args.manifest_verify, branch, items)
+            print(text)
+            data = manifest_init.verify_to_dict(args.manifest_verify, branch, items)
+            if args.export_md:
+                Path(args.export_md).expanduser().write_text("```\n" + text + "\n```\n")
+                print(f"📄 laporan: {args.export_md}")
+            if args.export_json:
+                Path(args.export_json).expanduser().write_text(_json.dumps(data, indent=2, ensure_ascii=False))
+                print(f"📄 laporan: {args.export_json}")
+            sys.exit(data["exit_code"])
+
+        if args.manifest_template:
+            from . import e2e, manifest_template
+            config = load_config()
+            infra = args.infra or config["gitops"].get("infra") or "cce"
+            branch = args.gitops_branch or "main"
+            names = [n.strip() for n in args.manifest_template.split(",") if n.strip()]
+            if names == ["all"]:
+                names = [n for n in e2e.gh_list_dir(config["gitops"]["repo"], infra, branch)
+                         if "." not in n]
+            records = []
+            for ns in names:
+                recs, report = manifest_template.build(ns, branch=branch, infra=infra, config=config)
+                records += recs
+                print(manifest_template.render_report(ns, report))
+            seed = manifest_template.write_seed(records, args.export_json)
+            print(f"\n📄 {len(records)} template → {seed}")
+            print(f"   sync ke PocketBase: bq --tui-sync {seed}")
+            sys.exit(0 if records else 2)
+
+        if args.manifest_init:
+            from . import manifest_init
+            if not args.repo or not args.ref:
+                print("❌ Usage: bq --manifest-init <repo> <namespace>   (mis. pay-be-topup-manager production-qoin)",
+                      file=sys.stderr)
+                sys.exit(2)
+            config = load_config()
+            try:
+                result = manifest_init.init(
+                    args.repo, args.ref, ns=args.ns, infra=args.infra,
+                    gitops_repo=args.gitops_repo, gitops_branch=args.gitops_branch, config=config,
+                )
+            except manifest_init.ManifestInitError as e:
+                print(f"❌ {e}", file=sys.stderr)
+                sys.exit(2)
+            print(manifest_init.render_text(result))
+            if args.out_dir:
+                for path in manifest_init.write_files(result, args.out_dir):
+                    print(f"📁 {path}")
+            if args.export_md:
+                from pathlib import Path
+                Path(args.export_md).expanduser().write_text(manifest_init.render_markdown(result))
+                print(f"📄 laporan: {args.export_md}")
+            sys.exit(result.exit_code)
 
         if args.manifest_check:
             from . import manifest_scan
