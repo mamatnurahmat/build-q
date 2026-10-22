@@ -33,8 +33,10 @@ PocketBase.
 11. [Format data (web & integrasi)](#11-format-data-web--integrasi)
 12. [Simulasi](#12-simulasi)
 13. [Uji satu namespace — `bq --manifest-check`](#13-uji-satu-namespace--bq---manifest-check)
-14. [Troubleshooting](#14-troubleshooting)
-15. [Batasan](#15-batasan)
+14. [Saran manifest aplikasi — `bq --manifest-init`](#14-saran-manifest-aplikasi--bq---manifest-init)
+15. [Template standar & skenario uji — `--manifest-template`, `--manifest-verify`](#15-template-standar--skenario-uji----manifest-template---manifest-verify)
+16. [Troubleshooting](#16-troubleshooting)
+17. [Batasan](#17-batasan)
 
 ---
 
@@ -465,7 +467,124 @@ Contoh nyata `develop-qoin` (branch `develop`): 48 Deployment diperiksa dalam ±
 dengan satu saran standar (label `env`/`project` pada `plus-apigateway`). Cluster dipilih dari
 destination Application ArgoCD `develop-qoin` (`hw-dev`).
 
-## 14. Troubleshooting
+## 14. Saran manifest aplikasi — `bq --manifest-init`
+
+> Sejak **v0.2.4**.
+
+Membuat saran YAML **Deployment + Service** (beserta kerangka Secret dan entri
+kustomization) untuk satu aplikasi di satu env, mengikuti konsep GitOps yang dipakai
+pipeline saat ini. Read-only: hasil dicetak dan bisa ditulis ke folder untuk diajukan lewat PR.
+
+```bash
+bq --manifest-init pay-be-topup-manager production-payout          # <repo> <namespace>
+bq --manifest-init pay-be-topup-manager sandbox-payout --out-dir ./gitops-draft   # tulis file dgn struktur path GitOps
+bq --manifest-init pay-be-topup-manager develop-payout --export-md init.md
+bq --manifest-init pay-be-x develop                                   # kompatibel: <env> → namespace dari cicd.json PROJECT
+```
+
+Alur:
+
+| Langkah | Perilaku |
+|---|---|
+| Namespace & env | Argumen kedua = folder namespace GitOps (`production-qoin`); env = prefix-nya (`production`). Bila hanya env yang diberikan, namespace = `<env>-<PROJECT cicd.json>` |
+| Ref source | env `develop`/`staging`/`sandbox` → branch yang sama; `production` → tag `v*` tertinggi (semver). Bila branch/tag belum ada (aplikasi baru), dibaca dari branch default repo dengan catatan bahwa tag image berubah setelah pipeline env berjalan |
+| Image | `<DOCKERHUB_ORG>/<IMAGE>:<tag>`; tag = short SHA, atau nama tag untuk production (aturan pipeline) |
+| Path GitOps | Sama dengan saran rollout pipeline (`compute_rollout`): `<infra>/<env>-<PROJECT>/<DEPLOYMENT>_deployment.yaml` dari `cicd.json`; branch GitOps = env (develop/staging/sandbox) atau `main`. Override: `--ns`, `--infra`, `--gitops-branch`, `--gitops-repo` |
+| Port / stack | `PORT` dan `STACK` di `cicd.json`; tanpa `STACK`, `.NET` dideteksi dari `*.csproj`/`*.sln` di root repo, selain itu Go |
+| Manifest **sudah ada** | Pemeriksaan tahap Manifest (§3–§7) + saran perbaikan. Exit 1 bila ada temuan critical |
+| Manifest **belum ada** | Deployment + Service dari **template standar PB** (§15), lalu sample tetangga `main:cce/<namespace>` (§7.1), lalu generator standar. Kerangka Secret hanya untuk Secret yang belum ada di cluster. Daftar file untuk `resources:` kustomization, atau `kustomization.yaml` baru bila folder belum ada |
+
+Catatan yang mungkin muncul:
+
+- `namespace … belum punya Secret apa pun`: namespace kemungkinan belum dibuat di cluster.
+  Siapkan namespace + `regcred` sebelum deploy.
+- `nodepool CCE untuk … belum ada di params`: tambahkan namespace ke
+  `params.by_namespace` rule `nodepool_mismatch_cce` di seed, atau isi `nodeSelector` manual.
+
+Contoh nyata:
+
+- `pay-be-topup-manager develop` → manifest sudah ada di `cce/develop-payout/`. Namespace ambigu
+  diselesaikan ke `hw-dev`; Service cocok dan Secret tersedia, sehingga tidak ada saran.
+- `ngenwal-be-saasrecurringtransaction-module staging` → Deployment ada di `cce/staging-ngenwal/`
+  (namespace efektif `production-ngenwal`), tetapi Service belum ada; saran Service disalin dari
+  sample `main:cce/staging-ngenwal/…`.
+- `pay-be-topup-manager sandbox` → branch `sandbox` dan folder `cce/sandbox-payout/` belum ada;
+  hasilnya Deployment + Service + kerangka Secret + `kustomization.yaml` baru.
+
+## 15. Template standar & skenario uji — `--manifest-template`, `--manifest-verify`
+
+> Sejak **v0.2.4**.
+
+### Template standar (PocketBase `build_q_manifest_templates`)
+
+Supaya hasil generate konsisten, Deployment + Service baru dibuat dari **template standar
+terpusat** per `infra × namespace × jenis aplikasi` (akhiran nama: `manager`, `module`,
+`apigateway`, …). Urutan sumber saran: template PB → sample tetangga → generator.
+
+Template dibangun dari manifest nyata di GitOps `main` yang **lolos semua kriteria standar**:
+label `app/env/project/role` standar (`project` = akhiran namespace), replicas standar
+(production 2), Secret config bernama standar dengan tepat satu mount, punya Service,
+terdaftar di kustomization, dan tanpa temuan critical. Di antara kandidat, yang konvensi port
+Service-nya mayoritas (port klien tetap seperti `80 → container` vs sama dengan container)
+didahulukan. Nama aplikasi diganti placeholder `__app__`.
+
+```bash
+bq --manifest-template all                               # semua folder cce/ → ~/.build-q/manifest-templates-seed.json
+bq --manifest-template production-qoin,production-payout --export-json /tmp/tpl.json
+bq --tui-sync ~/.build-q/manifest-templates-seed.json    # upsert ke PB (kunci: name)
+```
+
+| Field | Isi |
+|---|---|
+| `name` | `<infra>-<namespace>-<app_kind>` (unik), mis. `cce-production-qoin-manager` |
+| `infra`, `namespace`, `app_kind`, `stack` | kunci pencocokan (`namespace: "*"` = berlaku umum) |
+| `deployment`, `service` | manifest standar (JSON) dgn placeholder `__app__` |
+| `source`, `source_app` | asal template, mis. `main:cce/production-qoin/x_deployment.yaml` |
+| `active`, `order` | nonaktifkan / prioritas |
+
+Akses: baca = pengguna login, tulis = superuser. Cache `~/.build-q/.manifest-templates-cache.json`.
+Seed **tidak** disimpan di repo (berisi struktur infra internal).
+
+### Skenario uji leave-one-out — `bq --manifest-verify <namespace>`
+
+Memastikan `--manifest-init` **tidak mengubah core** manifest yang sudah berjalan: tiap
+Deployment di `main:<infra>/<namespace>/` dianggap belum ada, di-generate dari
+template/sample lain (template yang dibangun dari aplikasi itu sendiri dikecualikan), lalu
+field inti dibandingkan dengan aslinya, keduanya setelah patch kustomization.
+
+```bash
+bq --manifest-verify production-qoin
+bq --manifest-verify production-qoin --export-md verify.md --export-json verify.json   # exit 1 bila ada diff
+```
+
+Field inti Deployment: nama, `selector`, label standar, container & repo image, args, port,
+Secret config + mount, `imagePullSecrets`, `nodeSelector`, replicas. Field inti Service: nama,
+type, apakah selector memilih pod Deployment, dan port → port container tujuan (nama port
+di-resolve). Data khas aplikasi yang di init nyata berasal dari `cicd.json`/Dockerfile/keputusan
+aplikasi (daftar port, path mount config, ada/tidaknya args `dotnet`, config baked, type & port
+Service yang diekspos) diberikan sebagai input.
+
+| Status | Arti |
+|---|---|
+| ✅ match | hasil generate = core aslinya |
+| ✅* match (asli tidak standar) | beda hanya di field di mana manifest asli menyimpang dari standar (mis. `env: staging` di production, `replicas: 0`, label/konvensi port klien minoritas, container bukan nama app) — generator mengikuti standar |
+| ❌ diff | generator berbeda dari core yang standar — regresi yang harus diperbaiki |
+| ℹ️ unik | tidak ada aplikasi sejenis sebagai template/sample (mis. `s3-minio`) |
+| ⏭️ skip | Deployment/Service asli tidak lengkap atau gagal dibaca |
+
+Hasil nyata (GitOps `main`, 2026-10-22): **0 diff di 4 namespace production** (208 Deployment).
+
+| Namespace | match | match* | diff | unik | skip |
+|---|---|---|---|---|---|
+| production-qoin | 38 | 10 | 0 | 2 | 0 |
+| production-ngenwal | 39 | 27 | 0 | 3 | 2 |
+| production-payout | 1 | 42 | 0 | 3 | 0 |
+| production-saas | 0 | 37 | 0 | 3 | 1 |
+
+Banyaknya match* di `production-payout` / `production-saas` berarti manifest asli di sana belum
+sepenuhnya mengikuti standar (umumnya `replicas` < 2 atau label), bukan kesalahan generator.
+
+## 16. Troubleshooting
 
 | Gejala | Penyebab & solusi |
 |---|---|
@@ -478,7 +597,7 @@ destination Application ArgoCD `develop-qoin` (`hw-dev`).
 | Temuan yang memang disengaja (mis. label non-standar untuk komponen infra) | Turunkan `severity` atau set `active: false` di seed → `bq --tui-sync` |
 | Jev tidak muncul | Tidak ada temuan, memakai `--no-jev`, atau `TYPESAFE_API_KEY` kosong (detail: `Jev dilewati: …`) |
 
-## 15. Batasan
+## 17. Batasan
 
 - Hanya Deployment dan Service **pertama** di file yang dinilai.
 - Patch *strategic merge* dan patch dari file (`path:`) tidak dievaluasi.

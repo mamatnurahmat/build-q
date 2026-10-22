@@ -267,6 +267,7 @@ def patched(world: World) -> Iterator[World]:
             mock.patch.object(e2e, "argocd_api_apps", world.argocd_api_apps), \
             mock.patch.object(e2e, "kubectl_names", world.kubectl_names), \
             mock.patch.object(e2e, "gh_list_dir", world.gh_list_dir), \
+            mock.patch.object(manifest_check, "load_templates", lambda **k: ([], "none")), \
             mock.patch.object(manifest_check, "load_rules",
                               lambda **k: (copy.deepcopy(manifest_check.DEFAULT_RULES), "default")), \
             mock.patch.object(kube_contexts, "load",

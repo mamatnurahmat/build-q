@@ -669,7 +669,8 @@ def _fetch_kustomization(repo: str, folder: str, branch: str) -> tuple[Optional[
 
 
 def _manifest_sample(repo: str, folder: str, app: str, rules: dict,
-                     cache: Optional[dict] = None) -> Optional[dict]:
+                     cache: Optional[dict] = None, use_templates: bool = True,
+                     exclude_template_of: str = "") -> Optional[dict]:
     """Sample Deployment+Service tetangga dari GitOps `<branch>:<infra>/<namespace>` (default main:cce).
 
     Kandidat diurutkan (role/project sama dulu); yang dipakai harus punya Service,
@@ -686,6 +687,14 @@ def _manifest_sample(repo: str, folder: str, app: str, rules: dict,
         return memo[key]
 
     src = mc.sample_source(rules)
+    if use_templates:
+        # 1) Template standar terpusat di PB (konsisten antar-generate).
+        templates = cached(("templates",), lambda: mc.load_templates()[0])
+        tpl = mc.find_template(templates, infra=folder.split("/", 1)[0], namespace=folder.split("/", 1)[-1],
+                               app=app, exclude_source_app=exclude_template_of)
+        if tpl:
+            return tpl
+    # 2) Sample tetangga di GitOps.
     sample_folder = f"{src['infra']}/{folder.split('/', 1)[-1]}"
     files = cached(("ls", sample_folder), lambda: gh_list_dir(repo, sample_folder, src["branch"]))
     if not files:
@@ -708,12 +717,19 @@ def _manifest_sample(repo: str, folder: str, app: str, rules: dict,
                        service_path=spath, kustomization=kz)
         if res.worst == "critical":
             return None
-        return {"app": cand, "deploy": deploy, "service": service, "path": f"{src['branch']}:{dpath}"}
+        labels = mc._pod_labels(deploy)
+        standard = all(labels.get(k) == v for k, v in mc.standard_labels(cand, ns or "").items())
+        return {"app": cand, "deploy": deploy, "service": service, "path": f"{src['branch']}:{dpath}",
+                "standard": standard}
 
-    for cand in mc.rank_samples(files, app)[: int(src.get("max_candidates", 5))]:
-        sample = cached(("sample", sample_folder, cand), lambda c=cand: validate(c))
-        if sample:
-            return sample
+    candidates = mc.rank_samples(files, app)[: int(src.get("max_candidates", 5))]
+    found = [s for s in (cached(("sample", sample_folder, c), lambda c=c: validate(c)) for c in candidates) if s]
+    # Jenis aplikasi (akhiran -manager/-module/-apigateway…) paling menentukan; di antara yang
+    # sejenis, sample berlabel standar didahulukan (label/env/replicas tetap dinormalkan saat adaptasi).
+    suffix = app.rsplit("-", 1)[-1]
+    for group in ([s for s in found if s["app"].rsplit("-", 1)[-1] == suffix], found):
+        if group:
+            return next((s for s in group if s.get("standard")), group[0])
     return None
 
 def _secret_scope(st: Stage, *, ns: str, app: str, dest: dict, config: dict,

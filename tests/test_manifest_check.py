@@ -60,7 +60,7 @@ class TestGenerator:
         d["spec"]["selector"]["matchLabels"] = {"app": APP}
         fixed = mc.suggest_deployment(rules, app=APP, ns=NS, image="", base=d)
         assert fixed["spec"]["selector"]["matchLabels"] == {"app": APP}
-        assert fixed["spec"]["template"]["metadata"]["labels"]["project"] == "pay"
+        assert fixed["spec"]["template"]["metadata"]["labels"]["project"] == "qoin"  # akhiran namespace
 
 
 class TestCheck:
@@ -344,7 +344,7 @@ class TestSample:
                 "secret": {"defaultMode": 420, "secretName": f"file-config-{app}"}} in pod["volumes"]
         assert pod["nodeSelector"]["cce.cloud.com/cce-nodepool"] == "production-nodepool-service"
         assert d["spec"]["selector"]["matchLabels"] == {"app": app, "env": "production",
-                                                        "project": "pay", "role": "back"}
+                                                        "project": "qoin", "role": "back"}
         assert d["spec"]["replicas"] == 2 and d["spec"]["progressDeadlineSeconds"] == 600
 
         svc = mc.adapt_sample_service(sample, d)

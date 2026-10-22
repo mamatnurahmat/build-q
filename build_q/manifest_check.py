@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import json
+import posixpath
 import re
 import sys
 import time
@@ -268,6 +269,9 @@ def detect_stack(deploy: Optional[dict], cicd: Optional[dict] = None) -> str:
         words = [str(w) for w in (c.get("args") or []) + (c.get("command") or [])]
         if any("dotnet" in w or w.endswith(".dll") for w in words):
             return "dotnet"
+        if any("appsettings" in str(m.get("subPath", "")) + str(m.get("mountPath", ""))
+               for m in c.get("volumeMounts") or []):
+            return "dotnet"
     return "go"
 
 
@@ -414,8 +418,10 @@ def apply_patches(doc: Optional[dict], kz: Optional[dict], kind: str) -> Tuple[O
 # ─── Generator YAML standar ──────────────────────────────────────────────
 
 def standard_labels(app: str, ns: str) -> dict:
-    return {"app": app, "env": env_from_namespace(ns), "project": app.split("-", 1)[0],
-            "role": role_for(app)}
+    # project = akhiran namespace (`<env>-<PROJECT>`, sama dgn cicd.json PROJECT) — konvensi
+    # dominan di GitOps main (production-qoin 47/50, production-ngenwal 71/71, …).
+    project = ns.split("-", 1)[1] if "-" in ns else app.split("-", 1)[0]
+    return {"app": app, "env": env_from_namespace(ns), "project": project, "role": role_for(app)}
 
 
 def nodepool_for(rules: Dict[str, dict], app: str, ns: str) -> str:
@@ -477,12 +483,15 @@ def suggest_deployment(
         key = p["key_dotnet" if stack == "dotnet" else "key_go"].format(env=env)
         mount = p["mount_dotnet" if stack == "dotnet" else "mount_go"].format(env=env)
         vols = pod.setdefault("volumes", [])
-        if not any((v.get("secret") or {}).get("secretName") == secret for v in vols):
+        # Volume config yg sudah ada (nama volume apa pun, mis. file-config-<app>-<env>) dipakai apa adanya.
+        has_fc = any(str((v.get("secret") or {}).get("secretName", "")).startswith(f"{p['secret_prefix']}{app}")
+                     for v in vols)
+        if not has_fc:
             vols.append({"name": p["volume_name"], "secret": {"secretName": secret, "defaultMode": 420}})
-        c0 = pod.setdefault("containers", [{}])[0]
-        mounts = c0.setdefault("volumeMounts", [])
-        if not any(m.get("name") == p["volume_name"] for m in mounts):
-            mounts.append({"name": p["volume_name"], "mountPath": mount, "subPath": key})
+            c0 = pod.setdefault("containers", [{}])[0]
+            mounts = c0.setdefault("volumeMounts", [])
+            if not any(m.get("name") == p["volume_name"] for m in mounts):
+                mounts.append({"name": p["volume_name"], "mountPath": mount, "subPath": key})
 
     if infra == "cce":
         pool = nodepool_for(rules, app, ns)
@@ -548,6 +557,72 @@ def _secret_suggestion(rules: Dict[str, dict], *, name: str, app: str, ns: str, 
     }
 
 
+# ─── Template standar terpusat (PocketBase `build_q_manifest_templates`) ────
+
+TEMPLATE_COLLECTION = "build_q_manifest_templates"
+TEMPLATE_CACHE = CONFIG_DIR / ".manifest-templates-cache.json"
+TEMPLATE_APP = "__app__"  # placeholder nama aplikasi di template (diganti saat adaptasi)
+
+
+def app_kind(app: str) -> str:
+    """Jenis aplikasi dari akhiran nama: manager | module | apigateway | workflow | …"""
+    return app.rsplit("-", 1)[-1]
+
+
+def load_templates(*, force_refresh: bool = False) -> Tuple[List[dict], str]:
+    """Template aktif dari PB → cache → [] (source: pb|cache|stale-cache|none)."""
+    try:
+        cache = json.loads(TEMPLATE_CACHE.read_text() or "{}")
+    except (OSError, json.JSONDecodeError):
+        cache = None
+    ttl = _ttl_seconds()
+    if (cache and not force_refresh and ttl > 0
+            and time.time() - cache.get("fetched_at", 0) < ttl):
+        return cache.get("records", []), "cache"
+    try:
+        records = pb_api.fetch_collection_records(TEMPLATE_COLLECTION, filter_="active=true", per_page=500)
+    except Exception:
+        return (cache.get("records", []), "stale-cache") if cache else ([], "none")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    TEMPLATE_CACHE.write_text(json.dumps({"fetched_at": int(time.time()), "records": records}))
+    try:
+        TEMPLATE_CACHE.chmod(0o600)
+    except OSError:
+        pass
+    return records, "pb"
+
+
+def find_template(templates: List[dict], *, infra: str, namespace: str, app: str,
+                  exclude_source_app: str = "") -> Optional[dict]:
+    """Template paling spesifik (namespace persis > `*`) untuk jenis aplikasi tsb → bentuk `sample`."""
+    kind = app_kind(app)
+    matches = [t for t in templates
+               if t.get("active", True) and t.get("infra", "cce") == infra
+               and t.get("app_kind") in (kind, "*") and t.get("namespace") in (namespace, "*")
+               and (not exclude_source_app or t.get("source_app") != exclude_source_app)
+               and isinstance(t.get("deployment"), dict) and isinstance(t.get("service"), dict)]
+    if not matches:
+        return None
+    t = min(matches, key=lambda t: (t.get("namespace") == "*", t.get("app_kind") == "*", t.get("order") or 0))
+    return {"app": TEMPLATE_APP, "deploy": t["deployment"], "service": t["service"],
+            "path": f"template {t.get('name')}", "standard": True, "template": t.get("name")}
+
+
+def make_template(deploy: dict, service: dict, *, app: str, infra: str, namespace: str,
+                  source: str) -> dict:
+    """Record template dari manifest standar: field runtime dibuang, nama app → placeholder."""
+    return {
+        "name": f"{infra}-{namespace}-{app_kind(app)}",
+        "infra": infra, "namespace": namespace, "app_kind": app_kind(app),
+        "stack": detect_stack(deploy),
+        "deployment": _renamed(deploy, app, TEMPLATE_APP),
+        "service": _renamed(service, app, TEMPLATE_APP),
+        "source": source, "source_app": app,
+        "description": f"Template standar {app_kind(app)} di {infra}/{namespace} (dari {source})",
+        "active": True, "order": 0,
+    }
+
+
 # ─── Sample YAML dari GitOps (default main:cce/<namespace>) ──────────────
 
 SAMPLE_RULE = "manifest_sample_source"
@@ -602,14 +677,22 @@ def _renamed(doc: dict, old: str, new: str) -> dict:
 def adapt_sample_deployment(
     rules: Dict[str, dict], sample: dict, *, app: str, ns: str, image: str,
     port: Optional[int] = None, stack: str = "go", infra: str = "cce", kz: Optional[dict] = None,
+    ports: Optional[List[dict]] = None, config_mount_dir: Optional[str] = None,
+    config_mount_paths: Optional[List[str]] = None, dotnet_args: Optional[bool] = None,
+    config_secret: Optional[bool] = None,
 ) -> dict:
-    """Deployment baru dari sample tetangga: ganti nama/label/image/port/stack, lalu standar rule."""
+    """Deployment baru dari sample tetangga: ganti nama/label/image/port/stack, lalu standar rule.
+
+    `ports` (daftar containerPort lengkap, mis. http + grpc) menimpa `port`;
+    `config_mount_dir` = direktori kerja aplikasi (WORKDIR Dockerfile) untuk mount file config.
+    """
     s_app = sample["app"]
     doc = _renamed(sample["deploy"], s_app, app)
     s_labels = _pod_labels(doc)
-    env = s_labels.get("env") or env_from_namespace(ns)
-    labels = {**s_labels, **standard_labels(app, ns), "env": env}
+    env = env_from_namespace(ns)  # selalu standar: env/replicas sample bisa menyimpang
+    labels = {**s_labels, **standard_labels(app, ns)}
     doc["metadata"].update({"name": app, "namespace": ns})
+    doc.setdefault("spec", {})["replicas"] = 2 if env == "production" else 1
     doc["metadata"]["labels"] = {**(doc["metadata"].get("labels") or {}), **labels}
     keys = [k for k in (_match_labels(doc) or labels) if k in labels]
     doc.setdefault("spec", {})["selector"] = {"matchLabels": {k: labels[k] for k in keys}}
@@ -617,7 +700,11 @@ def adapt_sample_deployment(
     pod = _pod(doc)
     c0 = (pod.get("containers") or [{}])[0]
     c0.update({"name": app, "image": image})
-    if port:
+    if ports:
+        c0["ports"] = [{k: v for k, v in (("containerPort", p.get("containerPort")), ("name", p.get("name")),
+                                          ("protocol", p.get("protocol", "TCP"))) if v is not None}
+                       for p in ports]
+    elif port:
         first = dict((c0.get("ports") or [{}])[0])
         first.update({"containerPort": port})
         first.setdefault("name", "http")
@@ -625,17 +712,45 @@ def adapt_sample_deployment(
         c0["ports"] = [first]
 
     fc = (rules.get("missing_file_config_volume") or DEFAULT_RULES["missing_file_config_volume"])["params"]
+    fc_vols = {v.get("name") for v in pod.get("volumes") or []
+               if str((v.get("secret") or {}).get("secretName", "")).startswith(fc["secret_prefix"])}
+    fc_mounts = [m for m in c0.get("volumeMounts") or [] if m.get("name") in fc_vols]
+    # Nama Secret config dinormalkan: sample `file-config-<s>-staging` di production → `file-config-<app>`.
+    for v in pod.get("volumes") or []:
+        name = str((v.get("secret") or {}).get("secretName", ""))
+        if name.startswith(fc["secret_prefix"]) and name not in (f"{fc['secret_prefix']}{app}",
+                                                                   f"{fc['secret_prefix']}{app}-{env}"):
+            v["secret"]["secretName"] = f"{fc['secret_prefix']}{app}"
     if stack != detect_stack(sample["deploy"]):
         if stack == "dotnet":
             c0["args"] = ["dotnet", f"{app}.dll", f"--environment={env}"]
         else:
             c0.pop("args", None)
-        fc_vols = {v.get("name") for v in pod.get("volumes") or []
-                   if str((v.get("secret") or {}).get("secretName", "")).startswith(fc["secret_prefix"])}
-        for m in c0.get("volumeMounts") or []:
-            if m.get("name") in fc_vols:
-                m["mountPath"] = fc[f"mount_{stack}"].format(env=env)
-                m["subPath"] = fc[f"key_{stack}"].format(env=env)
+        for m in fc_mounts:
+            m["mountPath"] = fc[f"mount_{stack}"].format(env=env)
+            m["subPath"] = fc[f"key_{stack}"].format(env=env)
+    if fc_mounts and (config_mount_paths or config_mount_dir):
+        # Satu mount config per path (sample bisa punya 2 mount config — jangan diwariskan).
+        first = fc_mounts[0]
+        key = first.get("subPath") or posixpath.basename(first.get("mountPath", ""))
+        paths = config_mount_paths or [f"{config_mount_dir.rstrip('/')}/{key}"]
+        others = [m for m in c0.get("volumeMounts") or [] if m not in fc_mounts]
+        c0["volumeMounts"] = others + [{**first, "mountPath": path, "subPath": posixpath.basename(path)}
+                                       for path in paths]
+    if config_secret is False:
+        # Aplikasi memilih config baked di image → tanpa volume/mount Secret config.
+        pod["volumes"] = [v for v in pod.get("volumes") or [] if v.get("name") not in fc_vols]
+        c0["volumeMounts"] = [m for m in c0.get("volumeMounts") or [] if m.get("name") not in fc_vols]
+        for key in ("volumes",):
+            if not pod[key]:
+                pod.pop(key)
+        if not c0["volumeMounts"]:
+            c0.pop("volumeMounts")
+    if stack == "dotnet" and dotnet_args is not None:
+        if dotnet_args:
+            c0["args"] = ["dotnet", f"{app}.dll", f"--environment={env}"]
+        else:
+            c0.pop("args", None)
     label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label")
     if infra != "cce":
         # Sample CCE untuk target SLS (k8s/): nodepool CCE tidak berlaku di sana.
@@ -647,18 +762,44 @@ def adapt_sample_deployment(
         if pool and label and label in (pod.get("nodeSelector") or {}):
             pod["nodeSelector"][label] = pool
 
-    pull = (rules.get("missing_image_pullsecret") or {}).get("params", {}).get("name")
+    pull_params = (rules.get("missing_image_pullsecret") or {}).get("params", {})
+    pull = pull_params.get("name")
+    prefixes = tuple(pull_params.get("image_prefixes") or ())
+    if prefixes and not image.startswith(prefixes):
+        # Image publik (mis. nginx) tidak butuh regcred dari sample.
+        pod["imagePullSecrets"] = [s for s in pod.get("imagePullSecrets") or [] if s.get("name") != pull]
+        if not pod["imagePullSecrets"]:
+            pod.pop("imagePullSecrets")
     patched, _ = apply_patches(doc, kz, "Deployment")
-    injected = pull in {s.get("name") for s in _pod(patched).get("imagePullSecrets") or []}
+    injected = pull in {s.get("name") for s in _pod(patched).get("imagePullSecrets") or []} or (
+        bool(prefixes) and not image.startswith(prefixes))
     return tidy(suggest_deployment(rules, app=app, ns=ns, image=image, stack=stack, infra=infra, base=doc,
-                                   add_pull_secret=not injected))
+                                   add_pull_secret=not injected, add_file_config=config_secret is not False))
 
 
-def adapt_sample_service(sample: dict, deploy: dict) -> dict:
-    """Service baru dari sample tetangga: selector & port mengikuti Deployment target."""
+def adapt_sample_service(sample: dict, deploy: dict, *, service_type: Optional[str] = None,
+                         exposed_ports: Optional[List[int]] = None) -> dict:
+    """Service baru dari sample tetangga: selector & port mengikuti Deployment target.
+
+    Konvensi "port klien tetap" sample (mis. Service port 80 → container 8810) diikuti.
+    `service_type` / `exposed_ports` = keputusan aplikasi (NodePort, port yang diekspos).
+    """
     app = (deploy.get("metadata") or {}).get("name", "")
     doc = _renamed(sample["service"], sample["app"], app)
-    doc.setdefault("spec", {})["ports"] = suggest_service(deploy)["spec"]["ports"]
+    ports = suggest_service(deploy)["spec"]["ports"]
+    if exposed_ports:
+        ports = [p for p in ports if p["port"] in exposed_ports] or ports
+    s_ports = (sample["service"].get("spec") or {}).get("ports") or []
+    s_cports = {str(p.get("containerPort")) for p in _container_ports(sample["deploy"])}
+    s_named = {p.get("name"): p.get("containerPort") for p in _container_ports(sample["deploy"]) if p.get("name")}
+    if len(s_ports) == 1 and ports:
+        tp = s_ports[0].get("targetPort", s_ports[0].get("port"))
+        target = s_named.get(tp, tp) if isinstance(tp, str) and not tp.isdigit() else tp
+        if str(s_ports[0].get("port")) != str(target) and str(target) in s_cports:
+            ports[0] = {**ports[0], "port": s_ports[0].get("port")}  # port klien tetap (mis. 80)
+    doc.setdefault("spec", {})["ports"] = ports
+    if service_type:
+        doc["spec"]["type"] = service_type
     doc["metadata"]["name"] = app
     return tidy(suggest_service(deploy, base=doc))
 
