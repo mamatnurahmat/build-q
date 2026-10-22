@@ -96,7 +96,7 @@ Dua rule lain hanya dipakai `params`-nya dan tidak diperiksa sebagai temuan:
 
 | Rule | Dipakai untuk |
 |---|---|
-| `nodepool_mismatch_cce` | `params.by_namespace` → nodepool CCE (`<prefix>-manager` / `<prefix>-service`) di saran Deployment |
+| `nodepool_mismatch_cce` | cadangan `params.by_namespace` bila namespace belum punya nodepool di PB `namespace` (lihat §10) |
 | `manifest_sample_source` | sumber sample YAML (`params.branch`, `params.infra`, `params.max_candidates`) |
 
 Catatan pemeriksaan:
@@ -341,8 +341,32 @@ Mapping context ↔ namespace juga terpusat di PocketBase (sejak v0.2.1):
 
 | Collection | Field |
 |---|---|
-| `kube_cx` | `name` (hw-dev, hw-pro-p, hw-pro-q, hw-pro-u), `cluster`, `server`, `environment`, `note` |
+| `kube_cx` | `name` (hw-dev, hw-pro-p, hw-pro-q, hw-pro-u), `cluster`, `server`, `environment`, `note`, `nodepools` |
 | `namespace` | `name`, `description`, `kube_cx` (relation) |
+| `nodepool` | `kube_cx` (relation), `namespace`, `role` (front/back), `label`, `value`, `description` |
+
+**Nodepool per namespace × cluster** (sejak v0.2.5) — collection **`nodepool`**, satu record per
+`kube_cx` (relasi cluster) × `namespace` × `role` (`front` = manager/apigateway, `back` =
+module/…) dengan `label` (kunci nodeSelector, mis. `cce.cloud.com/cce-nodepool` atau `nodetype`)
+dan `value`. Unik per (kube_cx, namespace, role); baca = login, tulis = superuser.
+`kube_cx.nodepools` = inventaris pool yang benar-benar ada di cluster. Ubah lewat bagian
+`nodepool` di `scripts/build-q-seed.json` + `bq --tui-sync`. Data diselaraskan dengan node cluster (`kubectl get nodes`) dan nodeSelector mayoritas
+di GitOps (branch tempat namespace di-deploy):
+
+| Cluster | Namespace | Selector front / back |
+|---|---|---|
+| hw-dev | develop-qoin, develop-payout, develop-qoinhub, develop-saas | `cce-nodepool: develop-qoin-manager / develop-qoin-service` |
+| hw-dev | develop-ngenwal | `develop-qoincash-manager / develop-qoincash-service` |
+| hw-dev | sandbox-qoin | `sandbox-qoin-manager / sandbox-qoin-service` |
+| hw-pro-p | production-payout | **`nodetype: front / back`** (node hw-pro-p berlabel `nodetype`) |
+| hw-pro-p | staging-payout, develop-payout | `production-payout-nodepool-manager / -service` |
+| hw-pro-q | production-qoin, staging-qoin | `production-nodepool-manager / -service` |
+| hw-pro-u | production-ngenwal, production-saas, staging-ngenwal | `production-ue-nodepool-manager / -service` |
+
+Namespace di >1 cluster (mis. `develop-payout`) → cluster yang environment-nya cocok dengan
+prefix namespace (develop/sandbox → development). Saran YAML memakai pasangan label + nilai ini;
+bila label namespace bukan `cce-nodepool` (mis. `nodetype`), label nodepool CCE dari template
+dibuang. Pool `*-monitoring` / `*-workflow` / `*-cicd` tidak dipetakan.
 
 Mapping ini dipakai di tiga tempat:
 
@@ -521,7 +545,9 @@ Supaya hasil generate konsisten, Deployment + Service baru dibuat dari **templat
 terpusat** per `infra × namespace × jenis aplikasi` (akhiran nama: `manager`, `module`,
 `apigateway`, …). Urutan sumber saran: template PB → sample tetangga → generator.
 
-Template dibangun dari manifest nyata di GitOps `main` yang **lolos semua kriteria standar**:
+Template dibangun dari manifest nyata di GitOps — dibaca dari **branch tempat namespace
+di-deploy** (develop/staging/sandbox atau `main`) — yang **lolos semua kriteria standar**
+(termasuk nodeSelector sesuai collection `nodepool`):
 label `app/env/project/role` standar (`project` = akhiran namespace), replicas standar
 (production 2), Secret config bernama standar dengan tepat satu mount, punya Service,
 terdaftar di kustomization, dan tanpa temuan critical. Di antara kandidat, yang konvensi port
@@ -603,7 +629,8 @@ sepenuhnya mengikuti standar (umumnya `replicas` < 2 atau label), bukan kesalaha
 - Patch *strategic merge* dan patch dari file (`path:`) tidak dievaluasi.
 - Isi Secret tidak dibaca, sehingga kecocokan key (mis. `appsettings.<env>.json` vs
   `DOTNET_ENVIRONMENT`) tidak diperiksa. Gunakan skill `secret-from-file` / `file-config-setup`.
-- Nodepool hanya dipakai untuk saran; Deployment dengan nodepool salah belum dilaporkan.
+- Nodepool hanya dipakai untuk saran; Deployment dengan nodeSelector yang menyimpang dari mapping
+  belum dilaporkan sebagai temuan (terlihat di `--manifest-verify` sebagai "asli tidak standar").
 - `imagePullSecrets` pada ServiceAccount tidak dibaca, sehingga Deployment yang mendapat
   `regcred` dari ServiceAccount bisa dilaporkan `missing_image_pullsecret`. Matikan atau
   sesuaikan rule bila pola ini dipakai.

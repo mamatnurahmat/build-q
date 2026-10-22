@@ -154,7 +154,7 @@ inti dibandingkan setelah patch kustomization; perbedaan diklasifikasikan:
 | Replicas | production 2, lainnya 1 | pdb-production-standards |
 | Secret config | `file-config-<app>` atau `file-config-<app>-<env>`, satu mount (`/app/.env` / `appsettings.<env>.json`) | skill file-config-setup |
 | Pull secret | `regcred` untuk image `loyaltolpi/…` (boleh via patch kustomization) | k8s-manifest-fix |
-| Nodepool CCE | `<prefix>-manager` / `<prefix>-service` per namespace (`params.by_namespace`) | NODEPOOL |
+| Nodepool | collection PB `nodepool` per cluster × namespace × role (`label`, `value`); production-payout `nodetype: front/back`, lainnya `cce-nodepool` | node cluster + GitOps |
 | Service | selector memilih pod; `targetPort` bernama harus ada; port klien mengikuti konvensi namespace | Kubernetes + data GitOps |
 | Kustomization | file deployment/service terdaftar di `resources` | Kustomize |
 
@@ -164,7 +164,8 @@ inti dibandingkan setelah patch kustomization; perbedaan diklasifikasikan:
 |---|---|---|---|
 | `build_q_anomaly_rules` | 53 rule (12 dipakai Manifest Suite): severity, active, `params` | `rule_name` | baca login, tulis superuser |
 | `build_q_manifest_templates` | template Deployment + Service per `infra × namespace × app_kind` | `name` | baca login, tulis superuser |
-| `kube_cx`, `namespace` | mapping cluster ↔ namespace (+ `server` untuk destination ArgoCD) | `name` / `name+kube_cx` | lihat catatan keamanan |
+| `kube_cx`, `namespace` | mapping cluster ↔ namespace (+ `server` destination ArgoCD, `nodepools` inventaris) | `name` / `name+kube_cx` | lihat catatan keamanan |
+| `nodepool` | nodeSelector standar per cluster × namespace × role (28 record) | `kube_cx+namespace+role` | baca login, tulis superuser |
 
 Sumber kebenaran rule: `scripts/anomaly-rules-seed.json`; template: hasil `--manifest-template`
 (seed lokal). Semua lewat `bq --tui-sync <seed>`.

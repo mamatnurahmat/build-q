@@ -28,9 +28,11 @@ from .tui_catalog import _ttl_seconds
 
 
 CACHE_FILE = CONFIG_DIR / ".kube-cx-cache.json"
-_CACHE_VERSION = 2  # v2: + field server (mapping destination ArgoCD)
+_CACHE_VERSION = 3  # v2: + server (destination ArgoCD) · v3: + nodepool per namespace & cluster
 CX_COLLECTION = "kube_cx"
 NS_COLLECTION = "namespace"
+NODEPOOL_COLLECTION = "nodepool"
+NODEPOOL_LABEL = "cce.cloud.com/cce-nodepool"
 
 # Fallback minimum — HANYA dipakai saat PB down + cache kosong.
 _BOOTSTRAP: Dict[str, dict] = {
@@ -42,24 +44,45 @@ _BOOTSTRAP: Dict[str, dict] = {
             "default", "develop-qoin", "develop-payout", "develop-qoinhub", "develop-saas",
             "develop-ngenwal", "sandbox-qoin", "jenkins-x",
         ],
+        "nodepools": ["develop-qoin-manager", "develop-qoin-service", "develop-qoincash-manager",
+                      "develop-qoincash-service", "sandbox-qoin-manager", "sandbox-qoin-service"],
+        "nodepool": {
+            **{ns: {"front": "develop-qoin-manager", "back": "develop-qoin-service"}
+               for ns in ("develop-qoin", "develop-payout", "develop-qoinhub", "develop-saas")},
+            "develop-ngenwal": {"front": "develop-qoincash-manager", "back": "develop-qoincash-service"},
+            "sandbox-qoin": {"front": "sandbox-qoin-manager", "back": "sandbox-qoin-service"},
+        },
     },
     "hw-pro-p": {
         "server": "https://10.7.20.103:5443",
         "environment": "production",
         "note": "Huawei CCE production payout + ArgoCD. Nodepool production-payout-nodepool-*",
-        "namespaces": ["production-payout", "develop-payout", "argocd"],
+        "namespaces": ["production-payout", "staging-payout", "develop-payout", "argocd"],
+        "nodepools": ["production-payout-nodepool-manager", "production-payout-nodepool-service"],
+        "nodepool": {
+            # production-payout: konvensi label `nodetype: front|back` (node hw-pro-p berlabel nodetype).
+            "production-payout": {"label": "nodetype", "front": "front", "back": "back"},
+            **{ns: {"front": "production-payout-nodepool-manager", "back": "production-payout-nodepool-service"}
+               for ns in ("staging-payout", "develop-payout")},
+        },
     },
     "hw-pro-q": {
         "server": "https://10.5.20.23:5443",
         "environment": "production",
         "note": "Huawei CCE production Qoin (AP/QA) + staging Qoin. Nodepool production-nodepool-*",
         "namespaces": ["production-qoin", "staging-qoin"],
+        "nodepools": ["production-nodepool-manager", "production-nodepool-service"],
+        "nodepool": {ns: {"front": "production-nodepool-manager", "back": "production-nodepool-service"}
+                     for ns in ("production-qoin", "staging-qoin")},
     },
     "hw-pro-u": {
         "server": "https://10.6.20.45:5443",
         "environment": "production",
         "note": "Huawei CCE production UE region (ngenwal, saas) + staging ngenwal. Nodepool production-ue-nodepool-*",
         "namespaces": ["production-ngenwal", "production-saas", "staging-ngenwal"],
+        "nodepools": ["production-ue-nodepool-manager", "production-ue-nodepool-service"],
+        "nodepool": {ns: {"front": "production-ue-nodepool-manager", "back": "production-ue-nodepool-service"}
+                     for ns in ("production-ngenwal", "production-saas", "staging-ngenwal")},
     },
 }
 
@@ -86,7 +109,9 @@ def _fetch_from_pb() -> Dict[str, dict]:
             "server": r.get("server", ""),
             "environment": r.get("environment", ""),
             "note": r.get("note", ""),
+            "nodepools": r.get("nodepools") if isinstance(r.get("nodepools"), list) else [],
             "namespaces": [],
+            "nodepool": {},
         }
         for r in by_id.values()
     }
@@ -94,6 +119,18 @@ def _fetch_from_pb() -> Dict[str, dict]:
         cx = by_id.get(r.get("kube_cx", ""))
         if cx and r.get("name"):
             out[cx["name"]]["namespaces"].append(r["name"])
+    try:
+        pools = pb_api.fetch_collection_records(NODEPOOL_COLLECTION, per_page=500)
+    except Exception:  # collection belum ada / akses ditolak → generator pakai params rule
+        pools = []
+    for r in pools:
+        cx = by_id.get(r.get("kube_cx", ""))
+        if not (cx and r.get("namespace") and r.get("role") and r.get("value")):
+            continue
+        entry = out[cx["name"]]["nodepool"].setdefault(r["namespace"], {})
+        entry[r["role"]] = r["value"]
+        if r.get("label") and r["label"] != NODEPOOL_LABEL:
+            entry["label"] = r["label"]
     return out
 
 
@@ -187,6 +224,43 @@ def resolve(namespace: str) -> Tuple[Optional[str], str]:
     if not ns or ns.startswith("<"):
         return None, "namespace kosong"
     return None, f"namespace {ns} belum ada di mapping"
+
+
+_ENV_CLUSTER = {"develop": "development", "sandbox": "development"}  # lainnya → production
+
+
+def node_selector_for(namespace: str, role: str, ctx: Optional[str] = None) -> Tuple[str, str]:
+    """(label, nilai) nodeSelector standar namespace di cluster; ("", "") bila tak ada data."""
+    pool = nodepool_for(namespace, role, ctx)
+    if not pool:
+        return "", ""
+    data = contexts()
+    for c in ([ctx] if ctx else list(data)):
+        entry = ((data.get(c) or {}).get("nodepool") or {}).get(namespace, {})
+        if entry.get(role) == pool:
+            return entry.get("label") or NODEPOOL_LABEL, pool
+    return NODEPOOL_LABEL, pool
+
+
+def nodepool_for(namespace: str, role: str, ctx: Optional[str] = None) -> str:
+    """Nodepool CCE (`front` = manager/apigateway, `back` = module/…) untuk namespace di cluster.
+
+    Tanpa `ctx`: cluster dari mapping; namespace ambigu (mis. develop-payout di hw-dev & hw-pro-p)
+    → cluster yang environment-nya cocok dgn prefix namespace. "" bila tidak ada data.
+    """
+    data = contexts()
+    if ctx:
+        candidates = [ctx]
+    else:
+        candidates = [c for c, meta in data.items() if namespace in (meta.get("nodepool") or {})]
+        if len(candidates) > 1:
+            want = _ENV_CLUSTER.get(namespace.split("-", 1)[0], "production")
+            candidates.sort(key=lambda c: data[c].get("environment") != want)
+    for c in candidates:
+        pool = ((data.get(c) or {}).get("nodepool") or {}).get(namespace, {}).get(role, "")
+        if pool:
+            return pool
+    return ""
 
 
 IN_CLUSTER = "https://kubernetes.default.svc"

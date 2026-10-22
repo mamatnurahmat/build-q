@@ -908,11 +908,10 @@ Config file: ~/.build-q/.env
             from . import e2e, manifest_template
             config = load_config()
             infra = args.infra or config["gitops"].get("infra") or "cce"
-            branch = args.gitops_branch or "main"
+            branch = args.gitops_branch  # None → branch deploy masing-masing namespace
             names = [n.strip() for n in args.manifest_template.split(",") if n.strip()]
             if names == ["all"]:
-                names = [n for n in e2e.gh_list_dir(config["gitops"]["repo"], infra, branch)
-                         if "." not in n]
+                names = manifest_template.all_namespaces(config, infra)
             records = []
             for ns in names:
                 recs, report = manifest_template.build(ns, branch=branch, infra=infra, config=config)

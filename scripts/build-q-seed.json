@@ -823,28 +823,48 @@
       "cluster": "hw-dev-cluster",
       "server": "https://10.2.20.121:5443",
       "environment": "development",
-      "note": "Huawei CCE develop/sandbox + Jenkins X (pipeline CI). Nodepool develop-qoin-*, develop-qoincash-*, sandbox-qoin-*"
+      "note": "Huawei CCE develop/sandbox + Jenkins X (pipeline CI). Nodepool develop-qoin-*, develop-qoincash-*, sandbox-qoin-*",
+      "nodepools": [
+        "develop-qoin-manager",
+        "develop-qoin-service",
+        "develop-qoincash-manager",
+        "develop-qoincash-service",
+        "sandbox-qoin-manager",
+        "sandbox-qoin-service"
+      ]
     },
     {
       "name": "hw-pro-p",
       "cluster": "hw-pro-p-cluster",
       "server": "https://10.7.20.103:5443",
       "environment": "production",
-      "note": "Huawei CCE production payout + ArgoCD. Nodepool production-payout-nodepool-*"
+      "note": "Huawei CCE production payout + ArgoCD. Nodepool production-payout-nodepool-*",
+      "nodepools": [
+        "production-payout-nodepool-manager",
+        "production-payout-nodepool-service"
+      ]
     },
     {
       "name": "hw-pro-q",
       "cluster": "hw-pro-q-cluster",
       "server": "https://10.5.20.23:5443",
       "environment": "production",
-      "note": "Huawei CCE production Qoin (AP/QA) + staging Qoin. Nodepool production-nodepool-*"
+      "note": "Huawei CCE production Qoin (AP/QA) + staging Qoin. Nodepool production-nodepool-*",
+      "nodepools": [
+        "production-nodepool-manager",
+        "production-nodepool-service"
+      ]
     },
     {
       "name": "hw-pro-u",
       "cluster": "hw-pro-u-cluster",
       "server": "https://10.6.20.45:5443",
       "environment": "production",
-      "note": "Huawei CCE production UE region (ngenwal, saas) + staging ngenwal. Nodepool production-ue-nodepool-*"
+      "note": "Huawei CCE production UE region (ngenwal, saas) + staging ngenwal. Nodepool production-ue-nodepool-*",
+      "nodepools": [
+        "production-ue-nodepool-manager",
+        "production-ue-nodepool-service"
+      ]
     }
   ],
   "namespace": [
@@ -927,6 +947,237 @@
       "name": "staging-ngenwal",
       "kube_cx": "hw-pro-u",
       "description": ""
+    },
+    {
+      "name": "staging-payout",
+      "kube_cx": "hw-pro-p",
+      "description": "folder cce/staging-payout (branch staging)"
+    }
+  ],
+  "nodepool": [
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-qoin",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-manager",
+      "description": "nodeSelector front develop-qoin di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-qoin",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-service",
+      "description": "nodeSelector back develop-qoin di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-payout",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-manager",
+      "description": "nodeSelector front develop-payout di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-payout",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-service",
+      "description": "nodeSelector back develop-payout di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-qoinhub",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-manager",
+      "description": "nodeSelector front develop-qoinhub di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-qoinhub",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-service",
+      "description": "nodeSelector back develop-qoinhub di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-saas",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-manager",
+      "description": "nodeSelector front develop-saas di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-saas",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoin-service",
+      "description": "nodeSelector back develop-saas di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-ngenwal",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoincash-manager",
+      "description": "nodeSelector front develop-ngenwal di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "develop-ngenwal",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "develop-qoincash-service",
+      "description": "nodeSelector back develop-ngenwal di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "sandbox-qoin",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "sandbox-qoin-manager",
+      "description": "nodeSelector front sandbox-qoin di hw-dev"
+    },
+    {
+      "kube_cx": "hw-dev",
+      "namespace": "sandbox-qoin",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "sandbox-qoin-service",
+      "description": "nodeSelector back sandbox-qoin di hw-dev"
+    },
+    {
+      "kube_cx": "hw-pro-p",
+      "namespace": "production-payout",
+      "role": "front",
+      "label": "nodetype",
+      "value": "front",
+      "description": "nodeSelector front production-payout di hw-pro-p"
+    },
+    {
+      "kube_cx": "hw-pro-p",
+      "namespace": "production-payout",
+      "role": "back",
+      "label": "nodetype",
+      "value": "back",
+      "description": "nodeSelector back production-payout di hw-pro-p"
+    },
+    {
+      "kube_cx": "hw-pro-p",
+      "namespace": "staging-payout",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-payout-nodepool-manager",
+      "description": "nodeSelector front staging-payout di hw-pro-p"
+    },
+    {
+      "kube_cx": "hw-pro-p",
+      "namespace": "staging-payout",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-payout-nodepool-service",
+      "description": "nodeSelector back staging-payout di hw-pro-p"
+    },
+    {
+      "kube_cx": "hw-pro-p",
+      "namespace": "develop-payout",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-payout-nodepool-manager",
+      "description": "nodeSelector front develop-payout di hw-pro-p"
+    },
+    {
+      "kube_cx": "hw-pro-p",
+      "namespace": "develop-payout",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-payout-nodepool-service",
+      "description": "nodeSelector back develop-payout di hw-pro-p"
+    },
+    {
+      "kube_cx": "hw-pro-q",
+      "namespace": "production-qoin",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-nodepool-manager",
+      "description": "nodeSelector front production-qoin di hw-pro-q"
+    },
+    {
+      "kube_cx": "hw-pro-q",
+      "namespace": "production-qoin",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-nodepool-service",
+      "description": "nodeSelector back production-qoin di hw-pro-q"
+    },
+    {
+      "kube_cx": "hw-pro-q",
+      "namespace": "staging-qoin",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-nodepool-manager",
+      "description": "nodeSelector front staging-qoin di hw-pro-q"
+    },
+    {
+      "kube_cx": "hw-pro-q",
+      "namespace": "staging-qoin",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-nodepool-service",
+      "description": "nodeSelector back staging-qoin di hw-pro-q"
+    },
+    {
+      "kube_cx": "hw-pro-u",
+      "namespace": "production-ngenwal",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-ue-nodepool-manager",
+      "description": "nodeSelector front production-ngenwal di hw-pro-u"
+    },
+    {
+      "kube_cx": "hw-pro-u",
+      "namespace": "production-ngenwal",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-ue-nodepool-service",
+      "description": "nodeSelector back production-ngenwal di hw-pro-u"
+    },
+    {
+      "kube_cx": "hw-pro-u",
+      "namespace": "production-saas",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-ue-nodepool-manager",
+      "description": "nodeSelector front production-saas di hw-pro-u"
+    },
+    {
+      "kube_cx": "hw-pro-u",
+      "namespace": "production-saas",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-ue-nodepool-service",
+      "description": "nodeSelector back production-saas di hw-pro-u"
+    },
+    {
+      "kube_cx": "hw-pro-u",
+      "namespace": "staging-ngenwal",
+      "role": "front",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-ue-nodepool-manager",
+      "description": "nodeSelector front staging-ngenwal di hw-pro-u"
+    },
+    {
+      "kube_cx": "hw-pro-u",
+      "namespace": "staging-ngenwal",
+      "role": "back",
+      "label": "cce.cloud.com/cce-nodepool",
+      "value": "production-ue-nodepool-service",
+      "description": "nodeSelector back staging-ngenwal di hw-pro-u"
     }
   ]
 }

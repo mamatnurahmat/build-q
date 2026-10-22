@@ -42,16 +42,25 @@ def _standard_reason(rules: dict, deploy: dict, app: str, ns: str) -> str:
     mounts = [m for m in mc._containers(deploy)[0].get("volumeMounts") or [] if m.get("name") in fc]
     if len(mounts) > 1:
         return "mount config ganda"
+    label, value = mc.node_selector(rules, app, ns)
+    actual = (mc._pod(deploy).get("nodeSelector") or {}).get(label) if label else None
+    if value and actual != value:
+        return f"nodeSelector {label}={actual} (standar {value})"
     return ""
 
 
-def build(namespace: str, *, branch: str = "main", infra: str = "cce",
+def build(namespace: str, *, branch: Optional[str] = None, infra: str = "cce",
           config: Optional[dict] = None) -> Tuple[List[dict], List[dict]]:
-    """Return (records template, laporan per jenis aplikasi)."""
+    """Return (records template, laporan per jenis aplikasi).
+
+    `branch` default = branch tempat namespace di-deploy (develop-*/staging-*/sandbox-* →
+    branch yg sama, lainnya → main) — folder non-production di `main` bisa basi.
+    """
     from . import e2e, manifest_check as mc
     from .config import load_config
 
     config = config or load_config()
+    branch = branch or e2e.gitops_branch_for(mc.env_from_namespace(namespace), config["gitops"]["branch"])
     repo, folder = config["gitops"]["repo"], f"{infra}/{namespace}"
     rules, _ = mc.load_rules()
     suffixes = rules["service_missing"]["params"]["suffixes"]
@@ -116,6 +125,19 @@ def build(namespace: str, *, branch: str = "main", infra: str = "cce",
             report.append({"kind": kind, "template": None, "source_app": None,
                            "candidates": len(candidates), "rejected": rejected})
     return records, report
+
+
+def all_namespaces(config: dict, infra: str = "cce") -> List[str]:
+    """Semua folder namespace yang ada di branch deploy-nya masing-masing."""
+    from . import e2e, manifest_check as mc
+
+    repo, out = config["gitops"]["repo"], set()
+    for branch in ("main", "develop", "staging", "sandbox"):
+        for name in e2e.gh_list_dir(repo, infra, branch):
+            if "." not in name and e2e.gitops_branch_for(
+                    mc.env_from_namespace(name), config["gitops"]["branch"]) == branch:
+                out.add(name)
+    return sorted(out)
 
 
 def write_seed(records: List[dict], path: Optional[str] = None) -> Path:
