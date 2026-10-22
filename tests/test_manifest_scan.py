@@ -25,6 +25,18 @@ def _item(rep, app=SIM_REPO):
     return next(i for i in rep.items if i.app == app)
 
 
+def ambiguous_bootstrap():
+    """Data cluster dgn namespace `develop-payout` di 2 cluster — menguji mekanisme namespace ambigu
+    (data nyata sudah tidak ambigu)."""
+    from unittest import mock
+
+    from build_q import kube_contexts
+
+    data = copy.deepcopy(kube_contexts._BOOTSTRAP)
+    data["hw-pro-p"]["namespaces"].append("develop-payout")
+    return mock.patch.object(kube_contexts, "load", lambda **k: (data, "bootstrap"))
+
+
 class TestScan:
     def test_healthy_namespace(self):
         rep = _scan(healthy_world())
@@ -80,7 +92,7 @@ class TestScan:
                 return [SIM_REPO, SAMPLE_APP] if ctx == "hw-pro-p" else ["lain"]
             return world.secrets
 
-        with patched(world):
+        with patched(world), ambiguous_bootstrap():
             monkeypatch.setattr(e2e, "kubectl_names", names)
             rep = manifest_scan.scan("develop-payout", config=copy.deepcopy(SIM_CONFIG))
         assert "hw-pro-p/develop-payout" in rep.secret_source

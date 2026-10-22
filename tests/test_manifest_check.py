@@ -39,6 +39,18 @@ def _rules_hit(res):
     return [f.rule_name for f in res.findings]
 
 
+def ambiguous_bootstrap():
+    """Data cluster dgn namespace `develop-payout` di 2 cluster — menguji mekanisme namespace ambigu
+    (data nyata sudah tidak ambigu)."""
+    from unittest import mock
+
+    from build_q import kube_contexts
+
+    data = copy.deepcopy(kube_contexts._BOOTSTRAP)
+    data["hw-pro-p"]["namespaces"].append("develop-payout")
+    return mock.patch.object(kube_contexts, "load", lambda **k: (data, "bootstrap"))
+
+
 class TestGenerator:
     def test_standard_deployment_passes_all_rules(self, rules):
         d = _deploy(rules)
@@ -246,7 +258,7 @@ class TestAmbiguousNamespace:
                 return [SIM_REPO] if ctx == "hw-pro-p" else []
             return world.secrets
 
-        with patched(world):
+        with patched(world), ambiguous_bootstrap():
             monkeypatch.setattr(e2e, "kubectl_names", names)
             assert kube_contexts.candidates("develop-payout") == ["hw-dev", "hw-pro-p"]
             rep = e2e.analyze(world.repo, world.ref, config=copy.deepcopy(SIM_CONFIG))

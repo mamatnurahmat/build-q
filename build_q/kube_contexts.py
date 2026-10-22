@@ -57,14 +57,11 @@ _BOOTSTRAP: Dict[str, dict] = {
         "server": "https://10.7.20.103:5443",
         "environment": "production",
         "note": "Huawei CCE production payout + ArgoCD. Nodepool production-payout-nodepool-*",
-        "namespaces": ["production-payout", "staging-payout", "develop-payout", "argocd"],
+        "namespaces": ["production-payout", "argocd"],
         "nodepools": ["production-payout-nodepool-manager", "production-payout-nodepool-service"],
-        "nodepool": {
-            # production-payout: konvensi label `nodetype: front|back` (node hw-pro-p berlabel nodetype).
-            "production-payout": {"label": "nodetype", "front": "front", "back": "back"},
-            **{ns: {"front": "production-payout-nodepool-manager", "back": "production-payout-nodepool-service"}
-               for ns in ("staging-payout", "develop-payout")},
-        },
+        # `nodetype=front` di hw-pro-p juga menempel di pool monitoring/workflow → pakai nama pool presisi.
+        "nodepool": {"production-payout": {"front": "production-payout-nodepool-manager",
+                                           "back": "production-payout-nodepool-service"}},
     },
     "hw-pro-q": {
         "server": "https://10.5.20.23:5443",
