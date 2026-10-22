@@ -701,17 +701,22 @@ def _manifest_sample(repo: str, folder: str, app: str, rules: dict) -> Optional[
     return None
 
 
-def _secret_scope(st: Stage, *, ns: str, app: str, dest: dict, config: dict) -> Optional[set]:
+def _secret_scope(st: Stage, *, ns: str, app: str, dest: dict, config: dict,
+                  infra: str = "cce") -> Optional[set]:
     """Nama Secret di namespace target, atau None bila cluster tak bisa dipastikan.
 
     Context: destination Application ArgoCD (pasti) → mapping `kube_cx` per namespace
-    → kandidat namespace ambigu (cluster yang menjalankan Deployment ini).
+    → kandidat namespace ambigu (cluster yang menjalankan Deployment ini). Mapping
+    `kube_cx` hanya berisi cluster CCE (hw-*), jadi tidak dipakai untuk path `k8s/` (SLS).
     """
     from . import kube_contexts
 
     ctx = kube_contexts.context_for_destination(dest, config["argocd"]["k8s_context"])
     if ctx:
         candidates, why = [ctx], f"destination ArgoCD {dest.get('server') or dest.get('name')}"
+    elif infra != "cce":
+        st.details.append(f"infra {infra}/ (SLS) tidak ada di mapping kube_cx — secret dicek dari repo GitOps")
+        return None
     else:
         ctx, why = kube_contexts.resolve(ns)
         candidates = [ctx] if ctx else kube_contexts.candidates(ns)
@@ -805,7 +810,7 @@ def _stage_manifest(rep: E2EReport, cicd: dict, gitops: Stage, argocd: Stage, co
                                .get("spec", {}).get("containers") or []):
         sample = _manifest_sample(repo, folder, app, rules)
 
-    in_cluster = _secret_scope(st, ns=ns, app=app, dest=dest, config=config)
+    in_cluster = _secret_scope(st, ns=ns, app=app, dest=dest, config=config, infra=infra)
     in_repo = None
     if in_cluster is None:
         in_repo = set(gh_list_dir(repo, folder, branch)) | set(gh_list_dir(repo, f"{folder}/file-config", branch))

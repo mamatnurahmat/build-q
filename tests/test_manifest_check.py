@@ -503,3 +503,28 @@ class TestE2EContext:
         assert calls == [("hw-pro-q", "production-qoin", "secrets")]
         assert "namespace efektif: production-qoin (folder staging-qoin)" in st.details
         assert st.status == "ok"
+
+
+class TestSlsPath:
+    def test_k8s_path_does_not_use_cce_mapping(self, monkeypatch):
+        from build_q.e2e_sim import argocd_app, task_run
+
+        world = healthy_world()
+        world.files = {(r, p.replace("cce/develop-qoin/", "k8s/develop-qoin/")): v
+                       for (r, p), v in world.files.items()}
+        gfile = f"k8s/develop-qoin/{SIM_REPO}_deployment.yaml"
+        tag = e2e.expected_tag(world.ref, world.sha)
+        world.taskrun = task_run({"build-mode": "built", "image-tag": tag, "gitops-file": gfile,
+                                  "gitops-result": "pushed"})
+        world.apps = [argocd_app("k8s/develop-qoin", "develop", tag)]
+        with patched(world):
+            monkeypatch.setattr(e2e, "kubectl_names", lambda *a: pytest.fail("cluster CCE dipakai utk SLS"))
+            rep = e2e.analyze(world.repo, world.ref, config=copy.deepcopy(SIM_CONFIG))
+        st = next(s for s in rep.stages if s.key == "manifest")
+        assert any("infra k8s/ (SLS)" in d for d in st.details)
+        assert st.status == "skip" and st.applicable  # secret belum terverifikasi → incomplete
+
+    def test_sample_cce_for_sls_target_drops_nodepool(self, rules, sample):
+        d = mc.adapt_sample_deployment(rules, sample, app=APP, ns="production-saas", image="i:1",
+                                       infra="k8s")
+        assert "cce.cloud.com/cce-nodepool" not in (d["spec"]["template"]["spec"].get("nodeSelector") or {})

@@ -583,9 +583,12 @@ def handle_slash(cmd: str, provider_ref: list[Provider]) -> bool:
         try:
             cat = catalog(force_refresh=True)
             cxs, cx_src = kube_contexts.load(force_refresh=True)
+            from .manifest_check import load_rules
+            rules, rules_src = load_rules(force_refresh=True)
             console.print(
                 f"[green]katalog di-refresh ({cat['source']}): "
-                f"{len(cat['tools'])} tools · kube_cx ({cx_src}): {len(cxs)} context[/green]"
+                f"{len(cat['tools'])} tools · kube_cx ({cx_src}): {len(cxs)} context · "
+                f"rule manifest ({rules_src}): {len(rules)}[/green]"
             )
         except Exception as e:
             console.print(f"[red]refresh gagal:[/red] {e}")

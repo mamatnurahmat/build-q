@@ -631,9 +631,14 @@ def adapt_sample_deployment(
             if m.get("name") in fc_vols:
                 m["mountPath"] = fc[f"mount_{stack}"].format(env=env)
                 m["subPath"] = fc[f"key_{stack}"].format(env=env)
-    if infra == "cce" and role_for(app) != role_for(s_app):
+    label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label")
+    if infra != "cce":
+        # Sample CCE untuk target SLS (k8s/): nodepool CCE tidak berlaku di sana.
+        (pod.get("nodeSelector") or {}).pop(label, None)
+        if not pod.get("nodeSelector"):
+            pod.pop("nodeSelector", None)
+    elif role_for(app) != role_for(s_app):
         pool = nodepool_for(rules, app, ns)
-        label = (rules.get("nodepool_mismatch_cce") or {}).get("params", {}).get("label")
         if pool and label and label in (pod.get("nodeSelector") or {}):
             pod["nodeSelector"][label] = pool
 
