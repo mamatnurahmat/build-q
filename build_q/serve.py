@@ -184,7 +184,7 @@ def _spawn_e2e_job(creds: Any, *, repo: str = "", ref: str = "", simulate: str =
                             e2e.use_credentials(github_token=creds.get("GITHUB_TOKEN"),
                                                 kubeconfig=kubeconfig):
                         report = e2e.analyze(repo, ref, config=user_creds.user_config(creds),
-                                             on_stage=on_stage)
+                                             on_stage=on_stage, use_jev=True)
                     payload = _e2e_payload(report)
             rc = payload["exit_code"]
             q.put(("report", payload))

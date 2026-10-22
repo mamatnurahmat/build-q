@@ -11,7 +11,12 @@ Alur Qoin yang ditelusuri (read-only, tidak mengubah apa pun):
                 (build-mode, image-tag, gitops-file, gitops-result, gitops-url).
   4. GitOps   — tag image di YAML GitOps pada branch ENV (develop/staging/
                 sandbox → push langsung; tag v* → PR ke main).
-  5. ArgoCD   — Application yang memantau folder file GitOps di branch tsb:
+  5. Manifest — Deployment ↔ Service ↔ Secret di folder GitOps: selector
+                cocok label pod, targetPort ada, Secret yang dirujuk sudah ada
+                di namespace (context dari mapping `kube_cx`). Rule standar
+                dari PB `build_q_anomaly_rules`; bila belum sesuai → saran YAML.
+                Opsional: Jev menilai kesiapan deploy & prioritas perbaikan.
+  6. ArgoCD   — Application yang memantau folder file GitOps di branch tsb:
                 sync/health + image live (`status.summary.images`). Dibaca
                 via kubectl; bila cluster tak terjangkau, fallback ke REST
                 API ArgoCD (ARGOCD_API_URL + token SSO).
@@ -143,6 +148,29 @@ def kubectl_json(context: str, args: List[str]) -> dict:
     if res.returncode != 0:
         raise KubectlError(res.stderr.strip().splitlines()[-1] if res.stderr.strip() else "kubectl gagal")
     return json.loads(res.stdout or "{}")
+
+
+def kubectl_names(context: str, ns: str, kind: str) -> List[str]:
+    """`kubectl get <kind> -o name` — hanya nama (isi Secret tidak pernah dibaca)."""
+    cmd = ["kubectl", "--context", context, "-n", ns, "get", kind, "-o", "name",
+           f"--request-timeout={_KUBECTL_TIMEOUT}s"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=_KUBECTL_TIMEOUT + 5,
+                           env=_kubectl_env())
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise KubectlError(f"kubectl {context}: {e}") from e
+    if r.returncode != 0:
+        raise KubectlError(f"kubectl {context}: {r.stderr.strip()[:200]}")
+    return [ln.split("/", 1)[-1] for ln in r.stdout.split()]
+
+
+def gh_list_dir(repo: str, path: str, ref: str) -> List[str]:
+    """Nama file di folder repo (GitHub contents API); [] bila folder tidak ada."""
+    try:
+        items = gh_get(f"/repos/{repo}/contents/{quote(path)}?ref={quote(ref)}") or []
+    except github_api.GitHubAPIError:
+        return []
+    return [i.get("name", "") for i in items if isinstance(i, dict)]
 
 
 def kubectl_logs(context: str, ns: str, pod: str, container: str, tail: int = 15) -> str:
@@ -532,6 +560,7 @@ def _stage_gitops(rep: E2EReport, cicd: dict, config: dict, pipeline: Stage) -> 
     try:
         text = gh_raw(gitops_repo, path, branch)
     except github_api.GitHubAPIError:
+        st.data["missing"] = True
         st.status, st.summary = FAIL, f"file GitOps tidak ada di {branch}"
         st.hints.append("Bootstrap manifest dulu (skill gitops-cce-bootstrap / gitops-k8s-bootstrap / "
                         "gitops-web-bootstrap, atau `bq --bootstrap-k8s`).")
@@ -539,6 +568,7 @@ def _stage_gitops(rep: E2EReport, cicd: dict, config: dict, pipeline: Stage) -> 
 
     from .gitops_set_image import _extract_first_image
 
+    st.data["_yaml"] = text  # dipakai tahap manifest; dibuang sebelum laporan
     current = _extract_first_image(text) or ""
     tag = image_tag(current)
     st.data["image"] = current
@@ -573,6 +603,255 @@ def _stage_gitops(rep: E2EReport, cicd: dict, config: dict, pipeline: Stage) -> 
         else:
             st.hints.append(f"Update via GitOps: `bq --gitops-set-image {gitops_repo} {branch} {path} "
                             f"{rep.image}:{rep.expected_tag}` (atau PR).")
+    return st
+
+
+def _manifest_jev(findings: list, *, app: str, ns: str) -> Optional[dict]:
+    """Satu Jev call: kesiapan deploy + rule yang harus dibereskan dulu. Fail-safe."""
+    try:
+        from .tui import jev_decide, load_env, resolve_provider
+
+        load_env()
+        provider = resolve_provider()
+        resp = jev_decide(
+            {"deployment": app, "namespace": ns,
+             "findings": [{"rule": f.rule_name, "severity": f.severity, "message": f.message}
+                          for f in findings]},
+            {
+                "deploy_ready": {
+                    "type": "noul",
+                    "instructions": "Apakah pasangan Deployment/Service/Secret ini siap melayani traffic?",
+                    "criteria": {"true": "Selector cocok, secret tersedia — pod bisa jalan & menerima traffic.",
+                                 "false": "Ada masalah yang membuat pod gagal jalan atau traffic tidak sampai."},
+                },
+                "fix_first": {
+                    "type": "choice",
+                    "instructions": "Rule mana yang paling perlu dibereskan lebih dulu?",
+                    "criteria": {f.rule_name: f.message for f in findings},
+                },
+            },
+            provider,
+        )
+    except Exception as e:  # provider/key/network — Jev hanya pelengkap
+        return {"error": str(e)[:120]}
+    answers = resp.get("answers") or {}
+    try:
+        ready = float((answers.get("deploy_ready") or {}).get("noul", 0.0))
+    except (TypeError, ValueError):
+        ready = 0.0
+    return {"deploy_ready": ready, "fix_first": (answers.get("fix_first") or {}).get("choice", "")}
+
+
+def _fetch_service(repo: str, path: str, branch: str, suffixes: List[str]) -> tuple[Optional[dict], str]:
+    """Service pasangan `<app>_deployment.yaml` (suffix pertama yang ada); path default bila tidak ada."""
+    from . import manifest_check as mc
+
+    for suffix in suffixes:
+        candidate = path.replace("_deployment.yaml", suffix)
+        try:
+            service = mc.find_kind(mc.parse_yaml(gh_raw(repo, candidate, branch)), "Service")
+        except Exception:  # 404 / YAML rusak → anggap belum ada
+            continue
+        if service is not None:
+            return service, candidate
+    return None, path.replace("_deployment.yaml", suffixes[0])
+
+
+def _fetch_kustomization(repo: str, folder: str, branch: str) -> tuple[Optional[dict], str]:
+    from . import manifest_check as mc
+
+    try:
+        return mc.parse_kustomization(gh_raw(repo, f"{folder}/kustomization.yaml", branch)), ""
+    except github_api.GitHubAPIError:
+        return None, f"{folder}/kustomization.yaml tidak ada"
+    except Exception as e:  # YAML rusak
+        return None, f"kustomization.yaml tidak bisa dibaca: {str(e)[:80]}"
+
+
+def _manifest_sample(repo: str, folder: str, app: str, rules: dict) -> Optional[dict]:
+    """Sample Deployment+Service tetangga dari GitOps `<branch>:<infra>/<namespace>` (default main:cce).
+
+    Kandidat diurutkan (role/project sama dulu); yang dipakai harus punya Service,
+    terdaftar di kustomization, dan lolos rule critical — agar kesalahan tidak ikut tersalin.
+    """
+    from . import manifest_check as mc
+
+    src = mc.sample_source(rules)
+    sample_folder = f"{src['infra']}/{folder.split('/', 1)[-1]}"
+    files = gh_list_dir(repo, sample_folder, src["branch"])
+    if not files:
+        return None
+    kz, _ = _fetch_kustomization(repo, sample_folder, src["branch"])
+    suffixes = (rules.get("service_missing") or mc.DEFAULT_RULES["service_missing"])["params"]["suffixes"]
+    for cand in mc.rank_samples(files, app)[: int(src.get("max_candidates", 5))]:
+        dpath = f"{sample_folder}/{cand}_deployment.yaml"
+        try:
+            deploy = mc.find_kind(mc.parse_yaml(gh_raw(repo, dpath, src["branch"])), "Deployment")
+        except Exception:
+            continue
+        service, spath = _fetch_service(repo, dpath, src["branch"], suffixes)
+        if deploy is None or service is None:
+            continue
+        ns = (kz or {}).get("namespace") or (deploy.get("metadata") or {}).get("namespace") or ""
+        res = mc.check(rules, deploy=deploy, service=service, app=cand, ns=ns, deploy_path=dpath,
+                       service_path=spath, kustomization=kz)
+        if res.worst != "critical":
+            return {"app": cand, "deploy": deploy, "service": service,
+                    "path": f"{src['branch']}:{dpath}"}
+    return None
+
+
+def _secret_scope(st: Stage, *, ns: str, app: str, dest: dict, config: dict,
+                  infra: str = "cce") -> Optional[set]:
+    """Nama Secret di namespace target, atau None bila cluster tak bisa dipastikan.
+
+    Context: destination Application ArgoCD (pasti) → mapping `kube_cx` per namespace
+    → kandidat namespace ambigu (cluster yang menjalankan Deployment ini). Mapping
+    `kube_cx` hanya berisi cluster CCE (hw-*), jadi tidak dipakai untuk path `k8s/` (SLS).
+    """
+    from . import kube_contexts
+
+    ctx = kube_contexts.context_for_destination(dest, config["argocd"]["k8s_context"])
+    if ctx:
+        candidates, why = [ctx], f"destination ArgoCD {dest.get('server') or dest.get('name')}"
+    elif infra != "cce":
+        st.details.append(f"infra {infra}/ (SLS) tidak ada di mapping kube_cx — secret dicek dari repo GitOps")
+        return None
+    else:
+        ctx, why = kube_contexts.resolve(ns)
+        candidates = [ctx] if ctx else kube_contexts.candidates(ns)
+    for cand in candidates:
+        try:
+            if len(candidates) > 1 and app not in kubectl_names(cand, ns, "deployments"):
+                st.details.append(f"{cand}/{ns}: Deployment {app} tidak ada di sini")
+                continue
+            names = set(kubectl_names(cand, ns, "secrets"))
+            st.details.append(f"secret dicek di cluster {cand}/{ns} ({why})")
+            return names
+        except KubectlError as e:
+            st.details.append(f"cluster {cand} tidak terjangkau ({str(e)[:80]})")
+    st.details.append("secret dicek dari repo GitOps"
+                      + (f" ({why})" if not candidates else " (cluster tidak bisa dipastikan)"))
+    return None
+
+
+def _stage_manifest(rep: E2EReport, cicd: dict, gitops: Stage, argocd: Stage, config: dict, *,
+                    use_jev: bool) -> Stage:
+    from . import manifest_check as mc
+
+    st = Stage("manifest", "Manifest (deploy↔svc↔secret)")
+    path = gitops.data.get("path", "")
+    text = gitops.data.pop("_yaml", None)
+    if not path or path.startswith("web/"):
+        st.applicable = not path.startswith("web/")
+        st.summary = ("FE Docker Compose — tidak ada Deployment/Service K8s" if path
+                      else "dilewati (path GitOps tidak diketahui)")
+        return st
+    try:
+        rules, src = mc.load_rules()
+        docs = mc.parse_yaml(text) if text else []
+    except ImportError:
+        st.summary = "dilewati — pyyaml belum terpasang (pip install pyyaml)"
+        return st
+    except Exception as e:  # YAML rusak
+        st.status, st.summary = FAIL, f"YAML deployment tidak valid: {str(e)[:100]}"
+        return st
+    st.details.append(f"rule standar: {len(rules)} dari {mc.COLLECTION} ({src})")
+    if text is None and not gitops.data.get("missing"):
+        st.summary = "dilewati — YAML GitOps belum dibaca (selesaikan tahap GitOps dulu)"
+        return st
+
+    repo, branch = gitops.data.get("repo", ""), gitops.data.get("branch", "main")
+    folder = posixpath.dirname(path)
+    infra, folder_ns = folder.split("/", 1)[0], folder.split("/", 1)[-1]
+    app = cicd.get("DEPLOYMENT") or posixpath.basename(path).removesuffix("_deployment.yaml")
+    stack = mc.detect_stack(None, cicd)
+    deploy = mc.find_kind(docs, "Deployment")
+    kz, kz_note = _fetch_kustomization(repo, folder, branch)
+    if kz_note:
+        st.details.append(kz_note)
+    dest = argocd.data.get("destination") or {}
+    # namespace: di kustomization menimpa metadata.namespace file.
+    ns = ((kz or {}).get("namespace") or ((deploy or {}).get("metadata") or {}).get("namespace")
+          or dest.get("namespace") or folder_ns)
+    if ns != folder_ns:
+        st.details.append(f"namespace efektif: {ns} (folder {folder_ns})")
+    suffixes = (rules.get("service_missing") or mc.DEFAULT_RULES["service_missing"])["params"]["suffixes"]
+
+    if deploy is None:
+        port = int(cicd["PORT"]) if str(cicd.get("PORT", "")).isdigit() else 80
+        image = f"{rep.image}:{rep.expected_tag}"
+        sample = _manifest_sample(repo, folder, app, rules)
+        if sample:
+            fixed = mc.adapt_sample_deployment(rules, sample, app=app, ns=ns, image=image, port=port,
+                                               stack=stack, infra=infra, kz=kz)
+            service, origin = mc.adapt_sample_service(sample, fixed), f"dari sample {sample['path']}"
+        else:
+            fixed = mc.suggest_deployment(rules, app=app, ns=ns, image=image, port=port, stack=stack,
+                                          infra=infra)
+            service, origin = mc.suggest_service(fixed), "generator standar (sample tidak ditemukan)"
+        st.status, st.summary = FAIL, f"Deployment {app} belum ada — saran YAML {origin}"
+        st.data["suggestions"] = [
+            {"title": f"Deployment baru ({origin})", "path": path, "yaml": mc.dump_yaml(fixed)},
+            {"title": f"Service baru ({origin})", "path": path.replace("_deployment.yaml", suffixes[0]),
+             "yaml": mc.dump_yaml(service)},
+        ] + [mc._secret_suggestion(rules, name=n, app=app, ns=ns, stack=stack, infra=infra)
+             for n in mc.referenced_secrets(fixed)]
+        st.hints.append("Simpan YAML di atas ke repo GitOps + daftarkan kedua file di resources "
+                        "kustomization.yaml (atau `bq --bootstrap-k8s`).")
+        return st
+
+    service = mc.find_kind(docs, "Service")
+    service_path = path
+    if service is None:
+        service, service_path = _fetch_service(repo, path, branch, suffixes)
+    sample = None
+    if service is None and any(c.get("ports") for c in (deploy.get("spec") or {}).get("template", {})
+                               .get("spec", {}).get("containers") or []):
+        sample = _manifest_sample(repo, folder, app, rules)
+
+    in_cluster = _secret_scope(st, ns=ns, app=app, dest=dest, config=config, infra=infra)
+    in_repo = None
+    if in_cluster is None:
+        in_repo = set(gh_list_dir(repo, folder, branch)) | set(gh_list_dir(repo, f"{folder}/file-config", branch))
+
+    res = mc.check(rules, deploy=deploy, service=service, app=app, ns=ns, deploy_path=path,
+                   service_path=service_path, cicd=cicd, secrets_in_cluster=in_cluster,
+                   secrets_in_repo=in_repo, kustomization=kz, sample=sample)
+    st.details.append(f"Service: {service_path}" + ("" if service else " (TIDAK ada)"))
+    for name, state in res.secrets.items():
+        st.details.append(f"secret {name}: {state}")
+    st.details += res.notes
+    for f in res.findings:
+        st.details.append(f"[{f.severity}] {f.rule_name}: {f.message}")
+        if f.fix_hint not in st.hints:
+            st.hints.append(f.fix_hint)
+    st.data["findings"] = [vars(f) for f in res.findings]
+    st.data["suggestions"] = res.suggestions
+
+    critical = [f.rule_name for f in res.findings if f.severity == "critical"]
+    advisory = [f.rule_name for f in res.findings if f.severity != "critical"]
+    unknown = [n for n, s in res.secrets.items() if s in ("repo", "tidak-diketahui")]
+    if critical:
+        st.status = FAIL
+        st.summary = f"{len(critical)} masalah — " + ", ".join(dict.fromkeys(critical))
+    elif unknown:
+        # Selector sudah dicek, tapi secret belum terverifikasi → analisa tidak lengkap.
+        st.summary = f"selector cocok; secret belum bisa dipastikan di cluster: {', '.join(unknown)}"
+    else:
+        st.status, st.summary = OK, "selector Deployment↔Service cocok, secret tersedia"
+    if advisory and not critical:
+        # Saran standar (warn) tidak memutus deploy → bukan titik putus.
+        st.summary += f" · saran standar: {', '.join(dict.fromkeys(advisory))}"
+
+    if use_jev and res.findings:
+        verdict = _manifest_jev(res.findings, app=app, ns=ns)
+        st.data["jev"] = verdict
+        if verdict and "error" not in verdict:
+            st.details.append(f"Jev: siap melayani traffic {verdict['deploy_ready']:.0%}"
+                              + (f", bereskan dulu: {verdict['fix_first']}" if verdict["fix_first"] else ""))
+        elif verdict:
+            st.details.append(f"Jev dilewati: {verdict['error']}")
     return st
 
 
@@ -629,6 +908,7 @@ def _stage_argocd(rep: E2EReport, config: dict, gitops: Stage) -> Stage:
 
     name = app["metadata"]["name"]
     spec, status = app.get("spec") or {}, app.get("status") or {}
+    st.data["destination"] = spec.get("destination") or {}
     sync = (status.get("sync") or {}).get("status", "?")
     health = (status.get("health") or {}).get("status", "?")
     # `automated: {}` (tanpa prune/selfHeal) tetap berarti auto-sync AKTIF.
@@ -703,8 +983,12 @@ def analyze(
     config: Optional[dict] = None,
     with_logs: bool = True,
     on_stage: Optional[Callable[[str], None]] = None,
+    use_jev: bool = False,
 ) -> E2EReport:
-    """Telusuri satu commit dari trigger sampai ArgoCD. Read-only."""
+    """Telusuri satu commit dari trigger sampai ArgoCD. Read-only.
+
+    `use_jev`: tahap manifest meminta penilaian Jev bila ada findings.
+    """
     from .config import load_config
 
     config = config or load_config()
@@ -733,8 +1017,13 @@ def analyze(
     gitops = _stage_gitops(rep, cicd, config, pipeline)
     gitops.data["deployment"] = cicd.get("DEPLOYMENT") or cicd.get("IMAGE")
     rep.stages.append(gitops)
+    # ArgoCD dibaca dulu: destination Application = context paling pasti untuk cek Secret.
     step("argocd")
-    rep.stages.append(_stage_argocd(rep, config, gitops))
+    argocd = _stage_argocd(rep, config, gitops)
+    step("manifest")
+    rep.stages.append(_stage_manifest(rep, cicd, gitops, argocd, config, use_jev=use_jev))
+    gitops.data.pop("_yaml", None)
+    rep.stages.append(argocd)
     return rep
 
 
@@ -771,6 +1060,9 @@ def render_text(rep: E2EReport) -> str:
             lines.append("     log:")
             lines += [f"       {ln}" for ln in s.data["log_tail"].rstrip().splitlines()]
         lines += [f"     💡 {h}" for h in s.hints]
+        for sug in s.data.get("suggestions") or []:
+            lines += ["", f"     📝 Saran YAML — {sug['title']}", f"        # {sug['path']}"]
+            lines += [f"        {ln}" for ln in sug["yaml"].rstrip().splitlines()]
     bp = rep.break_point
     lines += ["", verdict_line(rep)]
     return "\n".join(lines)

@@ -33,6 +33,7 @@ from rich.console import Console
 from rich.markup import escape
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
+from rich.syntax import Syntax
 from rich.table import Table
 
 from .audit import redact, setup_audit_logger
@@ -582,9 +583,12 @@ def handle_slash(cmd: str, provider_ref: list[Provider]) -> bool:
         try:
             cat = catalog(force_refresh=True)
             cxs, cx_src = kube_contexts.load(force_refresh=True)
+            from .manifest_check import load_rules
+            rules, rules_src = load_rules(force_refresh=True)
             console.print(
                 f"[green]katalog di-refresh ({cat['source']}): "
-                f"{len(cat['tools'])} tools · kube_cx ({cx_src}): {len(cxs)} context[/green]"
+                f"{len(cat['tools'])} tools · kube_cx ({cx_src}): {len(cxs)} context · "
+                f"rule manifest ({rules_src}): {len(rules)}[/green]"
             )
         except Exception as e:
             console.print(f"[red]refresh gagal:[/red] {e}")
@@ -638,6 +642,14 @@ def render_e2e(report) -> None:
             title_align="left",
             border_style=_E2E_STYLE[s.status],
         ))
+        for sug in s.data.get("suggestions") or []:
+            console.print(Panel(
+                Syntax(sug["yaml"].rstrip(), "yaml", theme="ansi_dark", word_wrap=True),
+                title=f"📝 Saran YAML — {escape(sug['title'])}",
+                subtitle=escape(sug["path"]),
+                title_align="left",
+                border_style="cyan",
+            ))
 
     if bp:
         console.print(
@@ -687,6 +699,7 @@ def run_e2e(repo: str, ref: str) -> None:
         report = e2e.analyze(
             repo, ref,
             on_stage=lambda name: status.update(f"[cyan]E2E: {name}…[/cyan]"),
+            use_jev=True,
         )
     render_e2e(report)
     bp = report.break_point
