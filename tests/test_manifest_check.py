@@ -528,3 +528,38 @@ class TestSlsPath:
         d = mc.adapt_sample_deployment(rules, sample, app=APP, ns="production-saas", image="i:1",
                                        infra="k8s")
         assert "cce.cloud.com/cce-nodepool" not in (d["spec"]["template"]["spec"].get("nodeSelector") or {})
+
+
+class TestExistingConfigSecret:
+    """Kasus develop-qoin (aplikasi Rust): Secret `file-config-<app>-develop` ada tapi tak di-mount."""
+
+    def _baked(self, rules, ns="develop-qoin"):
+        d = mc.suggest_deployment(rules, app=APP, ns=ns, image=f"loyaltolpi/{APP}:abc")
+        pod = d["spec"]["template"]["spec"]
+        pod.pop("volumes")
+        pod["containers"][0].pop("volumeMounts")
+        return d
+
+    def test_mounts_existing_secret_name(self, rules):
+        d = self._baked(rules)
+        res = mc.check(rules, deploy=d, service=mc.suggest_service(d), app=APP, ns="develop-qoin",
+                       deploy_path=f"cce/develop-qoin/{APP}_deployment.yaml",
+                       service_path=f"cce/develop-qoin/{APP}_services.yaml",
+                       secrets_in_cluster={f"file-config-{APP}-develop", "regcred"})
+        f = res.findings[0]
+        assert (f.rule_name, f.severity) == ("missing_file_config_volume", "warn")
+        assert f"Secret file-config-{APP}-develop sudah ada di namespace tetapi tidak di-mount" in f.message
+        assert [mc.parse_yaml(s["yaml"])[0]["kind"] for s in res.suggestions] == ["Deployment"]  # tanpa kerangka Secret
+        pod = mc.parse_yaml(res.suggestions[0]["yaml"])[0]["spec"]["template"]["spec"]
+        assert {"name": "file-config-volume",
+                "secret": {"secretName": f"file-config-{APP}-develop", "defaultMode": 420}} in pod["volumes"]
+
+    def test_repo_only_gives_note_not_guess(self, rules):
+        d = self._baked(rules)
+        res = mc.check(rules, deploy=d, service=mc.suggest_service(d), app=APP, ns="develop-qoin",
+                       deploy_path=f"cce/develop-qoin/{APP}_deployment.yaml",
+                       service_path=f"cce/develop-qoin/{APP}_services.yaml",
+                       secrets_in_repo={f"{APP}-develop.yaml"})
+        assert any(f"{APP}-develop.yaml" in n and "pastikan nama Secret" in n for n in res.notes)
+        kinds = [mc.parse_yaml(s["yaml"])[0]["kind"] for s in res.suggestions]
+        assert kinds == ["Deployment", "Secret"]

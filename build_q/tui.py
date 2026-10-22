@@ -520,6 +520,7 @@ def show_help() -> None:
         "  [cyan]/refresh[/cyan]                  ambil ulang katalog dari PocketBase\n"
         "  [cyan]/e2e REPO REF[/cyan]             analisa CI/CD end-to-end: hook → pipeline → GitOps → ArgoCD\n"
         "  [cyan]/e2e --sim [SKENARIO][/cyan]     simulasi e2e tanpa cluster (tanpa nama: daftar skenario)\n"
+        "  [cyan]/manifest-check NS [BRANCH][/cyan] uji manifest semua Deployment satu namespace + ekspor laporan\n"
         "  [cyan]/save[/cyan]                     persist JEV_PROVIDER + kunci saat ini ke .env\n"
         "  [cyan]/help[/cyan]                     tampilkan bantuan ini\n"
         "  [cyan]/quit[/cyan]                     keluar",
@@ -578,6 +579,12 @@ def handle_slash(cmd: str, provider_ref: list[Provider]) -> bool:
                           "  ·  [red]/e2e --sim [SKENARIO][/red]")
         else:
             run_e2e(parts[1], parts[2])
+        return True
+    if head == "/manifest-check":
+        if len(parts) < 2:
+            console.print("[red]usage: /manifest-check NAMESPACE [BRANCH][/red]  (mis. /manifest-check develop-qoin)")
+        else:
+            run_manifest_check(parts[1], parts[2] if len(parts) > 2 else None)
         return True
     if head == "/refresh":
         try:
@@ -689,6 +696,68 @@ def run_e2e_sim(name: str) -> None:
     if problems:
         console.print("[red]Tidak sesuai harapan skenario:[/red] " + escape("; ".join(problems)))
     _audit("e2e_sim", scenario=name, verdict=report.verdict, ok=not problems)
+
+
+REPORTS_DIR = CONFIG_DIR / "reports"
+
+
+def render_manifest_scan(report) -> None:
+    """Ringkasan `manifest_scan.ScanReport`: header, tabel Deployment bermasalah, temuan per rule."""
+    from .manifest_scan import STATUS_ICON
+
+    t = report.totals
+    head = (f"[bold]{escape(report.namespace)}[/bold] · {escape(report.gitops_repo)}@"
+            f"{escape(report.branch)}:{escape(report.folder)}/\n"
+            f"[dim]secret: {escape(report.secret_source)} · rule {report.rules_count} "
+            f"({escape(report.rules_source)}) · sample {escape(report.sample_source)}[/dim]")
+    console.print(Panel.fit(head, title="[magenta]Manifest check[/magenta]", border_style="magenta"))
+    for d in report.details:
+        console.print(f"[dim]• {escape(d)}[/dim]")
+    console.print(f"✅ [green]{t['ok']} OK[/green] · ❌ [red]{t['fail']} FAIL[/red] · "
+                  f"⏭️  [yellow]{t['skip']} SKIP[/yellow] (total {t['total']})")
+    rows = [i for i in report.items if i.status != "ok" or i.advisory]
+    if rows:
+        tbl = Table(show_header=True, header_style="bold cyan", expand=True)
+        tbl.add_column("Status", width=8)
+        tbl.add_column("Deployment")
+        tbl.add_column("Critical", style="red")
+        tbl.add_column("Saran (warn) / catatan", style="yellow")
+        for i in rows:
+            note = ", ".join(i.advisory) or i.error or (
+                f"secret belum pasti: {', '.join(i.unknown_secrets)}" if i.unknown_secrets else "")
+            tbl.add_row(f"{STATUS_ICON[i.status]} {i.status}", escape(i.app),
+                        escape(", ".join(i.critical) or "—"), escape(note or "—"))
+        console.print(tbl)
+    if report.rule_counts:
+        console.print("[bold]Temuan per rule:[/bold] " + escape(" · ".join(
+            f"{r['rule_name']} [{r['severity']}]×{r['count']}" for r in report.rule_counts)))
+
+
+def run_manifest_check(namespace: str, branch: str | None = None) -> None:
+    """`/manifest-check NS [BRANCH]` — uji satu namespace, ekspor .md + .json ke ~/.build-q/reports."""
+    from . import manifest_scan
+
+    t0 = time.monotonic()
+    try:
+        with console.status(f"[cyan]manifest-check {escape(namespace)}…[/cyan]") as status:
+            report = manifest_scan.scan(
+                namespace, branch=branch,
+                on_progress=lambda done, total, app: status.update(
+                    f"[cyan]manifest-check {escape(namespace)}: {done}/{total} {escape(app)}[/cyan]"),
+            )
+    except manifest_scan.ManifestScanError as e:
+        console.print(f"[red]{escape(str(e))}[/red]")
+        return
+    render_manifest_scan(report)
+    paths = manifest_scan.export(
+        report,
+        md_path=str(manifest_scan.default_report_path(report, "md", REPORTS_DIR)),
+        json_path=str(manifest_scan.default_report_path(report, "json", REPORTS_DIR)),
+    )
+    for p in paths:
+        console.print(f"📄 laporan: [link=file://{p}]{escape(str(p))}[/link]")
+    _audit("manifest_check", namespace=report.namespace, branch=report.branch,
+           totals=report.totals, elapsed_ms=int((time.monotonic() - t0) * 1000))
 
 
 def run_e2e(repo: str, ref: str) -> None:

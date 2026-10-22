@@ -699,7 +699,8 @@ bq --bootstrap-k8s foo develop \
 - `--tui-pull`: Refresh cache katalog dari PocketBase (manual).
 - `--tui-sync <seed.json>`: Upload katalog seed JSON ke PocketBase (upsert by unique field).
 - `--tui-ls`: Tampilkan ringkasan katalog aktif (tools per-category, providers, patterns).
-- Di dalam TUI: `/e2e REPO REF` (analisa CI/CD end-to-end, lihat bagian 16), `/e2e --sim [SKENARIO]`, `/refresh`, `/set KEY` (input tersembunyi). Riwayat input tersimpan, satu error tidak lagi mematikan sesi, dan setiap eksekusi tercatat di `~/.build-q/.tui-audit.log`.
+- Di dalam TUI: `/e2e REPO REF` (analisa CI/CD end-to-end, lihat bagian 16), `/e2e --sim [SKENARIO]`,
+  `/manifest-check NAMESPACE [BRANCH]` (uji manifest satu namespace + ekspor laporan), `/refresh`, `/set KEY` (input tersembunyi). Riwayat input tersimpan, satu error tidak lagi mematikan sesi, dan setiap eksekusi tercatat di `~/.build-q/.tui-audit.log`.
 
 ### 15. MCP Server — AI Assistant Integration (`--mcp`, sejak v0.1.44)
 
@@ -938,8 +939,20 @@ prefix image privat). Severity `critical` = memutus deploy/traffic (titik putus)
 saran standar (mis. config masih baked di image) — tahap tetap ✅. Ubah lewat
 `scripts/anomaly-rules-seed.json` + `bq --tui-sync scripts/anomaly-rules-seed.json`.
 
+**Uji satu namespace** (semua Deployment di folder GitOps sekaligus, read-only) + ekspor laporan:
+
+```bash
+bq --manifest-check develop-qoin --export     # ringkasan + manifest-develop-qoin-<waktu>.md & .json
+bq --manifest-check production-qoin --export-md laporan.md --export-json laporan.json
+```
+
+Di TUI: `/manifest-check NAMESPACE [BRANCH]` (laporan otomatis ke `~/.build-q/reports/`);
+di web: tombol **🧩 Namespace** dengan unduhan `.md` / `.json`. Exit code: `0` semua OK,
+`1` ada FAIL, `2` ada SKIP.
+
 📖 Dokumentasi lengkap tahap Manifest (rule, evaluasi kustomization, pemilihan cluster,
-sample YAML, Jev, format data, troubleshooting): [E2E-MANIFEST.md](./E2E-MANIFEST.md).
+sample YAML, Jev, uji satu namespace & isi laporan, format data, troubleshooting):
+[E2E-MANIFEST.md](./E2E-MANIFEST.md).
 
 **Sample YAML** — saran manifest baru (Deployment/Service yang belum ada) disalin dari
 tetangga terdekat di repo GitOps `main:cce/<namespace>` (role `-manager`/`-module` & project
@@ -1116,6 +1129,11 @@ Subcommands (mutually exclusive):
   --tui-sync <seed.json>    Upload katalog JSON ke PocketBase (upsert).
   --tui-ls                  Ringkas katalog TUI aktif.
   --e2e <repo> <ref>        Analisa CI/CD end-to-end: trigger → Tekton → GitOps → ArgoCD (read-only).
+  --manifest-check NAMESPACE
+                            Uji manifest (selector deploy↔service, Secret, kustomization) semua
+                            Deployment di folder GitOps <infra>/<NAMESPACE>/ (read-only).
+                            Ekspor: --export | --export-md PATH | --export-json PATH.
+                            Override: --gitops-branch, --gitops-repo, --infra cce|k8s.
   --e2e --simulate [list|all|<skenario>]
                             Simulasi --e2e tanpa cluster/jaringan (demo & self-test).
   --set-image <ns> <dp> <img> Hot-patch deployment live di K8s.

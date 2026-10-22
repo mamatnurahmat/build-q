@@ -146,6 +146,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
   <span class="meta" id="pb-user"></span>
   <button id="btn-pb" title="Login PocketBase (SSO GitHub) — credential E2E diambil dari akun Anda">🔐 Login</button>
   <button id="btn-e2e" title="Analisa CI/CD end-to-end: trigger → pipeline → GitOps → ArgoCD">🔭 E2E</button>
+  <button id="btn-mc" title="Uji manifest semua Deployment satu namespace + export laporan">🧩 Namespace</button>
   <button id="btn-export" title="Export chat ke Markdown">📄 Export</button>
   <button id="btn-clear" title="Hapus riwayat chat">🗑 Clear</button>
   <label class="meta" for="provider-select">provider</label>
@@ -156,7 +157,7 @@ INDEX_HTML = r"""<!DOCTYPE html>
 
 <footer>
   <form id="chat-form">
-    <textarea id="input" placeholder="Ketik request natural (ID/EN) — contoh: bootstrap pay-be-topup develop ke gitops cce production-qoin · /e2e REPO REF · /e2e --sim [SKENARIO]" autofocus></textarea>
+    <textarea id="input" placeholder="Ketik request natural (ID/EN) — contoh: bootstrap pay-be-topup develop ke gitops cce production-qoin · /e2e REPO REF · /e2e --sim [SKENARIO] · /manifest-check NAMESPACE" autofocus></textarea>
     <button type="submit" id="send-btn">Kirim</button>
   </form>
 </footer>
@@ -703,6 +704,157 @@ async function handleE2ECommand(msg) {
 
 $('#btn-e2e').addEventListener('click', openE2EForm);
 
+// ─── Manifest check satu namespace (bq --manifest-check, read-only) ───────
+const MC_ICON = { ok: '✅', fail: '❌', skip: '⏭️' };
+
+function downloadText(filename, text, mime) {
+  const url = URL.createObjectURL(new Blob([text], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function renderManifestItem(it) {
+  const box = el('details', 'e2e-stage st-' + it.status);
+  if (it.status !== 'ok') box.open = true;
+  const crit = it.findings.filter(f => f.severity === 'critical').map(f => f.rule_name);
+  const warn = it.findings.filter(f => f.severity !== 'critical').map(f => f.rule_name);
+  const unknown = Object.entries(it.secrets || {})
+    .filter(([, s]) => s === 'repo' || s === 'tidak-diketahui').map(([n]) => n);
+  const sum = el('summary');
+  sum.appendChild(document.createTextNode(`${MC_ICON[it.status] || ''} ${it.app}: `));
+  sum.appendChild(el('span', 'sum', it.error || [crit.join(', '),
+    warn.length ? 'saran: ' + warn.join(', ') : '',
+    unknown.length ? 'secret belum pasti: ' + unknown.join(', ') : ''].filter(Boolean).join(' · ') || 'OK'));
+  box.appendChild(sum);
+  const ul = el('ul');
+  ul.appendChild(el('li', '', 'Deployment: ' + it.deploy_path));
+  if (it.service_path) ul.appendChild(el('li', '', 'Service: ' + it.service_path));
+  it.findings.forEach(f => ul.appendChild(el('li', '', `[${f.severity}] ${f.rule_name}: ${f.message}`)));
+  Object.entries(it.secrets || {}).forEach(([n, s]) => ul.appendChild(el('li', '', `secret ${n}: ${s}`)));
+  (it.notes || []).forEach(n => ul.appendChild(el('li', '', n)));
+  box.appendChild(ul);
+  [...new Set(it.findings.map(f => f.fix_hint))].forEach(h => box.appendChild(el('div', 'hint', '💡 ' + h)));
+  (it.suggestions || []).forEach(sug => {
+    box.appendChild(el('div', 'hint', `📝 Saran YAML — ${sug.title} (${sug.path})`));
+    box.appendChild(el('pre', '', String(sug.yaml).trimEnd()));
+  });
+  return box;
+}
+
+async function runManifestCheck(parent, req) {
+  parent.appendChild(el('div', 'e2e-head', `🧩 Manifest check — namespace ${req.namespace}`
+    + (req.branch ? ` @ ${req.branch}` : '')));
+  const progress = el('div', 'e2e-head', '⏳ menyiapkan…');
+  parent.appendChild(progress);
+  const body = el('div');
+  parent.appendChild(body);
+  try {
+    const auth = pbAuth();
+    if (!auth) {
+      const err = new Error('Login PocketBase dulu — credential (GITHUB_TOKEN, kubeconfig) diambil dari akun Anda.');
+      err.pbLogin = true;
+      throw err;
+    }
+    const spawn = await api('/api/manifest-check', { method: 'POST', body: JSON.stringify(req),
+      headers: { 'X-PB-Token': auth.token } });
+    const es = new EventSource(withToken(spawn.stream_url));
+    es.addEventListener('progress', (ev) => {
+      const p = JSON.parse(ev.data);
+      progress.textContent = `⏳ ${p.done}/${p.total} ${p.app}`;
+    });
+    es.addEventListener('report', (ev) => {
+      const r = JSON.parse(ev.data);
+      const t = r.totals;
+      progress.textContent = `${r.gitops_repo}@${r.branch}:${r.folder}/ · secret: ${r.secret_source}`
+        + ` · rule ${r.rules_count} (${r.rules_source})`;
+      (r.details || []).forEach(d => body.appendChild(el('div', 'usage', '• ' + d)));
+      const vcls = t.fail ? 'st-fail' : (t.skip ? 'st-warn' : 'st-ok');
+      body.appendChild(el('div', 'e2e-verdict ' + vcls,
+        `✅ ${t.ok} OK · ❌ ${t.fail} FAIL · ⏭️ ${t.skip} SKIP (total ${t.total})`));
+      if (r.rule_counts.length) {
+        body.appendChild(el('div', 'usage', 'Temuan per rule: ' +
+          r.rule_counts.map(c => `${c.rule_name} [${c.severity}]×${c.count}`).join(' · ')));
+      }
+      const shown = r.items.filter(i => i.status !== 'ok' || i.findings.length || (i.notes || []).length);
+      shown.forEach(i => body.appendChild(renderManifestItem(i)));
+      if (!shown.length) body.appendChild(el('div', 'usage', 'Semua Deployment cocok dengan Service-nya & Secret tersedia.'));
+      const bar = el('div', 'e2e-form');
+      const stamp = (r.generated_at || '').slice(0, 19).replace(/[-:]/g, '').replace('T', '-');
+      const base = `manifest-${r.namespace}-${stamp}`;
+      const md = el('button', '', '⬇️ Laporan .md'); md.type = 'button';
+      md.addEventListener('click', () => downloadText(base + '.md', r.markdown, 'text/markdown'));
+      const data = Object.assign({}, r); delete data.markdown; delete data.text;
+      const js = el('button', 'secondary', '⬇️ .json'); js.type = 'button';
+      js.addEventListener('click', () => downloadText(base + '.json', JSON.stringify(data, null, 2), 'application/json'));
+      const copy = el('button', 'secondary', 'Copy ringkasan'); copy.type = 'button';
+      copy.addEventListener('click', async () => {
+        await navigator.clipboard.writeText(r.text);
+        copy.textContent = '✓ copied';
+        setTimeout(() => copy.textContent = 'Copy ringkasan', 1200);
+      });
+      [md, js, copy].forEach(b => bar.appendChild(b));
+      body.appendChild(bar);
+      pushHistory('bot', { tool: 'manifest-check', confidence: 1,
+        preview: `bq --manifest-check ${r.namespace}`, exit: r.exit_code, output: r.text });
+      chat.scrollTop = chat.scrollHeight;
+    });
+    es.addEventListener('error', (ev) => {
+      if (ev.data) body.appendChild(el('div', 'st-fail', 'error: ' + JSON.parse(ev.data).error));
+    });
+    es.addEventListener('done', () => es.close());
+    es.onerror = () => es.close();
+  } catch (e) {
+    body.appendChild(el('div', 'st-fail', 'error: ' + e.message));
+    if (e.pbLogin) {
+      const login = el('button', '', '🔐 Login PocketBase & ulangi');
+      login.style.marginTop = '8px';
+      login.addEventListener('click', () => pbLoginSSO().then(() => {
+        parent.innerHTML = '';
+        runManifestCheck(parent, req);
+      }).catch(err => alert('login gagal: ' + err.message)));
+      body.appendChild(login);
+    }
+  }
+}
+
+function openManifestForm() {
+  appendMsg('bot', (m) => {
+    m.appendChild(el('div', '', '🧩 Uji manifest semua Deployment satu namespace (read-only) + export laporan'));
+    const form = el('form', 'e2e-form');
+    const ns = el('input'); ns.placeholder = 'namespace (mis. develop-qoin)';
+    const br = el('input'); br.placeholder = 'branch GitOps (opsional)'; br.style.minWidth = '160px';
+    const go = el('button', '', 'Uji');
+    [ns, br, go].forEach(n => form.appendChild(n));
+    m.appendChild(form);
+    const out = el('div');
+    m.appendChild(out);
+    form.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      if (!ns.value.trim()) return;
+      const res = el('div'); out.appendChild(res);
+      const req = { namespace: ns.value.trim() };
+      if (br.value.trim()) req.branch = br.value.trim();
+      runManifestCheck(res, req);
+    });
+    setTimeout(() => ns.focus(), 0);
+  });
+}
+
+// `/manifest-check NS [BRANCH]` → true bila pesan ditangani di sini
+async function handleManifestCommand(msg) {
+  const parts = msg.split(/\s+/);
+  if (parts[0] !== '/manifest-check') return false;
+  if (parts.length === 1) { openManifestForm(); return true; }
+  const req = { namespace: parts[1] };
+  if (parts[2]) req.branch = parts[2];
+  appendMsg('bot', (m) => runManifestCheck(m, req));
+  return true;
+}
+
+$('#btn-mc').addEventListener('click', openManifestForm);
+
 // ─── Toolbar: Export markdown, Clear chat (M4) ───────────────────────────
 $('#btn-export').addEventListener('click', () => {
   if (!chatHistory.length) return alert('Chat kosong');
@@ -774,6 +926,7 @@ $('#chat-form').addEventListener('submit', async (ev) => {
   appendMsg('user', (m) => { m.textContent = msg; });
   input.value = '';
   if (await handleE2ECommand(msg)) return;
+  if (await handleManifestCommand(msg)) return;
   const bot = appendMsg('bot', (m) => { m.innerHTML = '<em>Jev memutuskan…</em>'; });
   try {
     const data = await api('/api/decide', { method: 'POST',

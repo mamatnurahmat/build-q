@@ -196,6 +196,26 @@ Config file: ~/.build-q/.env
              "Exit: 0 sehat, 1 ada tahap gagal, 2 tidak lengkap/peringatan.",
     )
     parser.add_argument(
+        "--manifest-check",
+        metavar="NAMESPACE",
+        help="Uji tahap Manifest (selector deploy↔service, Secret, kustomization) untuk SEMUA "
+             "Deployment di folder GitOps <infra>/<NAMESPACE>/ (read-only), mis. "
+             "`bq --manifest-check develop-qoin --export`. Override: --gitops-branch, "
+             "--gitops-repo, --infra. Ekspor: --export / --export-md / --export-json. "
+             "Exit: 0 semua OK, 1 ada FAIL, 2 ada SKIP.",
+    )
+    parser.add_argument(
+        "--export",
+        action="store_true",
+        help="Dengan --manifest-check: ekspor laporan Markdown + JSON ke direktori kerja "
+             "(manifest-<ns>-<waktu>.md/.json).",
+    )
+    parser.add_argument(
+        "--export-json",
+        metavar="PATH",
+        help="Dengan --manifest-check: tulis laporan JSON (untuk CI/dashboard).",
+    )
+    parser.add_argument(
         "--simulate",
         nargs="?",
         const="all",
@@ -443,12 +463,14 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--gitops-repo",
         metavar="OWNER/REPO",
-        help="Target GitOps repo untuk --bootstrap-k8s (mis. Qoin-Digital-Indonesia/gitops)",
+        help="Target GitOps repo untuk --bootstrap-k8s / --manifest-check "
+             "(mis. Qoin-Digital-Indonesia/gitops; default GITOPS_REPO)",
     )
     parser.add_argument(
         "--gitops-branch",
         metavar="BRANCH",
-        help="Base branch di GitOps repo untuk PR --bootstrap-k8s (mis. main)",
+        help="Base branch di GitOps repo untuk PR --bootstrap-k8s (mis. main); "
+             "dengan --manifest-check: branch yang diuji (default mengikuti ENV namespace)",
     )
     parser.add_argument(
         "--path-yaml",
@@ -544,8 +566,8 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--export-md",
         metavar="PATH",
-        help="Dengan --anomaly-scan: tulis report Markdown "
-             "(summary + top rules + detail per resource).",
+        help="Dengan --anomaly-scan / --manifest-check: tulis report Markdown "
+             "(summary + top rules + detail per resource, + saran YAML untuk --manifest-check).",
     )
 
     # ── SOPS encrypt / decrypt manual (standalone) ────────────────────────────
@@ -826,6 +848,35 @@ Config file: ~/.build-q/.env
                                  use_jev=not args.no_jev)
             print(e2e.render_text(report))
             sys.exit(e2e.exit_code(report))
+
+        if args.manifest_check:
+            from . import manifest_scan
+            config = load_config()
+            tty = sys.stderr.isatty()
+
+            def _progress(done: int, total: int, app: str) -> None:
+                if tty:
+                    print(f"\r⏳ {done}/{total} {app[:48]:<48}", end="", file=sys.stderr, flush=True)
+
+            try:
+                report = manifest_scan.scan(
+                    args.manifest_check, branch=args.gitops_branch, gitops_repo=args.gitops_repo,
+                    infra=args.infra or config["gitops"].get("infra") or "cce",
+                    config=config, on_progress=_progress,
+                )
+            except manifest_scan.ManifestScanError as e:
+                print(f"{chr(13) if tty else ''}❌ {e}", file=sys.stderr)
+                sys.exit(2)
+            if tty:
+                print("\r" + " " * 60 + "\r", end="", file=sys.stderr)
+            print(manifest_scan.render_text(report))
+            md_path, json_path = args.export_md, args.export_json
+            if args.export:
+                md_path = md_path or str(manifest_scan.default_report_path(report, "md"))
+                json_path = json_path or str(manifest_scan.default_report_path(report, "json"))
+            for path in manifest_scan.export(report, md_path=md_path, json_path=json_path):
+                print(f"📄 laporan: {path}")
+            sys.exit(report.exit_code)
 
         if args.tui_ls:
             from . import tui_catalog

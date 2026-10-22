@@ -32,8 +32,9 @@ PocketBase.
 10. [Mapping kube context (`kube_cx`)](#10-mapping-kube-context-kube_cx)
 11. [Format data (web & integrasi)](#11-format-data-web--integrasi)
 12. [Simulasi](#12-simulasi)
-13. [Troubleshooting](#13-troubleshooting)
-14. [Batasan](#14-batasan)
+13. [Uji satu namespace — `bq --manifest-check`](#13-uji-satu-namespace--bq---manifest-check)
+14. [Troubleshooting](#14-troubleshooting)
+15. [Batasan](#15-batasan)
 
 ---
 
@@ -82,7 +83,7 @@ Rule dengan implementasi pemeriksaan. Severity bisa diubah di PocketBase (lihat 
 | `deploy_selector_template_mismatch` | critical | `spec.selector.matchLabels` tidak termuat di `template.metadata.labels` | Deployment |
 | `missing_standard_labels` | warn | Label pod tidak memuat `app`, `env`, `project`, `role` | Deployment (selector lama dipertahankan) |
 | `missing_image_pullsecret` | critical | Image privat (`loyaltolpi/…`) tanpa `imagePullSecrets: regcred` **setelah** patch kustomization | Deployment |
-| `missing_file_config_volume` | warn | Backend (`-be-`) tanpa volume Secret `file-config-<app>`. Config kemungkinan masih *baked* di image (pola lama) | Deployment + kerangka Secret |
+| `missing_file_config_volume` | warn | Backend (`-be-`) tanpa volume Secret `file-config-<app>` maupun `file-config-<app>-<env>`. Config kemungkinan masih *baked* di image (pola lama) | Deployment (+ kerangka Secret bila belum ada) |
 | `secret_missing` | critical | Secret yang **dirujuk** pod (volume, `envFrom.secretRef`, `env.valueFrom.secretKeyRef`, `regcred`) tidak ada di namespace | kerangka Secret |
 | `service_missing` | critical | Deployment membuka `containerPort` tetapi tidak punya Service (`<app>_services.yaml` / `_service.yaml`, atau Service di file yang sama) | Service baru dari sample |
 | `service_namespace_mismatch` | critical | Namespace Service ≠ Deployment (hanya bila kustomization tidak menetapkan `namespace:`) | Service |
@@ -103,6 +104,10 @@ Catatan pemeriksaan:
 - Image publik (mis. `nginx:stable`, `istio/proxyv2`) tidak wajib `regcred`.
 - Hanya Secret yang **benar-benar dirujuk** pod yang dicek keberadaannya. Aplikasi
   dengan config baked tidak dilaporkan `secret_missing`.
+- Nama Secret config dengan akhiran env (`file-config-<app>-<env>`, mis.
+  `file-config-plus-be-rusttransaction-module-develop`) dikenali sebagai Secret config.
+  Bila Secret seperti itu sudah ada di cluster tetapi belum di-mount, saran mount memakai
+  nama yang sudah ada, dan kerangka Secret tidak disarankan lagi.
 
 ## 4. Evaluasi kustomization
 
@@ -389,7 +394,78 @@ Event SSE `stage` mengirim `{"name": "manifest"}` saat tahap ini berjalan (uruta
 
 Skenario `gitops-not-found` menunjukkan saran Deployment + Service + Secret lengkap dari sample.
 
-## 13. Troubleshooting
+## 13. Uji satu namespace — `bq --manifest-check`
+
+> Sejak **v0.2.3**.
+
+Pemeriksaan yang sama dengan tahap Manifest, dijalankan sekaligus untuk **semua
+Deployment** di folder `<infra>/<namespace>/` repo GitOps, tanpa tahap pipeline/ArgoCD
+yang memang per commit. Read-only.
+
+```bash
+bq --manifest-check develop-qoin                        # ringkasan di terminal
+bq --manifest-check develop-qoin --export               # + manifest-develop-qoin-<waktu>.md & .json
+bq --manifest-check production-qoin --export-md laporan.md --export-json laporan.json
+bq --manifest-check staging-ngenwal --gitops-branch staging   # override branch GitOps
+bq --manifest-check production-saas --infra k8s          # folder k8s/ (SLS)
+```
+
+- **TUI**: `/manifest-check NAMESPACE [BRANCH]` menampilkan tabel Deployment bermasalah, dan
+  laporan `.md` + `.json` otomatis diekspor ke `~/.build-q/reports/`.
+- **Web**: tombol **🧩 Namespace** atau `/manifest-check NAMESPACE [BRANCH]`. Progres tampil
+  langsung, tiap Deployment punya kartu detail + saran YAML, dan tersedia tombol
+  **⬇️ Laporan .md** / **⬇️ .json**. Credential diambil dari akun PocketBase pengguna
+  (`POST /api/manifest-check` → SSE `/api/manifest-check/stream/<id>`: `progress`, `report`,
+  `error`, `done`).
+
+Cara kerja:
+
+| Aspek | Perilaku |
+|---|---|
+| Branch | Mengikuti ENV namespace seperti tahap GitOps: `develop-*`/`staging-*`/`sandbox-*` → branch yang sama, lainnya → `GITOPS_BRANCH` (default `main`). Override: `--gitops-branch` |
+| Repo | `GITOPS_REPO` (override `--gitops-repo`), dibaca lewat GitHub API dengan 8 permintaan paralel |
+| Namespace | `namespace:` kustomization folder (mis. folder `staging-ngenwal` → `production-ngenwal`) |
+| Cluster | Destination Application ArgoCD untuk folder tsb → mapping `kube_cx` → untuk namespace ambigu, cluster yang menjalankan Deployment folder ini paling banyak |
+| Secret | `kubectl get secrets -o name` **sekali** per namespace; isi tidak dibaca |
+| Sample | Sama dengan §7.1, di-cache lintas aplikasi |
+| Status per Deployment | Sama dengan §6: ✅ OK (boleh dengan saran warn) · ❌ FAIL (ada critical) · ⏭️ SKIP (Secret belum terverifikasi / error baca) |
+
+Exit code: `0` semua OK · `1` ada FAIL · `2` ada SKIP (tanpa FAIL). Cocok untuk CI, mis.
+`bq --manifest-check production-qoin --export-json hasil.json || echo "perlu ditinjau"`.
+
+**Isi laporan Markdown**: tabel identitas (repo/branch/folder, waktu, versi bq, sumber Secret,
+rule, sample), catatan analisa (pemilihan cluster, namespace efektif), ringkasan status,
+temuan per rule, daftar semua Deployment (status, critical, saran), lalu detail per
+Deployment bermasalah: temuan + 💡 saran, status Secret, catatan, dan saran YAML (bagian
+`<details>` yang bisa dilipat).
+
+**Isi laporan JSON** (`ScanReport.to_dict()`):
+
+```jsonc
+{
+  "namespace": "develop-qoin", "folder": "cce/develop-qoin",
+  "gitops_repo": "Qoin-Digital-Indonesia/gitops", "branch": "develop",
+  "secret_source": "cluster hw-dev/develop-qoin (48 secret; destination ArgoCD)",
+  "rules_source": "pb", "rules_count": 12, "sample_source": "main:cce/develop-qoin",
+  "generated_at": "2026-10-22T19:48:03+07:00", "version": "<versi bq>",
+  "details": ["Application ArgoCD develop-qoin → destination https://10.2.20.121:5443"],
+  "totals": {"ok": 48, "fail": 0, "skip": 0, "total": 48},
+  "rule_counts": [{"rule_name": "missing_standard_labels", "severity": "warn", "count": 1}],
+  "exit_code": 0,
+  "items": [{"app": "plus-apigateway", "status": "ok",
+             "deploy_path": "cce/develop-qoin/plus-apigateway_deployment.yaml",
+             "service_path": "cce/develop-qoin/plus-apigateway_services.yaml",
+             "findings": [{"rule_name": "missing_standard_labels", "severity": "warn", "...": "..."}],
+             "secrets": {"regcred": "ada"}, "notes": [], "suggestions": [{"title": "...", "path": "...", "yaml": "..."}],
+             "error": ""}]
+}
+```
+
+Contoh nyata `develop-qoin` (branch `develop`): 48 Deployment diperiksa dalam ±8 detik, 48 ✅ OK,
+dengan satu saran standar (label `env`/`project` pada `plus-apigateway`). Cluster dipilih dari
+destination Application ArgoCD `develop-qoin` (`hw-dev`).
+
+## 14. Troubleshooting
 
 | Gejala | Penyebab & solusi |
 |---|---|
@@ -402,7 +478,7 @@ Skenario `gitops-not-found` menunjukkan saran Deployment + Service + Secret leng
 | Temuan yang memang disengaja (mis. label non-standar untuk komponen infra) | Turunkan `severity` atau set `active: false` di seed → `bq --tui-sync` |
 | Jev tidak muncul | Tidak ada temuan, memakai `--no-jev`, atau `TYPESAFE_API_KEY` kosong (detail: `Jev dilewati: …`) |
 
-## 14. Batasan
+## 15. Batasan
 
 - Hanya Deployment dan Service **pertama** di file yang dinilai.
 - Patch *strategic merge* dan patch dari file (`path:`) tidak dievaluasi.

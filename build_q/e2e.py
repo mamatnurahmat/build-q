@@ -668,38 +668,53 @@ def _fetch_kustomization(repo: str, folder: str, branch: str) -> tuple[Optional[
         return None, f"kustomization.yaml tidak bisa dibaca: {str(e)[:80]}"
 
 
-def _manifest_sample(repo: str, folder: str, app: str, rules: dict) -> Optional[dict]:
+def _manifest_sample(repo: str, folder: str, app: str, rules: dict,
+                     cache: Optional[dict] = None) -> Optional[dict]:
     """Sample Deployment+Service tetangga dari GitOps `<branch>:<infra>/<namespace>` (default main:cce).
 
     Kandidat diurutkan (role/project sama dulu); yang dipakai harus punya Service,
     terdaftar di kustomization, dan lolos rule critical — agar kesalahan tidak ikut tersalin.
+    `cache` (dict) dipakai ulang lintas aplikasi saat scan satu namespace.
     """
     from . import manifest_check as mc
 
+    memo = cache if cache is not None else {}
+
+    def cached(key, fn):
+        if key not in memo:
+            memo[key] = fn()
+        return memo[key]
+
     src = mc.sample_source(rules)
     sample_folder = f"{src['infra']}/{folder.split('/', 1)[-1]}"
-    files = gh_list_dir(repo, sample_folder, src["branch"])
+    files = cached(("ls", sample_folder), lambda: gh_list_dir(repo, sample_folder, src["branch"]))
     if not files:
         return None
-    kz, _ = _fetch_kustomization(repo, sample_folder, src["branch"])
+    kz = cached(("kz", sample_folder),
+                lambda: _fetch_kustomization(repo, sample_folder, src["branch"])[0])
     suffixes = (rules.get("service_missing") or mc.DEFAULT_RULES["service_missing"])["params"]["suffixes"]
-    for cand in mc.rank_samples(files, app)[: int(src.get("max_candidates", 5))]:
+
+    def validate(cand: str) -> Optional[dict]:
         dpath = f"{sample_folder}/{cand}_deployment.yaml"
         try:
             deploy = mc.find_kind(mc.parse_yaml(gh_raw(repo, dpath, src["branch"])), "Deployment")
         except Exception:
-            continue
+            return None
         service, spath = _fetch_service(repo, dpath, src["branch"], suffixes)
         if deploy is None or service is None:
-            continue
+            return None
         ns = (kz or {}).get("namespace") or (deploy.get("metadata") or {}).get("namespace") or ""
         res = mc.check(rules, deploy=deploy, service=service, app=cand, ns=ns, deploy_path=dpath,
                        service_path=spath, kustomization=kz)
-        if res.worst != "critical":
-            return {"app": cand, "deploy": deploy, "service": service,
-                    "path": f"{src['branch']}:{dpath}"}
-    return None
+        if res.worst == "critical":
+            return None
+        return {"app": cand, "deploy": deploy, "service": service, "path": f"{src['branch']}:{dpath}"}
 
+    for cand in mc.rank_samples(files, app)[: int(src.get("max_candidates", 5))]:
+        sample = cached(("sample", sample_folder, cand), lambda c=cand: validate(c))
+        if sample:
+            return sample
+    return None
 
 def _secret_scope(st: Stage, *, ns: str, app: str, dest: dict, config: dict,
                   infra: str = "cce") -> Optional[set]:
