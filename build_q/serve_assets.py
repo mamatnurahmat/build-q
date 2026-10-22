@@ -519,7 +519,7 @@ function renderBotResponse(parent, data) {
 // ─── E2E CI/CD: trigger → pipeline → GitOps → ArgoCD (read-only) ─────────
 const E2E_STAGES = [
   ['source', 'Source'], ['trigger', 'Trigger'], ['pipeline', 'Pipeline'],
-  ['gitops', 'GitOps'], ['argocd', 'ArgoCD'],
+  ['gitops', 'GitOps'], ['manifest', 'Manifest'], ['argocd', 'ArgoCD'],
 ];
 const E2E_ICON = { ok: '✅', warn: '⚠️', fail: '❌', skip: '⏭️', running: '⏳' };
 let e2eScenarios = null;
@@ -562,6 +562,10 @@ function renderE2EStage(s, isBp) {
   const logTail = s.data && s.data.log_tail;
   if (logTail) box.appendChild(el('pre', '', String(logTail).trimEnd()));
   (s.hints || []).forEach(h => box.appendChild(el('div', 'hint', '💡 ' + h)));
+  ((s.data && s.data.suggestions) || []).forEach(sug => {
+    box.appendChild(el('div', 'hint', `📝 Saran YAML — ${sug.title} (${sug.path})`));
+    box.appendChild(el('pre', '', String(sug.yaml).trimEnd()));
+  });
   return box;
 }
 

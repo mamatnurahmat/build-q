@@ -28,12 +28,14 @@ from .tui_catalog import _ttl_seconds
 
 
 CACHE_FILE = CONFIG_DIR / ".kube-cx-cache.json"
+_CACHE_VERSION = 2  # v2: + field server (mapping destination ArgoCD)
 CX_COLLECTION = "kube_cx"
 NS_COLLECTION = "namespace"
 
 # Fallback minimum — HANYA dipakai saat PB down + cache kosong.
 _BOOTSTRAP: Dict[str, dict] = {
     "hw-dev": {
+        "server": "https://10.2.20.121:5443",
         "environment": "development",
         "note": "Huawei CCE develop/sandbox + Jenkins X. Nodepool develop-qoin-*, develop-qoincash-*, sandbox-qoin-*",
         "namespaces": [
@@ -42,16 +44,19 @@ _BOOTSTRAP: Dict[str, dict] = {
         ],
     },
     "hw-pro-p": {
+        "server": "https://10.7.20.103:5443",
         "environment": "production",
         "note": "Huawei CCE production payout + ArgoCD. Nodepool production-payout-nodepool-*",
         "namespaces": ["production-payout", "develop-payout", "argocd"],
     },
     "hw-pro-q": {
+        "server": "https://10.5.20.23:5443",
         "environment": "production",
         "note": "Huawei CCE production Qoin (AP/QA) + staging Qoin. Nodepool production-nodepool-*",
         "namespaces": ["production-qoin", "staging-qoin"],
     },
     "hw-pro-u": {
+        "server": "https://10.6.20.45:5443",
         "environment": "production",
         "note": "Huawei CCE production UE region (ngenwal, saas) + staging ngenwal. Nodepool production-ue-nodepool-*",
         "namespaces": ["production-ngenwal", "production-saas", "staging-ngenwal"],
@@ -78,6 +83,7 @@ def _fetch_from_pb() -> Dict[str, dict]:
     out: Dict[str, dict] = {
         r["name"]: {
             "cluster": r.get("cluster", ""),
+            "server": r.get("server", ""),
             "environment": r.get("environment", ""),
             "note": r.get("note", ""),
             "namespaces": [],
@@ -100,7 +106,8 @@ def _read_cache() -> Optional[dict]:
 
 def _write_cache(data: Dict[str, dict]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_FILE.write_text(json.dumps({"fetched_at": int(time.time()), "contexts": data}, indent=2))
+    CACHE_FILE.write_text(json.dumps(
+        {"v": _CACHE_VERSION, "fetched_at": int(time.time()), "contexts": data}, indent=2))
     try:
         CACHE_FILE.chmod(0o600)
     except OSError:
@@ -118,6 +125,7 @@ def load(*, force_refresh: bool = False) -> Tuple[Dict[str, dict], str]:
     cache = _read_cache()
     ttl = _ttl_seconds()
     if (cache and not force_refresh and ttl > 0
+            and cache.get("v") == _CACHE_VERSION
             and time.time() - cache.get("fetched_at", 0) < ttl):
         _loaded = (cache.get("contexts", {}), "cache")
         return _loaded
@@ -179,6 +187,26 @@ def resolve(namespace: str) -> Tuple[Optional[str], str]:
     if not ns or ns.startswith("<"):
         return None, "namespace kosong"
     return None, f"namespace {ns} belum ada di mapping"
+
+
+IN_CLUSTER = "https://kubernetes.default.svc"
+
+
+def context_for_destination(dest: dict, argocd_context: str = "") -> Optional[str]:
+    """Context dari `spec.destination` Application ArgoCD (server/name ↔ kube_cx).
+
+    `in-cluster` = cluster tempat ArgoCD berjalan (`argocd_context`).
+    """
+    server = (dest.get("server") or "").rstrip("/")
+    name = dest.get("name") or ""
+    if server == IN_CLUSTER or name == "in-cluster":
+        return argocd_context or None
+    for ctx, meta in contexts().items():
+        if server and (meta.get("server") or "").rstrip("/") == server:
+            return ctx
+        if name and name in (ctx, meta.get("cluster")):
+            return ctx
+    return None
 
 
 def knowledge() -> Dict[str, dict]:

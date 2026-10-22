@@ -532,7 +532,7 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--no-jev",
         action="store_true",
-        help="Dengan --anomaly-scan: skip Jev verdict call "
+        help="Dengan --anomaly-scan / --e2e: skip Jev verdict call "
              "(deterministic only, offline-friendly, zero LLM cost).",
     )
     parser.add_argument(
@@ -819,7 +819,8 @@ Config file: ~/.build-q/.env
                 print("❌ Usage: bq --e2e <repo> <ref>   |   bq --e2e --simulate [list|all|<skenario>]",
                       file=sys.stderr)
                 sys.exit(2)
-            report = e2e.analyze(args.repo, args.ref, config=load_config())
+            report = e2e.analyze(args.repo, args.ref, config=load_config(),
+                                 use_jev=not args.no_jev)
             print(e2e.render_text(report))
             sys.exit(e2e.exit_code(report))
 

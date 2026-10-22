@@ -273,6 +273,7 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
           "build_q_patterns":  [ {...}, ... ],
           "kube_cx":           [ {name, cluster, server, environment, note} ],
           "namespace":         [ {name, description, kube_cx: "<nama context>"} ],
+          "build_q_anomaly_rules": [ {rule_name, severity, ..., params, active} ],
         }
 
     Upsert strategy: lookup by unique key (name for tools/providers/kube_cx,
@@ -315,6 +316,8 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
         # di-upsert sebelum `namespace` agar relation bisa di-resolve.
         "kube_cx":           ("name",),
         "namespace":         ("name", "kube_cx"),
+        # Rule standar manifest/anomali (lihat manifest_check.py).
+        "build_q_anomaly_rules": ("rule_name",),
     }
 
     def cx_ids() -> Dict[str, str]:
@@ -357,7 +360,8 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
         summary[coll] = {"created": created, "updated": updated, "failed": failed}
 
     clear_cache()
-    from . import kube_contexts
-    if kube_contexts.CACHE_FILE.exists():
-        kube_contexts.CACHE_FILE.unlink()
+    from . import kube_contexts, manifest_check
+    for cache in (kube_contexts.CACHE_FILE, manifest_check.CACHE_FILE):
+        if cache.exists():
+            cache.unlink()
     return summary

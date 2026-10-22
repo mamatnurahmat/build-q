@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from unittest import mock
 
-from . import e2e
+from . import e2e, kube_contexts, manifest_check
 from .github_api import GitHubAPIError
 
 ORG = "Qoin-Digital-Indonesia"
@@ -25,6 +25,7 @@ GITOPS_REPO = f"{ORG}/gitops"
 IMAGE_ORG = "loyaltolpi"
 SIM_REPO = "pay-be-demo-manager"
 SIM_SHA = "c0ffee1" + "a" * 33
+SAMPLE_APP = "pay-be-sample-manager"  # tetangga di folder yg sama — sumber sample YAML
 
 SIM_CONFIG: Dict[str, Any] = {
     "dockerhub": {"org": IMAGE_ORG},
@@ -126,6 +127,8 @@ class World:
     taskrun: dict = field(default_factory=dict)
     apps: List[dict] = field(default_factory=list)
     kubectl_error: Optional[str] = None
+    # Secret di namespace target (hanya nama) — default: standar lengkap.
+    secrets: List[str] = field(default_factory=lambda: [f"file-config-{SIM_REPO}", "regcred"])
     argocd_api_ok: bool = False  # fallback REST API ArgoCD saat kubectl gagal
     log_tail: str = ""
 
@@ -170,6 +173,16 @@ class World:
             return {"items": self.apps}
         raise e2e.KubectlError(f"simulasi: resource tidak dikenal {args}")
 
+    def kubectl_names(self, context: str, ns: str, kind: str) -> List[str]:
+        if self.kubectl_error:
+            raise e2e.KubectlError(self.kubectl_error)
+        return list(self.secrets) if kind == "secrets" else []
+
+    def gh_list_dir(self, repo: str, path: str, ref: str) -> List[str]:
+        prefix = path.rstrip("/") + "/"
+        return [p[len(prefix):] for r, p in self.files if r == repo and p.startswith(prefix)
+                and "/" not in p[len(prefix):]]
+
     def argocd_api_apps(self, config: dict) -> List[dict]:
         if not self.argocd_api_ok:
             raise e2e.ArgocdApiError("HTTP 401 — token SSO ArgoCD tidak valid/kedaluwarsa", auth=True)
@@ -186,6 +199,38 @@ def gitops_file(repo: str = SIM_REPO, ns: str = "develop-qoin") -> str:
     return f"cce/{ns}/{repo}_deployment.yaml"
 
 
+def service_file(repo: str = SIM_REPO, ns: str = "develop-qoin") -> str:
+    return f"cce/{ns}/{repo}_services.yaml"
+
+
+def deploy_yaml(tag: str, ns: str = "develop-qoin", repo: str = SIM_REPO) -> str:
+    """Deployment standar Qoin (dari generator manifest_check) dgn image tag `tag`."""
+    doc = manifest_check.suggest_deployment(
+        manifest_check.DEFAULT_RULES, app=repo, ns=ns, image=f"{IMAGE_ORG}/{repo}:{tag}")
+    return manifest_check.dump_yaml(doc)
+
+
+def service_yaml(ns: str = "develop-qoin", repo: str = SIM_REPO) -> str:
+    deploy = manifest_check.parse_yaml(deploy_yaml("x", ns, repo))[0]
+    return manifest_check.dump_yaml(manifest_check.suggest_service(deploy))
+
+
+def kustomization_file(ns: str = "develop-qoin") -> str:
+    return f"cce/{ns}/kustomization.yaml"
+
+
+def sync_kustomization(w: "World", ns: str = "develop-qoin", *, skip: Tuple[str, ...] = ()) -> "World":
+    """Tulis ulang kustomization.yaml cce/<ns> dari file deploy/service yang ada (kecuali `skip`)."""
+    prefix = f"cce/{ns}/"
+    files = sorted(p[len(prefix):] for r, p in w.files
+                   if r == GITOPS_REPO and p.startswith(prefix)
+                   and p.endswith(("_deployment.yaml", "_services.yaml")) and p not in skip)
+    w.files[(GITOPS_REPO, kustomization_file(ns))] = manifest_check.dump_yaml({
+        "apiVersion": "kustomize.config.k8s.io/v1beta1", "kind": "Kustomization",
+        "namespace": ns, "resources": files})
+    return w
+
+
 def healthy_world(ref: str = "develop", ns: str = "develop-qoin") -> World:
     """Alur sehat: Action sukses → PipelineRun sukses → YAML benar → live di ArgoCD."""
     w = World(ref=ref)
@@ -194,8 +239,12 @@ def healthy_world(ref: str = "develop", ns: str = "develop-qoin") -> World:
     gfile = gitops_file(ns=ns)
     w.files = {
         (w.repo, e2e.TRIGGER_WORKFLOW): "name: CI Trigger",
-        (GITOPS_REPO, gfile): f"        - image: {IMAGE_ORG}/{SIM_REPO}:{tag}\n",
+        (GITOPS_REPO, gfile): deploy_yaml(tag, ns),
+        (GITOPS_REPO, service_file(ns=ns)): service_yaml(ns),
+        (GITOPS_REPO, gitops_file(SAMPLE_APP, ns)): deploy_yaml("v1.0.0", ns, SAMPLE_APP),
+        (GITOPS_REPO, service_file(SAMPLE_APP, ns)): service_yaml(ns, SAMPLE_APP),
     }
+    sync_kustomization(w, ns)
     w.actions_runs = [{"status": "completed", "conclusion": "success", "run_number": 42,
                        "html_url": f"https://github.com/{w.repo}/actions/runs/42"}]
     w.hooks = [{"id": 1, "config": {"url": e2e.HOOK_URL}, "active": True}]
@@ -215,6 +264,12 @@ def patched(world: World) -> Iterator[World]:
             mock.patch.object(e2e, "kubectl_json", world.kubectl_json), \
             mock.patch.object(e2e, "kubectl_logs", world.kubectl_logs), \
             mock.patch.object(e2e, "argocd_api_apps", world.argocd_api_apps), \
+            mock.patch.object(e2e, "kubectl_names", world.kubectl_names), \
+            mock.patch.object(e2e, "gh_list_dir", world.gh_list_dir), \
+            mock.patch.object(manifest_check, "load_rules",
+                              lambda **k: (copy.deepcopy(manifest_check.DEFAULT_RULES), "default")), \
+            mock.patch.object(kube_contexts, "load",
+                              lambda **k: (kube_contexts._BOOTSTRAP, "bootstrap")), \
             mock.patch.object(e2e, "argocd_token_login", lambda config: False), \
             mock.patch("build_q._common.fetch_cicd_data", world.fetch_cicd_data):
         yield world
@@ -239,7 +294,7 @@ OLD_TAG = "8594c0f"
 
 def _stale(w: World, tag: str = OLD_TAG) -> World:
     """Commit baru belum menghasilkan image → YAML GitOps & live masih tag lama."""
-    w.files[(GITOPS_REPO, gitops_file())] = f"        - image: {IMAGE_ORG}/{SIM_REPO}:{tag}\n"
+    w.files[(GITOPS_REPO, gitops_file())] = deploy_yaml(tag)
     w.apps = [argocd_app("cce/develop-qoin", "develop", tag)]
     return w
 
@@ -303,7 +358,7 @@ def _gitops_not_found() -> World:
 
 def _gitops_overwritten() -> World:
     w = healthy_world()
-    w.files[(GITOPS_REPO, gitops_file())] = f"        - image: {IMAGE_ORG}/{SIM_REPO}:9176f76\n"
+    w.files[(GITOPS_REPO, gitops_file())] = deploy_yaml("9176f76")
     w.apps = [argocd_app("cce/develop-qoin", "develop", "9176f76")]
     return w
 
@@ -311,7 +366,7 @@ def _gitops_overwritten() -> World:
 def _gitops_pr_open() -> World:
     w = healthy_world(ref="v1.4.2", ns="production-qoin")
     gfile = gitops_file(ns="production-qoin")
-    w.files[(GITOPS_REPO, gfile)] = f"        - image: {IMAGE_ORG}/{SIM_REPO}:v1.4.1\n"
+    w.files[(GITOPS_REPO, gfile)] = deploy_yaml("v1.4.1", "production-qoin")
     w.taskrun = task_run({"build-mode": "built", "image-tag": "v1.4.2", "gitops-file": gfile,
                           "gitops-result": "pr-created",
                           "gitops-url": f"https://github.com/{GITOPS_REPO}/pull/701"})
@@ -324,7 +379,7 @@ def _release_live() -> World:
     w = _gitops_pr_open()
     w.pulls["701"] = {"state": "closed", "merged": True}
     gfile = gitops_file(ns="production-qoin")
-    w.files[(GITOPS_REPO, gfile)] = f"        - image: {IMAGE_ORG}/{SIM_REPO}:v1.4.2\n"
+    w.files[(GITOPS_REPO, gfile)] = deploy_yaml("v1.4.2", "production-qoin")
     w.apps = [argocd_app("cce/production-qoin", "main", "v1.4.2")]
     return w
 
@@ -368,6 +423,40 @@ def _fe_compose() -> World:
     w.taskrun = task_run({"build-mode": "built", "image-tag": SIM_SHA[:7],
                           "gitops-file": gfile, "gitops-result": "pushed"})
     w.apps = []
+    return w
+
+
+def _manifest_selector_mismatch() -> World:
+    w = healthy_world()
+    w.files[(GITOPS_REPO, service_file())] = service_yaml().replace("role: front", "role: back")
+    return w
+
+
+def _manifest_service_missing() -> World:
+    w = healthy_world()
+    del w.files[(GITOPS_REPO, service_file())]
+    return sync_kustomization(w)
+
+
+def _manifest_not_in_kustomization() -> World:
+    return sync_kustomization(healthy_world(), skip=(service_file(),))
+
+
+def _manifest_baked_config() -> World:
+    """Config masih baked di image: tanpa volume file-config → saran (warn), bukan titik putus."""
+    w = healthy_world()
+    doc = manifest_check.parse_yaml(w.files[(GITOPS_REPO, gitops_file())])[0]
+    pod = doc["spec"]["template"]["spec"]
+    pod.pop("volumes")
+    pod["containers"][0].pop("volumeMounts")
+    w.files[(GITOPS_REPO, gitops_file())] = manifest_check.dump_yaml(doc)
+    w.secrets = ["regcred"]
+    return w
+
+
+def _manifest_secret_missing() -> World:
+    w = healthy_world()
+    w.secrets = ["regcred"]
     return w
 
 
@@ -428,6 +517,24 @@ SCENARIOS: Dict[str, Scenario] = {s.name: s for s in [
              _argocd_no_app, "argocd", {"argocd": "warn"}, must_mention=("belum didaftarkan sebagai Application",)),
     Scenario("fe-compose", "Repo FE (Docker Compose) — tahap ArgoCD dilewati",
              _fe_compose, None, {"gitops": "ok", "argocd": "skip"}, "healthy"),
+    Scenario("manifest-selector-mismatch", "Selector Service tidak match label pod Deployment",
+             _manifest_selector_mismatch, "manifest", {"gitops": "ok", "manifest": "fail", "argocd": "ok"},
+             must_mention=("service_selector_no_match", "Saran YAML", "role: front")),
+    Scenario("manifest-service-missing", "Deployment ada tapi file Service belum dibuat",
+             _manifest_service_missing, "manifest", {"manifest": "fail"},
+             must_mention=("service_missing", "kind: Service", "_services.yaml",
+                           f"dari sample main:cce/develop-qoin/{SAMPLE_APP}_deployment.yaml")),
+    Scenario("manifest-not-in-kustomization", "File Service ada tapi tidak terdaftar di kustomization",
+             _manifest_not_in_kustomization, "manifest", {"manifest": "fail"},
+             must_mention=("manifest_not_in_kustomization", f"{SIM_REPO}_services.yaml tidak ada di resources")),
+    Scenario("manifest-baked-config", "Config baked di image (tanpa file-config) — saran, bukan titik putus",
+             _manifest_baked_config, None, {"manifest": "ok", "argocd": "ok"}, "healthy",
+             must_mention=("saran standar: missing_file_config_volume", "Buat Secret-nya DULU"),
+             must_not_mention=("secret_missing",)),
+    Scenario("manifest-secret-missing", "Secret file-config belum ada di namespace",
+             _manifest_secret_missing, "manifest", {"manifest": "fail"},
+             must_mention=("secret_missing", f"file-config-{SIM_REPO}_secret.yaml", "kind: Secret"),
+             must_not_mention=("--gitops-set-image",)),
     Scenario("cluster-unreachable", "Cluster CI/ArgoCD tidak terjangkau (VPN/timeout)",
              _cluster_unreachable, None, {"pipeline": "skip", "argocd": "skip"}, "incomplete", must_mention=("Analisa tidak lengkap", "argocd-app token-login"), must_not_mention=("sehat",)),
     Scenario("cluster-unreachable-argocd-api", "kubectl timeout, ArgoCD dibaca via REST API",

@@ -929,7 +929,24 @@ bq --e2e Qoin-Digital-Indonesia/pay-be-topup-manager v1.4.2
 | Trigger | GitHub Action `trigger-ci.yml` untuk commit tsb, webhook `cicd-hw.qoin.id/hook` |
 | Pipeline | PipelineRun `webhook-<repo>-*` di `JX_KUBE_CONTEXT` — step gagal + 15 baris log terakhir, results build/GitOps |
 | GitOps | tag di YAML branch ENV (`develop`/`staging`/`sandbox`), atau status PR ke `main` untuk tag `v*` |
+| Manifest | Deployment ↔ `_services.yaml` ↔ Secret pada **hasil akhir kustomization** (`namespace:` menimpa metadata, patch JSON6902 diterapkan, file wajib ada di `resources`): matchLabels ⊆ label pod, selector Service cocok, `targetPort` bernama ada di `containerPort`, `regcred` untuk image privat, dan Secret yang dirujuk **ada** di namespace. Context cluster: `destination` Application ArgoCD → mapping `kube_cx` → kandidat namespace ambigu (cluster yang menjalankan Deployment). Bila belum sesuai → **saran YAML** |
 | ArgoCD | Application di `ARGOCD_KUBE_CONTEXT` (default `hw-pro-p`): sync, health, image live, override kustomize |
+
+Rule tahap Manifest dimuat dari PocketBase collection `build_q_anomaly_rules` (severity,
+`active`, dan `params` seperti label wajib, prefix secret, mount path, nodepool per namespace,
+prefix image privat). Severity `critical` = memutus deploy/traffic (titik putus); `warn` =
+saran standar (mis. config masih baked di image) — tahap tetap ✅. Ubah lewat
+`scripts/anomaly-rules-seed.json` + `bq --tui-sync scripts/anomaly-rules-seed.json`.
+
+**Sample YAML** — saran manifest baru (Deployment/Service yang belum ada) disalin dari
+tetangga terdekat di repo GitOps `main:cce/<namespace>` (role `-manager`/`-module` & project
+sama, punya Service, lolos rule critical), lalu nama/label/image/port/stack/secret disesuaikan
+dan annotation/label Helm-ArgoCD dibuang. Sumbernya di rule `manifest_sample_source`
+(`params.branch` / `params.infra`); bila tidak ada sample → generator standar. Saran untuk file
+yang sudah ada mempertahankan urutan key aslinya (diff minimal).
+Bila ada temuan, **Jev** menilai kesiapan deploy dan rule yang perlu dibereskan dulu — aktif
+di TUI `/e2e` dan web; di CLI matikan dengan `--no-jev`. Saran YAML Secret hanya kerangka:
+isi dari file config dan **jangan commit plaintext** (skill `secret-from-file`).
 
 Exit code: `0` sehat · `1` ada tahap gagal · `2` menunggu (PR/sync/pipeline) atau ada tahap
 yang tidak bisa diperiksa (cluster tak terjangkau → verdict *incomplete*, tidak pernah "sehat").
@@ -937,7 +954,7 @@ yang tidak bisa diperiksa (cluster tak terjangkau → verdict *incomplete*, tida
 **Simulasi tanpa cluster** — untuk demo, pelatihan, dan self-test:
 
 ```bash
-bq --e2e --simulate list                   # 17 skenario (trigger gagal, build gagal, PR belum merge, OutOfSync, …)
+bq --e2e --simulate list                   # 23 skenario (trigger gagal, build gagal, PR belum merge, OutOfSync, …)
 bq --e2e --simulate                        # self-test semua skenario
 bq --e2e --simulate pipeline-build-failed  # laporan lengkap 1 skenario
 ```
