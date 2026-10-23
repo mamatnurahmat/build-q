@@ -123,7 +123,7 @@ DEFAULT_RULES: Dict[str, dict] = {
                 "develop-qoin": "develop-qoin", "develop-payout": "develop-qoin",
                 "develop-qoinhub": "develop-qoin", "develop-saas": "develop-qoin",
                 "develop-ngenwal": "develop-qoincash", "sandbox-qoin": "sandbox-qoin",
-                "production-payout": "production-payout-nodepool", "staging-payout": "production-payout-nodepool",
+                "production-payout": "production-payout-nodepool",
                 "production-qoin": "production-nodepool", "staging-qoin": "production-nodepool",
                 "production-ngenwal": "production-ue-nodepool", "production-saas": "production-ue-nodepool",
                 "staging-ngenwal": "production-ue-nodepool",

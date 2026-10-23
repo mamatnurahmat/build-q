@@ -273,7 +273,8 @@ def push_from_seed(seed_file: Path) -> Dict[str, Dict[str, int]]:
           "build_q_patterns":  [ {...}, ... ],
           "kube_cx":           [ {name, cluster, server, environment, note} ],
           "namespace":         [ {name, description, kube_cx: "<nama context>"} ],
-          "nodepool":          [ {kube_cx: "<nama context>", namespace, role: front|back, label, value} ],
+          "nodepool":          [ {name: "<cluster>/<namespace>/<role>", kube_cx: "<nama context>",
+                                  namespace, role: front|back, label, value} ],
           "build_q_anomaly_rules": [ {rule_name, severity, ..., params, active} ],
         }
 

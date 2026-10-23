@@ -343,10 +343,11 @@ Mapping context ↔ namespace juga terpusat di PocketBase (sejak v0.2.1):
 |---|---|
 | `kube_cx` | `name` (hw-dev, hw-pro-p, hw-pro-q, hw-pro-u), `cluster`, `server`, `environment`, `note`, `nodepools` |
 | `namespace` | `name`, `description`, `kube_cx` (relation) |
-| `nodepool` | `kube_cx` (relation), `namespace`, `role` (front/back), `label`, `value`, `description` |
+| `nodepool` | `name` (`<cluster>/<namespace>/<role>`), `kube_cx` (relation), `namespace`, `role` (front/back), `label`, `value`, `description` |
 
-**Nodepool per namespace × cluster** (sejak v0.2.5) — collection **`nodepool`**, satu record per
-`kube_cx` (relasi cluster) × `namespace` × `role` (`front` = manager/apigateway, `back` =
+**Nodepool per namespace × cluster** (sejak v0.2.5) — collection **`nodepool`** (24 record), satu
+record per `kube_cx` (relasi cluster) × `namespace` × `role`, bernama `<cluster>/<namespace>/<role>`
+(mis. `hw-pro-p/production-payout/front`, unik) (`front` = manager/apigateway, `back` =
 module/…) dengan `label` (kunci nodeSelector, mis. `cce.cloud.com/cce-nodepool` atau `nodetype`)
 dan `value`. Unik per (kube_cx, namespace, role); baca = login, tulis = superuser.
 `kube_cx.nodepools` = inventaris pool yang benar-benar ada di cluster. Ubah lewat bagian
@@ -358,15 +359,20 @@ di GitOps (branch tempat namespace di-deploy):
 | hw-dev | develop-qoin, develop-payout, develop-qoinhub, develop-saas | `cce-nodepool: develop-qoin-manager / develop-qoin-service` |
 | hw-dev | develop-ngenwal | `develop-qoincash-manager / develop-qoincash-service` |
 | hw-dev | sandbox-qoin | `sandbox-qoin-manager / sandbox-qoin-service` |
-| hw-pro-p | production-payout | **`nodetype: front / back`** (node hw-pro-p berlabel `nodetype`) |
-| hw-pro-p | staging-payout, develop-payout | `production-payout-nodepool-manager / -service` |
+| hw-pro-p | production-payout | `production-payout-nodepool-manager / -service` |
 | hw-pro-q | production-qoin, staging-qoin | `production-nodepool-manager / -service` |
 | hw-pro-u | production-ngenwal, production-saas, staging-ngenwal | `production-ue-nodepool-manager / -service` |
 
-Namespace di >1 cluster (mis. `develop-payout`) → cluster yang environment-nya cocok dengan
-prefix namespace (develop/sandbox → development). Saran YAML memakai pasangan label + nilai ini;
-bila label namespace bukan `cce-nodepool` (mis. `nodetype`), label nodepool CCE dari template
-dibuang. Pool `*-monitoring` / `*-workflow` / `*-cicd` tidak dipetakan.
+Label `nodetype` **tidak** dipakai sebagai standar: di hw-pro-p `nodetype=front` menempel di pool
+`nodepool-manager`, `monitoring`, **dan** `workflow`, sehingga pod manager yang hanya memakai
+`nodetype: front` bisa jatuh ke node monitoring/workflow (terjadi nyata di production-payout).
+Pakai nama pool presisi (`cce.cloud.com/cce-nodepool`). Collection `nodepool` tetap mendukung
+`label` lain bila suatu cluster memang membutuhkannya.
+
+Setiap namespace hanya dicatat di cluster tempat ia benar-benar ada (dicek `kubectl get ns`):
+`develop-payout` hanya di hw-dev, dan folder GitOps yang tidak di-deploy (mis. `staging-payout`)
+tidak dicatat. Bila suatu namespace memang ada di >1 cluster, dipilih cluster yang environment-nya
+cocok dengan prefix namespace (develop/sandbox → development). Pool `*-monitoring` / `*-workflow` / `*-cicd` tidak dipetakan.
 
 Mapping ini dipakai di tiga tempat:
 
