@@ -205,3 +205,190 @@ class TestNamespaceArg:
     def test_invalid_namespace(self, bad):
         with pytest.raises(manifest_init.ManifestInitError):
             manifest_init.init(SIM_REPO, bad, config=copy.deepcopy(SIM_CONFIG))
+
+
+class TestLanguageDetection:
+    @pytest.mark.parametrize("files, lang", [
+        (["go.mod", "main.go"], "go"),
+        (["src", "App.sln"], "dotnet"),
+        (["appsettings.json", "Program.cs"], "dotnet"),
+        (["Cargo.toml"], "rust"),
+        (["package.json"], "node"),
+        (["pyproject.toml"], "python"),
+    ])
+    def test_marker_files(self, monkeypatch, files, lang):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_list_dir", lambda repo, path, ref: files)
+        assert manifest_init.detect_language("o/r", "develop", {})[0] == lang
+
+    def test_cicd_hint_wins(self, monkeypatch):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_list_dir", lambda *a: ["go.mod"])
+        assert manifest_init.detect_language("o/r", "develop", {"STACK": "dotnet"}) == ("dotnet", "cicd.json STACK=dotnet")
+
+    def test_dockerfile_then_github_languages(self, monkeypatch):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_list_dir", lambda *a: ["README.md"])
+        monkeypatch.setattr(e2e, "gh_raw", lambda repo, path, ref: "FROM devopsfaith/krakend:2.9\n")
+        assert manifest_init.detect_language("o/r", "d", {})[0] == "krakend"
+        monkeypatch.setattr(e2e, "gh_raw", lambda *a: (_ for _ in ()).throw(GitHubAPIError("404")))
+        monkeypatch.setattr(e2e, "gh_get", lambda path: {"Shell": 9, "C#": 5})
+        assert manifest_init.detect_language("o/r", "d", {}) == ("dotnet", "GitHub languages (C#)")
+
+    def test_dockerfile_final_stage_workdir(self):
+        go = ("FROM golang:1.25 AS builder\nWORKDIR /go/src/${PROJECT}\nRUN go build\n"
+              "FROM alpine:latest\nWORKDIR /app\nCOPY --from=builder /x /app/x\nENTRYPOINT [\"/app/x\"]\n")
+        assert manifest_init._dockerfile_facts(go) == {
+            "images": ["golang:1.25", "alpine:latest"], "final_image": "alpine:latest",
+            "workdir": "/app", "entrypoint": True, "config_copy": ""}
+        dotnet = ("FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS base\nWORKDIR /app\n"
+                  "FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build\nWORKDIR /src\n"
+                  "FROM base AS final\nCOPY --from=build /out .\nENTRYPOINT [\"dotnet\", \"x.dll\"]\n")
+        f = manifest_init._dockerfile_facts(dotnet)
+        assert (f["final_image"], f["workdir"], f["entrypoint"]) == ("mcr.microsoft.com/dotnet/aspnet:8.0", "/app", True)
+        assert manifest_init._dockerfile_facts("FROM alpine\nWORKDIR /go/src/${P}\n")["workdir"] == ""
+
+
+class TestDotnetEnvMode:
+    MINIMAL = ('var builder = WebApplication.CreateBuilder(args);\n'
+               'var environment = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");\n'
+               'if (string.Equals(environment, "develop", StringComparison.OrdinalIgnoreCase)) { }\n')
+    JSON_ONLY = ('Host.CreateDefaultBuilder(args).ConfigureHostConfiguration(c => {\n'
+                 '  var environment = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT");\n'
+                 '  c.AddJsonFile($"appsettings.{environment}.json", optional: true); });\n')
+    GENERIC = ('Host.CreateDefaultBuilder(args).ConfigureWebHostDefaults(w => {\n'
+               '  var name = context.HostingEnvironment.EnvironmentName; });\n')
+
+    def _raw(self, files):
+        def gh_raw(repo, path, ref):
+            if path in files:
+                return files[path]
+            raise GitHubAPIError("404")
+        return gh_raw
+
+    def test_env_var_read_means_env_mode(self, monkeypatch):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_raw", self._raw({"Program.cs": self.MINIMAL}))
+        mode, ev = manifest_init.detect_dotnet_env_mode("o/r", "master", mc.DEFAULT_RULES)
+        assert mode == "env" and "dipakai dlm logika" in ev
+
+    def test_env_var_only_for_addjsonfile_means_args(self, monkeypatch):
+        """Pola 11 aplikasi production-ngenwal: env var hanya utk AddJsonFile → host default
+        sudah memuat appsettings.<--environment>.json, jadi args cukup."""
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_raw", self._raw({"Program.cs": self.JSON_ONLY}))
+        mode, ev = manifest_init.detect_dotnet_env_mode("o/r", "master", mc.DEFAULT_RULES)
+        assert mode == "args" and "hanya utk AddJsonFile" in ev
+
+    def test_inline_env_var_logic_means_env(self, monkeypatch):
+        from build_q import e2e
+        src = 'if (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "develop") { }\n'
+        monkeypatch.setattr(e2e, "gh_raw", self._raw({"Program.cs": src}))
+        assert manifest_init.detect_dotnet_env_mode("o/r", "master", mc.DEFAULT_RULES)[0] == "env"
+
+    def test_generic_host_means_args_mode(self, monkeypatch):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_raw", self._raw({"Program.cs": self.GENERIC}))
+        assert manifest_init.detect_dotnet_env_mode("o/r", "master", mc.DEFAULT_RULES)[0] == "args"
+
+    def test_program_in_subfolder_found_via_tree(self, monkeypatch):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_raw", self._raw({"src/Api/Program.cs": self.MINIMAL}))
+        monkeypatch.setattr(e2e, "gh_get", lambda path: {"tree": [
+            {"path": "src/Api/Program.cs", "type": "blob"}, {"path": "tests/X/Program.cs", "type": "blob"}]})
+        mode, ev = manifest_init.detect_dotnet_env_mode("o/r", "master", mc.DEFAULT_RULES)
+        assert mode == "env" and ev.startswith("src/Api/Program.cs")
+
+    @pytest.mark.parametrize("mode, args, env", [
+        ("args", ["dotnet", "x.dll", "--environment=production"], None),
+        ("env", None, [{"name": "ASPNETCORE_ENVIRONMENT", "value": "production"}]),
+        ("args+env", ["dotnet", "x.dll", "--environment=production"],
+         [{"name": "ASPNETCORE_ENVIRONMENT", "value": "production"}]),
+        ("none", None, None),
+    ])
+    def test_apply_env_mode(self, mode, args, env):
+        c = {"args": ["old"], "env": [{"name": "DOTNET_ENVIRONMENT", "value": "x"}]}
+        mc.apply_env_mode(c, mode, "x", "production")
+        assert c.get("args") == args and c.get("env") == env
+        assert mc.runtime_env(c)[0] == ("" if mode == "none" else mode)
+
+    def test_appsettings_mismatch_rule(self):
+        rules = copy.deepcopy(mc.DEFAULT_RULES)
+        d = mc.suggest_deployment(rules, app="x-be-y-manager", ns="sandbox-qoin", image="loyaltolpi/x:1",
+                                  stack="dotnet")
+        c = mc._containers(d)[0]
+        mc.apply_env_mode(c, "args", "x-be-y-manager", "sandbox")
+        c["volumeMounts"][0].update(mountPath="/app/appsettings.production.json", subPath="appsettings.production.json")
+        res = mc.check(rules, deploy=d, service=mc.suggest_service(d), app="x-be-y-manager", ns="sandbox-qoin",
+                       deploy_path="cce/sandbox-qoin/x_deployment.yaml", service_path="cce/sandbox-qoin/x_services.yaml",
+                       secrets_in_cluster={"file-config-x-be-y-manager", "regcred"})
+        f = next(f for f in res.findings if f.rule_name == "appsettings_env_mismatch")
+        assert f.severity == "critical" and "`sandbox`" in f.message and "appsettings.production.json" in f.message
+
+    def test_secret_key_follows_runtime_env(self):
+        sec = mc.suggest_secret(mc.DEFAULT_RULES, name="file-config-x", app="x", ns="develop-ngenwal",
+                                stack="dotnet", env_name="production")
+        assert list(sec["stringData"]) == ["appsettings.production.json"]
+        go = mc.suggest_secret(mc.DEFAULT_RULES, name="file-config-x", app="x", ns="develop-qoin", stack="go")
+        assert list(go["stringData"]) == [".env"]
+
+
+class TestConfigMountPattern:
+    """Pola mountPath file config = direktori kerja image (contoh nyata plus-be-appmerchant-manager
+    → /.env, ngenwal-be-saasaltoservice-manager → /app)."""
+
+    GO_ROOT = ("FROM golang:1.25-alpine AS builder\nWORKDIR /go/src/${PROJECT}\nCOPY .env.${BRANCH} .env\n"
+               "FROM alpine:latest\nCOPY --from=builder /go/bin/${PROJECT} .\nCOPY .env.${BRANCH} .env\n"
+               "CMD [\"./up.sh\"]\n")
+
+    def test_no_workdir_means_root_and_copy_dest(self):
+        f = manifest_init._dockerfile_facts(self.GO_ROOT)
+        assert (f["workdir"], f["config_copy"]) == ("/", "/.env")
+        assert manifest_init.config_dir(f) == "/"
+        assert manifest_init.config_dir({"workdir": "/app", "config_copy": ""}) == "/app"
+
+    def _deploy(self, mount, sub):
+        d = mc.suggest_deployment(mc.DEFAULT_RULES, app="pay-be-x-manager", ns="develop-qoin", image="i:1")
+        m = mc._containers(d)[0]["volumeMounts"][0]
+        m.update(mountPath=mount, subPath=sub)
+        return d
+
+    def _findings(self, monkeypatch, deploy, language, facts, csproj=""):
+        from build_q import e2e
+        monkeypatch.setattr(e2e, "gh_list_dir", lambda *a: ["x.csproj"] if csproj is not None else [])
+        monkeypatch.setattr(e2e, "gh_raw", lambda *a: csproj or "<Project></Project>")
+        res = manifest_init.InitResult(repo="o/r", env="develop", ref="develop", image="i:1", gitops_repo="g",
+                                       gitops_branch="develop", path="cce/develop-qoin/pay-be-x-manager_deployment.yaml",
+                                       namespace="develop-qoin", stack="go", port=80)
+        out = manifest_init._source_config_findings(mc.DEFAULT_RULES, deploy, "pay-be-x-manager", "o/r", "develop",
+                                                    language, facts, "Dockerfile", res.path, res)
+        return out, res
+
+    def test_mount_path_mismatch_with_fix(self, monkeypatch):
+        out, res = self._findings(monkeypatch, self._deploy("/app/.env", ".env"), "go",
+                                  {"workdir": "/", "config_copy": "/.env"})
+        assert [f["rule_name"] for f in out] == ["config_mount_path_mismatch"]
+        fixed = mc.parse_yaml(res.suggestions[0]["yaml"])[0]
+        assert mc._containers(fixed)[0]["volumeMounts"][0]["mountPath"] == "/.env"
+
+    def test_matching_mount_is_clean(self, monkeypatch):
+        out, _ = self._findings(monkeypatch, self._deploy("/app/.env", ".env"), "go", {"workdir": "/app", "config_copy": ""})
+        assert out == []
+
+    def test_dotnet_mounting_env_without_dotnetenv(self, monkeypatch):
+        out, _ = self._findings(monkeypatch, self._deploy("/app/.env", ".env"), "dotnet", {"workdir": "/app", "config_copy": ""})
+        assert [f["rule_name"] for f in out] == ["config_format_mismatch"]
+        ok, _ = self._findings(monkeypatch, self._deploy("/app/.env", ".env"), "dotnet",
+                               {"workdir": "/app", "config_copy": ""},
+                               csproj='<PackageReference Include="DotNetEnv" Version="3.0.0" />')
+        assert ok == []
+
+
+def test_existing_mount_path_fix_is_suggested(monkeypatch):
+    """Saran mountPath dari analisa Dockerfile tidak boleh tertimpa saran hasil check."""
+    world = healthy_world()
+    monkeypatch.setattr(manifest_init, "_dockerfile", lambda repo, ref: ("Dockerfile", "FROM alpine\nCMD [\"./x\"]\n"))
+    res = _init(world)
+    assert any(f["rule_name"] == "config_mount_path_mismatch" for f in res.findings)  # template: /app/.env, image: /
+    fixed = mc.parse_yaml(res.suggestions[0]["yaml"])[0]
+    assert mc._containers(fixed)[0]["volumeMounts"][0]["mountPath"] == "/.env"

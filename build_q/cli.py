@@ -231,6 +231,13 @@ Config file: ~/.build-q/.env
              "Ekspor: --export-md / --export-json.",
     )
     parser.add_argument(
+        "--pr",
+        action="store_true",
+        help="Dengan --manifest-init: ajukan saran Deployment/Service sebagai PR ke repo GitOps "
+             "(branch baru → branch env). kustomization.yaml hanya ditambah baris resources; "
+             "Secret TIDAK pernah di-commit. Pratinjau saja: --pr --dry-run.",
+    )
+    parser.add_argument(
         "--out-dir",
         metavar="DIR",
         help="Dengan --manifest-init: tulis saran YAML ke DIR/<path GitOps> (siap disalin ke repo GitOps).",
@@ -945,6 +952,24 @@ Config file: ~/.build-q/.env
                 from pathlib import Path
                 Path(args.export_md).expanduser().write_text(manifest_init.render_markdown(result))
                 print(f"📄 laporan: {args.export_md}")
+            if args.pr:
+                from . import e2e, github_api, manifest_pr
+                try:
+                    kz_text = e2e.gh_raw(result.gitops_repo, result.kustomization_path, result.gitops_branch)
+                except github_api.GitHubAPIError:
+                    kz_text = None
+                try:
+                    plan = manifest_pr.plan(result, kustomization_text=kz_text)
+                    print("\n" + manifest_pr.render_plan(plan))
+                    if args.dry_run:
+                        print("   (dry-run: PR tidak dibuat)")
+                        sys.exit(0)
+                    pr = manifest_pr.create(plan)
+                except manifest_pr.ManifestPRError as e:
+                    print(f"❌ PR: {e}", file=sys.stderr)
+                    sys.exit(1)
+                print(f"✅ PR #{pr.get('number')}: {pr.get('html_url')}")
+                sys.exit(0)
             sys.exit(result.exit_code)
 
         if args.manifest_check:
