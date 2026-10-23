@@ -460,7 +460,12 @@ Config file: ~/.build-q/.env
         action="store_true",
         help="Cek apakah repo sudah terpasang webhook cicd-hw.qoin.id/hook. "
              "Berjalan sendiri (`bq --cicd-webhook [<repo>]`) atau berbarengan "
-             "dengan --pr-fix (dijalankan setelah pr-fix sukses).",
+             "dengan --pr-fix (dijalankan setelah pr-fix sukses). HMAC dari PB "
+             "collection secrets (WEBHOOK_HOOK_HMAC), divalidasi ke secret "
+             "jenkins-x/incoming-webhook. Hanya satu hook https dipertahankan "
+             "(duplikat dihapus, http:// diubah), HMAC diverifikasi via ping "
+             "(403 → secret di-sync), lalu dicatat ke PB collection repo "
+             "(dibuat bila belum ada) & github_hook.",
     )
     parser.add_argument(
         "--cicd-trigger",
