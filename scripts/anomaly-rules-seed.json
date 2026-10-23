@@ -471,6 +471,42 @@
       "fix_hint": "Ubah params.branch / params.infra di PB untuk mengganti sumber sample.",
       "source": "bq --e2e (tahap manifest)",
       "params": {"branch": "main", "infra": "cce", "max_candidates": 5},
-      "active": true, "order": 52 }
+      "active": true, "order": 52 },
+
+    { "rule_name": "appsettings_env_mismatch",
+      "resource_type": "Deployment", "severity": "critical", "category": "config_drift",
+      "description": "Aplikasi .NET berjalan dgn environment X (args --environment / env ASPNETCORE_ENVIRONMENT) tapi file yang di-mount appsettings.Y.json — .NET hanya membaca appsettings.<X>.json, config Secret diabaikan.",
+      "detect_hint": "env runtime (args --environment= / env ASPNETCORE_ENVIRONMENT|DOTNET_ENVIRONMENT) != <X> pada mount appsettings.<X>.json",
+      "fix_hint": "Samakan: mount appsettings.<env runtime>.json (key Secret yg sama), atau ubah env runtime ke env file yang di-mount.",
+      "source": "bq --manifest-init (analisa source .NET)",
+      "params": {"env_vars": ["ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT"]},
+      "active": true, "order": 53 },
+
+    { "rule_name": "dotnet_env_mode",
+      "resource_type": "Template", "severity": "info", "category": "template",
+      "description": "Pola source .NET → cara environment diberikan: kode yg membaca env var langsung (GetEnvironmentVariable) butuh env ASPNETCORE_ENVIRONMENT; generic/minimal host lain cukup args --environment.",
+      "detect_hint": "bukan check — pola source .NET (Program.cs/Startup.cs) → mode env vs args",
+      "fix_hint": "Tambah pola di params.env_patterns bila ada cara baca env lain.",
+      "source": "bq --manifest-init (analisa source .NET)",
+      "params": {"env_var": "ASPNETCORE_ENVIRONMENT", "default_mode": "args", "source_files": ["Program.cs", "Startup.cs"], "env_patterns": ["GetEnvironmentVariable\\(\\s*\\\"(ASPNETCORE|DOTNET)_ENVIRONMENT\\\"\\s*\\)"], "logic_patterns": ["Equals\\(\\s*{var}\\b", "\\b{var}\\s*[!=]=", "[!=]=\\s*{var}\\b", "switch\\s*\\(\\s*{var}\\b", "\\b{var}\\??\\.(Equals|ToLower|ToUpper|StartsWith|Contains)\\b"], "inline_logic_patterns": ["GetEnvironmentVariable\\(\\s*\\\"(ASPNETCORE|DOTNET)_ENVIRONMENT\\\"\\s*\\)\\s*(\\?\\?[^;]*)?([!=]=|\\??\\.(Equals|ToLower|ToUpper))"]},
+      "active": true, "order": 54 },
+
+    { "rule_name": "config_mount_path_mismatch",
+      "resource_type": "Deployment", "severity": "critical", "category": "config_drift",
+      "description": "File config Secret di-mount di direktori yang tidak dibaca aplikasi — config diabaikan. Aplikasi membaca dari direktori kerja image (WORKDIR stage final, default /) atau tujuan `COPY … .env` di Dockerfile (Go: godotenv.Load() = relatif CWD).",
+      "detect_hint": "dirname(mountPath Secret config) != WORKDIR stage final Dockerfile (default /) atau tujuan COPY .env",
+      "fix_hint": "Pindahkan mountPath ke <WORKDIR>/<file> sesuai Dockerfile (mis. /.env bila tanpa WORKDIR, /app/.env bila WORKDIR /app).",
+      "source": "bq --manifest-init (analisa Dockerfile & source)",
+      "params": {"dockerfiles": ["Dockerfile", "build.Dockerfile", "Dockerfile.production"]},
+      "active": true, "order": 55 },
+
+    { "rule_name": "config_format_mismatch",
+      "resource_type": "Deployment", "severity": "critical", "category": "config_drift",
+      "description": "Format file config tidak sesuai bahasa: .NET membaca appsettings.<env>.json (kecuali memakai DotNetEnv), bahasa lain membaca .env.",
+      "detect_hint": ".NET mount .env tanpa DotNetEnv di *.csproj, atau non-.NET mount appsettings",
+      "fix_hint": "Mount appsettings.<env runtime>.json untuk .NET (atau tambahkan DotNetEnv), .env untuk Go/Rust/Node/Python.",
+      "source": "bq --manifest-init (analisa Dockerfile & source)",
+      "params": {"dotnet_env_packages": ["DotNetEnv", "dotenv.net"]},
+      "active": true, "order": 56 }
   ]
 }

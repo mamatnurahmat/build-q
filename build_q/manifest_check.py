@@ -107,6 +107,39 @@ DEFAULT_RULES: Dict[str, dict] = {
         "fix_hint": "Tambah imagePullSecrets: [{name: regcred}] (atau patch kustomization yang meng-inject-nya).",
         "params": {"name": "regcred", "image_prefixes": ["loyaltolpi/", "docker.io/loyaltolpi/"]},
     },
+    "appsettings_env_mismatch": {
+        "severity": "critical", "category": "config_drift",
+        "description": "Aplikasi .NET berjalan dgn environment X (args --environment / env ASPNETCORE_ENVIRONMENT) tapi file yang di-mount appsettings.Y.json — .NET hanya membaca appsettings.<X>.json, config Secret diabaikan.",
+        "fix_hint": "Samakan: mount appsettings.<env runtime>.json (key Secret yg sama), atau ubah env runtime ke env file yang di-mount.",
+        "params": {"env_vars": ["ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT"]},
+    },
+    "config_mount_path_mismatch": {
+        "severity": "critical", "category": "config_drift",
+        "description": "File config Secret di-mount di direktori yang tidak dibaca aplikasi — config diabaikan. Aplikasi membaca dari direktori kerja image (WORKDIR stage final, default /) atau tujuan `COPY … .env` di Dockerfile (Go: godotenv.Load() = relatif CWD).",
+        "fix_hint": "Pindahkan mountPath ke <WORKDIR>/<file> sesuai Dockerfile (mis. /.env bila tanpa WORKDIR, /app/.env bila WORKDIR /app).",
+        "params": {"dockerfiles": ["Dockerfile", "build.Dockerfile", "Dockerfile.production"]},
+    },
+    "config_format_mismatch": {
+        "severity": "critical", "category": "config_drift",
+        "description": "Format file config tidak sesuai bahasa: .NET membaca appsettings.<env>.json (kecuali memakai DotNetEnv), bahasa lain membaca .env.",
+        "fix_hint": "Mount appsettings.<env runtime>.json untuk .NET (atau tambahkan DotNetEnv), .env untuk Go/Rust/Node/Python.",
+        "params": {"dotnet_env_packages": ["DotNetEnv", "dotenv.net"]},
+    },
+    "dotnet_env_mode": {
+        "severity": "info", "category": "template",
+        "description": "Pola source .NET → cara environment diberikan: kode yg membaca env var langsung (GetEnvironmentVariable) butuh env ASPNETCORE_ENVIRONMENT; generic/minimal host lain cukup args --environment.",
+        "fix_hint": "Tambah pola di params.env_patterns bila ada cara baca env lain.",
+        "params": {"env_var": "ASPNETCORE_ENVIRONMENT", "default_mode": "args",
+                   "source_files": ["Program.cs", "Startup.cs"],
+                   "env_patterns": [r"GetEnvironmentVariable\(\s*\"(ASPNETCORE|DOTNET)_ENVIRONMENT\"\s*\)"],
+                   # Nilai env var dipakai dalam LOGIKA → wajib mode env. Hanya untuk AddJsonFile
+                   # (redundan dgn host default yg membaca --environment) → args cukup.
+                   "logic_patterns": [r"Equals\(\s*{var}\b", r"\b{var}\s*[!=]=", r"[!=]=\s*{var}\b",
+                                      r"switch\s*\(\s*{var}\b",
+                                      r"\b{var}\??\.(Equals|ToLower|ToUpper|StartsWith|Contains)\b"],
+                   "inline_logic_patterns": [r"GetEnvironmentVariable\(\s*\"(ASPNETCORE|DOTNET)_ENVIRONMENT\"\s*\)"
+                                             r"\s*(\?\?[^;]*)?([!=]=|\??\.(Equals|ToLower|ToUpper))"]},
+    },
     "manifest_sample_source": {
         "severity": "info", "category": "template",
         "description": "Sumber sample YAML untuk saran manifest baru: Deployment+Service tetangga terdekat di repo GitOps <branch>:<infra>/<namespace>.",
@@ -272,6 +305,8 @@ def detect_stack(deploy: Optional[dict], cicd: Optional[dict] = None) -> str:
         if any("appsettings" in str(m.get("subPath", "")) + str(m.get("mountPath", ""))
                for m in c.get("volumeMounts") or []):
             return "dotnet"
+        if any(e.get("name") in ("ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT") for e in c.get("env") or []):
+            return "dotnet"
     return "go"
 
 
@@ -297,6 +332,33 @@ def _subset(a: dict, b: dict) -> bool:
 
 def _container_ports(doc: dict) -> List[dict]:
     return [p for c in _containers(doc) for p in c.get("ports") or []]
+
+
+ENV_VARS = ("ASPNETCORE_ENVIRONMENT", "DOTNET_ENVIRONMENT")
+
+
+def runtime_env(container: dict) -> Tuple[str, str]:
+    """(mode, env) runtime .NET dari container: mode args | env | args+env | '' (default)."""
+    arg = next((str(a).split("=", 1)[1] for a in container.get("args") or []
+                if str(a).startswith("--environment=")), "")
+    var = next((str(e.get("value", "")) for e in container.get("env") or [] if e.get("name") in ENV_VARS), "")
+    mode = ("args" if arg else "") + ("+env" if var and arg else ("env" if var else ""))
+    return mode, arg or var
+
+
+def apply_env_mode(container: dict, mode: str, app: str, env_name: str, env_var: str = ENV_VARS[0]) -> None:
+    """Cara .NET menerima environment: `args` (dotnet <app>.dll --environment=X), `env`
+    (ASPNETCORE_ENVIRONMENT=X), `args+env` (keduanya), atau `none` (tanpa keduanya, default image)."""
+    others = [e for e in container.get("env") or [] if e.get("name") not in ENV_VARS]
+    if mode in ("args", "args+env"):
+        container["args"] = ["dotnet", f"{app}.dll", f"--environment={env_name}"]
+    else:
+        container.pop("args", None)
+    env = others + ([{"name": env_var, "value": env_name}] if mode in ("env", "args+env") else [])
+    if env:
+        container["env"] = env
+    else:
+        container.pop("env", None)
 
 
 def referenced_secrets(deploy: dict) -> List[str]:
@@ -565,9 +627,12 @@ def suggest_service(deploy: dict, base: Optional[dict] = None,
     })
 
 
-def suggest_secret(rules: Dict[str, dict], *, name: str, app: str, ns: str, stack: str) -> dict:
-    """Kerangka Secret file-config (nilai diisi dari file config — JANGAN commit plaintext)."""
-    env = env_from_namespace(ns)
+def suggest_secret(rules: Dict[str, dict], *, name: str, app: str, ns: str, stack: str,
+                   env_name: Optional[str] = None) -> dict:
+    """Kerangka Secret file-config (nilai diisi dari file config — JANGAN commit plaintext).
+
+    Key: `.env` (semua bahasa) atau `appsettings.<env runtime>.json` (.NET)."""
+    env = env_name or env_from_namespace(ns)
     fc = (rules.get("missing_file_config_volume") or DEFAULT_RULES["missing_file_config_volume"])["params"]
     key = fc["key_dotnet" if stack == "dotnet" else "key_go"].format(env=env)
     return tidy({
@@ -578,11 +643,11 @@ def suggest_secret(rules: Dict[str, dict], *, name: str, app: str, ns: str, stac
 
 
 def _secret_suggestion(rules: Dict[str, dict], *, name: str, app: str, ns: str, stack: str,
-                       infra: str) -> dict:
+                       infra: str, env_name: Optional[str] = None) -> dict:
     return {
         "title": f"Secret {name} (isi dari file config, apply — jangan commit plaintext)",
         "path": f"{infra}/{ns}/{name}_secret.yaml",
-        "yaml": dump_yaml(suggest_secret(rules, name=name, app=app, ns=ns, stack=stack)),
+        "yaml": dump_yaml(suggest_secret(rules, name=name, app=app, ns=ns, stack=stack, env_name=env_name)),
     }
 
 
@@ -708,7 +773,7 @@ def adapt_sample_deployment(
     port: Optional[int] = None, stack: str = "go", infra: str = "cce", kz: Optional[dict] = None,
     ports: Optional[List[dict]] = None, config_mount_dir: Optional[str] = None,
     config_mount_paths: Optional[List[str]] = None, dotnet_args: Optional[bool] = None,
-    config_secret: Optional[bool] = None,
+    config_secret: Optional[bool] = None, env_mode: Optional[str] = None,
 ) -> dict:
     """Deployment baru dari sample tetangga: ganti nama/label/image/port/stack, lalu standar rule.
 
@@ -755,6 +820,9 @@ def adapt_sample_deployment(
             c0["args"] = ["dotnet", f"{app}.dll", f"--environment={env}"]
         else:
             c0.pop("args", None)
+            c0["env"] = [e for e in c0.get("env") or [] if e.get("name") not in ENV_VARS]
+            if not c0["env"]:
+                c0.pop("env")
         for m in fc_mounts:
             m["mountPath"] = fc[f"mount_{stack}"].format(env=env)
             m["subPath"] = fc[f"key_{stack}"].format(env=env)
@@ -775,7 +843,19 @@ def adapt_sample_deployment(
                 pod.pop(key)
         if not c0["volumeMounts"]:
             c0.pop("volumeMounts")
-    if stack == "dotnet" and dotnet_args is not None:
+    if stack == "dotnet":
+        # Env runtime mengikuti konvensi sample (mis. develop-ngenwal = production), lalu mode dari source.
+        s_mode, s_env = runtime_env(c0)
+        env_name = s_env or env
+        if env_mode or not s_mode:
+            apply_env_mode(c0, env_mode or "args", app, env_name)
+        # appsettings yang di-mount HARUS sama dgn env runtime (kalau beda, .NET mengabaikannya).
+        for m in fc_mounts:
+            if "appsettings" in str(m.get("subPath", "")) + str(m.get("mountPath", "")):
+                key = f"appsettings.{env_name}.json"
+                m["mountPath"] = f"{posixpath.dirname(m.get('mountPath') or '/app/x')}/{key}"
+                m["subPath"] = key
+    if stack == "dotnet" and dotnet_args is not None and env_mode is None:
         if dotnet_args:
             c0["args"] = ["dotnet", f"{app}.dll", f"--environment={env}"]
         else:
@@ -897,6 +977,15 @@ def check(
         add("missing_image_pullsecret", f"imagePullSecrets tanpa {pull} (image {', '.join(images)})")
         fix_deploy = True
 
+    if stack == "dotnet" and rules.get("appsettings_env_mismatch"):
+        mode, run_env = runtime_env(_containers(deploy)[0])
+        for m in _containers(deploy)[0].get("volumeMounts") or []:
+            hit = re.search(r"appsettings\.([^/]+)\.json$", str(m.get("subPath") or m.get("mountPath") or ""))
+            if hit and run_env and hit.group(1) != run_env:
+                add("appsettings_env_mismatch",
+                    f"environment runtime `{run_env}` ({mode}) tapi yang di-mount {hit.group(0)} — "
+                    f".NET membaca appsettings.{run_env}.json, config Secret diabaikan")
+
     fc = rules.get("missing_file_config_volume")
     refs = referenced_secrets(deploy)
     fc_missing, fc_existing = "", ""
@@ -936,7 +1025,8 @@ def check(
                                   f"namespace lain / `kubectl create secret docker-registry {name}`")
         else:
             add("secret_missing", f"Secret {name} belum ada di namespace {ns}")
-            res.suggestions.append(_secret_suggestion(rules, name=name, app=app, ns=ns, stack=stack, infra=infra))
+            res.suggestions.append(_secret_suggestion(rules, name=name, app=app, ns=ns, stack=stack, infra=infra,
+                                                      env_name=runtime_env(_containers(deploy)[0])[1] or None))
     if fc_missing and not fc_existing:
         res.suggestions.append(_secret_suggestion(rules, name=fc_missing, app=app, ns=ns, stack=stack, infra=infra))
 

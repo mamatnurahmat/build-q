@@ -90,6 +90,9 @@ Rule dengan implementasi pemeriksaan. Severity bisa diubah di PocketBase (lihat 
 | `service_missing` | critical | Deployment membuka `containerPort` tetapi tidak punya Service (`<app>_services.yaml` / `_service.yaml`, atau Service di file yang sama) | Service baru dari sample |
 | `service_namespace_mismatch` | critical | Namespace Service ≠ Deployment (hanya bila kustomization tidak menetapkan `namespace:`) | Service |
 | `service_selector_no_match` | critical | `Service.spec.selector` tidak cocok dengan label pod sehingga endpoints kosong | Service |
+| `appsettings_env_mismatch` | critical | Aplikasi .NET berjalan dgn environment X (args `--environment=X` / env `ASPNETCORE_ENVIRONMENT`) tetapi yang di-mount `appsettings.Y.json` — .NET hanya membaca `appsettings.X.json`, config Secret diabaikan (nyata: 11 aplikasi `sandbox-qoin` = `sandbox` vs `appsettings.production.json`) | — (samakan mount atau env runtime) |
+| `config_mount_path_mismatch` *(--manifest-init)* | critical | File config Secret di-mount di direktori yang tidak dibaca aplikasi. Aplikasi membaca dari tujuan `COPY … .env` / WORKDIR stage final Dockerfile (default `/`); Go `godotenv.Load()` relatif ke direktori kerja. Nyata: `ngenwal-be-saasaccountlinkage-manager` (WORKDIR `/`, mount `/app/.env`) | Deployment (mountPath dikoreksi) |
+| `config_format_mismatch` *(--manifest-init)* | critical | Format file salah untuk bahasanya: .NET me-mount `.env` tanpa paket DotNetEnv/dotenv.net (nyata: `ngenwal-be-saasaltoservice-manager`), atau non-.NET me-mount `appsettings` | — |
 | `service_port_targetport_mismatch` | critical / warn | `targetPort` **bernama** yang tidak ada di `containerPort` → critical (endpoint kosong). `targetPort` **angka** yang tidak dideklarasikan → warn saja, karena tetap jalan bila aplikasi listen di port itu | Service atau Deployment (lihat §7.2) |
 
 Dua rule lain hanya dipakai `params`-nya dan tidak diperiksa sebagai temuan:
@@ -520,9 +523,32 @@ Alur:
 | Ref source | env `develop`/`staging`/`sandbox` → branch yang sama; `production` → tag `v*` tertinggi (semver). Bila branch/tag belum ada (aplikasi baru), dibaca dari branch default repo dengan catatan bahwa tag image berubah setelah pipeline env berjalan |
 | Image | `<DOCKERHUB_ORG>/<IMAGE>:<tag>`; tag = short SHA, atau nama tag untuk production (aturan pipeline) |
 | Path GitOps | Sama dengan saran rollout pipeline (`compute_rollout`): `<infra>/<env>-<PROJECT>/<DEPLOYMENT>_deployment.yaml` dari `cicd.json`; branch GitOps = env (develop/staging/sandbox) atau `main`. Override: `--ns`, `--infra`, `--gitops-branch`, `--gitops-repo` |
-| Port / stack | `PORT` dan `STACK` di `cicd.json`; tanpa `STACK`, `.NET` dideteksi dari `*.csproj`/`*.sln` di root repo, selain itu Go |
+| Port | `PORT` di `cicd.json` (default 80) |
+| Bahasa | Berlapis, dengan bukti di output: (1) `STACK`/`TYPE` `cicd.json` → (2) file penanda root repo: `*.csproj`/`*.sln`/`global.json`/`appsettings*.json` = dotnet, `go.mod` = go, `Cargo.toml` = rust, `package.json` = node, `requirements.txt`/`pyproject.toml` = python → (3) base image Dockerfile (`mcr.microsoft.com/dotnet`, `golang`, `rust`, `node`, `python`, `krakend`) → (4) GitHub Languages API → (5) default go |
+| File config Secret | Ditentukan bahasa: **.NET → `appsettings.<env runtime>.json`**, semua bahasa lain (Go, Rust, Node, Python) → **`.env`**. Key Secret, `subPath`, dan path mount selalu sama dengan env runtime aplikasi |
+| Mode environment .NET | Dibaca dari source (`Program.cs`/`Startup.cs`, dicari juga di subfolder): kode yang membaca env var langsung (`Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT")`, mis. `ngenwal-be-transactionconverter-manager`) → **env** `ASPNETCORE_ENVIRONMENT=<env>` tanpa args; selain itu (generic host `Host.CreateDefaultBuilder(args)`, mis. `ngenwal-be-saasidentityserver4client-manager`) → **args** `dotnet <app>.dll --environment=<env>`. Pola di params rule `dotnet_env_mode` (PB) — bisa ditambah tanpa rilis. Nama env mengikuti konvensi template folder (mis. develop-ngenwal memakai `production`) |
+| Dockerfile | `Dockerfile` / `build.Dockerfile` / `Dockerfile.production`: base image, **WORKDIR stage final** (diwarisi lewat alias stage, mis. `FROM base`; **tanpa WORKDIR = `/`**; `$VAR` = tidak diketahui) dan tujuan **`COPY … .env`** di stage final. Direktori mount config = tujuan COPY → WORKDIR. Contoh: `plus-be-appmerchant-manager` (alpine tanpa WORKDIR, `COPY .env.${BRANCH} .env`) → **`/.env`**; `ngenwal-be-saasaltoservice-manager` (WORKDIR `/app`) → **`/app/…`**. Pola ini cocok untuk ±94% dari 199 Deployment ber-Secret config di 4 namespace; sisanya manifest yang salah mount. mode env .NET lihat baris di atas |
 | Manifest **sudah ada** | Pemeriksaan tahap Manifest (§3–§7) + saran perbaikan. Exit 1 bila ada temuan critical |
 | Manifest **belum ada** | Deployment + Service dari **template standar PB** (§15), lalu sample tetangga `main:cce/<namespace>` (§7.1), lalu generator standar. Kerangka Secret hanya untuk Secret yang belum ada di cluster. Daftar file untuk `resources:` kustomization, atau `kustomization.yaml` baru bila folder belum ada |
+
+**Ajukan sebagai PR ke repo GitOps** — `--pr` (pratinjau dulu dengan `--pr --dry-run`):
+
+```bash
+bq --manifest-init pay-be-topup-manager develop-qoin --pr --dry-run   # lihat rencana PR
+bq --manifest-init pay-be-topup-manager develop-qoin --pr             # buat branch + PR
+```
+
+| Aturan | Perilaku |
+|---|---|
+| Branch | baru `manifest/<app>-<folder>-<waktu>` dari branch GitOps env; satu commit (GitHub Git Data API, tanpa clone); PR ke branch env (develop/staging/sandbox atau `main`) — tidak pernah push langsung |
+| Deployment / Service | saran `--manifest-init` (baru, atau perbaikan file yang ada); hanya file yang berubah |
+| `kustomization.yaml` | folder sudah ada → **hanya menambah baris `resources`** (indentasi mengikuti item terakhir; komentar, `patches`, dan key lain tidak disentuh). Hasil diparse ulang: bila selain `resources` berubah (mis. `resources: [a, b]` inline), PR **dibatalkan** dengan pesan untuk menambah manual. Folder baru → `kustomization.yaml` baru |
+| Secret | **tidak pernah di-commit** — saran Secret dibuang dari PR (dicatat di deskripsi PR) dan file `kind: Secret` / bernama `*secret*` ditolak. Buat Secret dari file config & apply terpisah (simpan terenkripsi SOPS bila perlu) |
+| Tidak ada perubahan | manifest sudah sesuai → tidak ada PR (exit 1 dengan pesan) |
+
+Contoh nyata (dry-run): `pay-be-topup-manager develop-qoin` → Deployment + Service baru +
+`kustomization.yaml` (2 baris resources ditambahkan, baris lain identik); kerangka Secret
+`file-config-pay-be-topup-manager` tidak ikut.
 
 Catatan yang mungkin muncul:
 

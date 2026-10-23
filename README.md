@@ -955,6 +955,8 @@ sample tetangga `main:cce/<namespace>`). Bila manifest sudah ada, yang ditampilk
 
 ```bash
 bq --manifest-init pay-be-topup-manager sandbox-payout --out-dir ./gitops-draft   # <repo> <namespace>
+bq --manifest-init pay-be-topup-manager develop-qoin --pr --dry-run   # rencana PR ke GitOps (tanpa Secret)
+bq --manifest-init pay-be-topup-manager develop-qoin --pr             # branch + PR; kustomization hanya +resources
 bq --manifest-template all && bq --tui-sync ~/.build-q/manifest-templates-seed.json  # template standar → PB
 bq --manifest-verify production-qoin          # skenario uji: generate vs core existing (exit 1 bila beda)
 ```
@@ -1143,7 +1145,8 @@ Subcommands (mutually exclusive):
   --manifest-init <repo> <namespace>
                             Saran YAML Deployment + Service (+ Secret, kustomization) satu aplikasi
                             sesuai konsep GitOps saat ini (template PB → sample → generator).
-                            Opsi: --out-dir DIR, --export-md PATH, --infra, --gitops-branch, --gitops-repo.
+                            Opsi: --out-dir DIR, --export-md PATH, --pr [--dry-run], --infra,
+                            --gitops-branch, --gitops-repo.
   --manifest-template <ns,...|all>
                             Bangun template standar dari GitOps main → seed lokal (lalu --tui-sync).
   --manifest-verify <namespace>
