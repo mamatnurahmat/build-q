@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -159,22 +160,26 @@ def save_auth(base_url: str, token: str, record: dict, *, method: str,
         "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "record": {k: record.get(k) for k in ("id", "email", "full_name", "role", "verified")},
     }
-    tmp = AUTH_FILE.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, AUTH_FILE)
+    write_auth(data)
     return data
 
 
 def write_auth(data: dict) -> None:
-    """Tulis ulang auth.json (perm 600, atomik)."""
+    """Tulis ulang auth.json (perm 600, atomik).
+
+    File sementara unik per penulisan (mkstemp, perm 600) — nama tetap
+    `auth.tmp` membuat proses bq paralel saling menimpa lalu `os.replace`
+    salah satunya gagal FileNotFoundError.
+    """
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = AUTH_FILE.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, AUTH_FILE)
+    fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".auth.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, AUTH_FILE)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def clear_auth() -> bool:

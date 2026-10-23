@@ -44,6 +44,38 @@ def test_save_auth_perm_600_and_strips_record():
     assert "tokenKey" not in data["record"] and data["record"]["email"] == "dev@qoin.id"
 
 
+def test_write_auth_concurrent_writers_no_race():
+    """bq paralel me-refresh token bersamaan — dulu `auth.tmp` bersama → FileNotFoundError."""
+    import threading
+    barrier, errors = threading.Barrier(8), []
+
+    def writer(i):
+        barrier.wait()
+        try:
+            for n in range(25):
+                pb_api.write_auth({"token": f"t{i}-{n}", "exp": n})
+        except Exception as e:  # noqa: BLE001 — kumpulkan untuk assert
+            errors.append(e)
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == []
+    assert pb_api.read_auth()["token"].startswith("t")
+    assert stat.S_IMODE(pb_api.AUTH_FILE.stat().st_mode) == 0o600
+    assert list(pb_api.CONFIG_DIR.glob("*.tmp")) == []
+
+
+def test_write_auth_failure_keeps_old_file_and_cleans_tmp():
+    pb_api.write_auth({"token": "lama"})
+    with pytest.raises(TypeError):
+        pb_api.write_auth({"token": object()})
+    assert pb_api.read_auth()["token"] == "lama"
+    assert list(pb_api.CONFIG_DIR.glob("*.tmp")) == []
+
+
 def test_get_token_prefers_user_token(monkeypatch):
     monkeypatch.setenv("PB_API_USER", "admin")
     monkeypatch.setenv("PB_API_PASS", "x")
