@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Dict, Any, Optional
 
+from . import pb_api
+
 
 # Default config remains ~/.build-q, but deployments can select a separate
 # local env file (for example ~/build-q/.env) without changing credentials.
@@ -110,12 +112,13 @@ def build_config(getenv) -> Dict[str, Any]:
             "k8s_context": getenv("ARGOCD_KUBE_CONTEXT", "hw-pro-p"),
             "k8s_namespace": getenv("ARGOCD_NAMESPACE", "argocd"),
             # Fallback bila cluster tak terjangkau kubectl: REST API ArgoCD
-            # (sama dgn MCP argocd / skill argocd-app). Token SSO dari env
-            # ARGOCD_TOKEN, atau key ARGOCD_TOKEN di ARGOCD_AUTH_FILE.
+            # Token SSO: env/secret PB `ARGOCD_TOKEN` didahulukan, lalu key
+            # ARGOCD_TOKEN di ~/.build-q/auth.json (hasil `bq --argocd-auth-sso`).
+            # Lokasi file dikunci — tidak ada penyimpanan lain (mis. ~/.pi).
             "api_url": getenv("ARGOCD_API_URL", "https://cicd-hw.qoin.id/argocd"),
             "token": getenv("ARGOCD_TOKEN", ""),
-            "auth_file": getenv("ARGOCD_AUTH_FILE", "~/.pi/agent/auth.json"),
-            # Token kedaluwarsa → jalankan `argocd-app token-login` (TTY saja).
+            "auth_file": str(pb_api.AUTH_FILE),
+            # Token kedaluwarsa → jalankan `bq --argocd-auth-sso` (TTY saja).
             "auto_login": _parse_bool(getenv("ARGOCD_AUTO_LOGIN", "true"), default=True),
         },
         "gitops": {
@@ -233,12 +236,11 @@ JX_TOKEN_SECRET=webhook-trigger-token
 ARGOCD_KUBE_CONTEXT=hw-pro-p
 ARGOCD_NAMESPACE=argocd
 # Fallback bila kubectl ke cluster ArgoCD gagal/timeout: REST API ArgoCD.
-# ARGOCD_TOKEN kosong → dibaca dari ARGOCD_AUTH_FILE (key ARGOCD_TOKEN,
-# diperbarui via `argocd-app token-login`).
+# ARGOCD_TOKEN kosong → dibaca dari ~/.build-q/auth.json (key ARGOCD_TOKEN,
+# diperbarui via `bq --argocd-auth-sso`).
 ARGOCD_API_URL=https://cicd-hw.qoin.id/argocd
 ARGOCD_TOKEN=
-ARGOCD_AUTH_FILE=~/.pi/agent/auth.json
-# Token kedaluwarsa (401) → otomatis `argocd-app token-login` (terminal interaktif saja)
+# Token kedaluwarsa (401) → otomatis `bq --argocd-auth-sso` (terminal interaktif saja)
 ARGOCD_AUTO_LOGIN=true
 # WEBHOOK_TRIGGER_TOKEN: auto-fetched dari k8s pada `bq --pr-fix` preflight
 # (sekali saja; disimpan di sini untuk run selanjutnya).

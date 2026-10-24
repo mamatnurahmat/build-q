@@ -132,6 +132,11 @@ def main() -> None:
     if requires_login(sys.argv[1:]):
         require_login()
 
+    # `bq argocd <args>` → official argocd CLI dengan token SSO (inline).
+    if sys.argv[1:2] == ["argocd"]:
+        from . import argocd_auth
+        sys.exit(argocd_auth.cli_main(sys.argv[2:], load_config()))
+
     parser = argparse.ArgumentParser(
         prog="build-q (bq)",
         description="Simple Docker Buildx CLI — local builds only",
@@ -162,6 +167,12 @@ Examples:
 
   # Show active configuration
   bq --config
+
+  # Login SSO ArgoCD (browser) → ARGOCD_TOKEN di secret PB + ~/.build-q/auth.json
+  bq --argocd-auth-sso
+
+  # Official argocd CLI secara inline dengan token SSO
+  bq argocd app list
 
   # Preflight — cek tools & credentials
   bq --doctor
@@ -328,6 +339,14 @@ Config file: ~/.build-q/.env
              "(GITHUB_TOKEN, docker login, buildx builder, kubectl context). "
              "Tambahkan --cloud untuk cek kesiapan Docker Build Cloud + saran setup. "
              "Exit 0 bila blocker-free.",
+    )
+    parser.add_argument(
+        "--argocd-auth-sso",
+        action="store_true",
+        help="Login SSO ArgoCD via browser (GitHub org) → verifikasi userinfo → "
+             "simpan ARGOCD_TOKEN ke secret PB (sentral) dan ~/.build-q/auth.json "
+             "(perm 600). Config argocd sementara, tidak menyentuh ~/.config/argocd. "
+             "Butuh argocd CLI (brew install argocd).",
     )
     parser.add_argument(
         "--pb-login",
@@ -1019,6 +1038,21 @@ Config file: ~/.build-q/.env
         if args.doctor:
             from .doctor import run_doctor
             sys.exit(run_doctor(cloud=args.cloud))
+
+        if args.argocd_auth_sso:
+            from . import argocd_auth
+            try:
+                info, saved = argocd_auth.sso_login(load_config())
+            except argocd_auth.ArgocdAuthError as e:
+                print(f"❌ {e}", file=sys.stderr)
+                sys.exit(1)
+            groups = ", ".join(info.get("groups") or []) or "-"
+            print(f"   user   : {info.get('username') or '-'}")
+            print(f"   groups : {groups}")
+            print(f"   PB secret ARGOCD_TOKEN : {saved['pb']}")
+            print(f"   lokal                  : {saved['local']} (perm 600)")
+            print("✅ Login SSO ArgoCD berhasil & token terverifikasi")
+            return
 
         if args.pb_login or args.pb_status or args.pb_pull or args.pb_logout:
             from . import pb_api

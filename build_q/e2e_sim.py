@@ -538,7 +538,7 @@ SCENARIOS: Dict[str, Scenario] = {s.name: s for s in [
              must_mention=("secret_missing", f"file-config-{SIM_REPO}_secret.yaml", "kind: Secret"),
              must_not_mention=("--gitops-set-image",)),
     Scenario("cluster-unreachable", "Cluster CI/ArgoCD tidak terjangkau (VPN/timeout)",
-             _cluster_unreachable, None, {"pipeline": "skip", "argocd": "skip"}, "incomplete", must_mention=("Analisa tidak lengkap", "argocd-app token-login"), must_not_mention=("sehat",)),
+             _cluster_unreachable, None, {"pipeline": "skip", "argocd": "skip"}, "incomplete", must_mention=("Analisa tidak lengkap", "bq --argocd-auth-sso"), must_not_mention=("sehat",)),
     Scenario("cluster-unreachable-argocd-api", "kubectl timeout, ArgoCD dibaca via REST API",
              _cluster_unreachable_argocd_api, None, {"pipeline": "skip", "argocd": "ok"}, "incomplete",
              must_mention=("via ArgoCD API", "sudah live"), must_not_mention=("Belum bisa dipastikan",)),

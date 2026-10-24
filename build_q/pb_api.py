@@ -65,7 +65,7 @@ def is_enabled() -> bool:
     """PB_API=true, atau PB_API tidak diset tapi sudah `bq auth login`."""
     raw = os.getenv("PB_API")
     if raw is None or not raw.strip():
-        return AUTH_FILE.exists()
+        return read_auth() is not None  # sesi PB, bukan sekadar file ada
     return _parse_bool(raw)
 
 
@@ -135,36 +135,21 @@ def jwt_exp(token: str) -> int:
         return 0
 
 
-def read_auth() -> Optional[dict]:
+#: Key sesi PB di auth.json. Key lain (mis. ARGOCD_TOKEN) bersifat lokal dan
+#: dipertahankan saat login/logout PB.
+_PB_SESSION_KEYS = {"pb_url", "collection", "method", "token", "exp",
+                    "expires_at", "saved_at", "record", "verified_at"}
+
+
+def read_store() -> dict:
+    """Seluruh isi ~/.build-q/auth.json (sesi PB + key lokal). {} bila tidak ada / rusak."""
     if not AUTH_FILE.exists():
-        return None
+        return {}
     try:
         data = json.loads(AUTH_FILE.read_text() or "{}")
     except (OSError, json.JSONDecodeError):
-        return None
-    return data if data.get("token") else None
-
-
-def save_auth(base_url: str, token: str, record: dict, *, method: str,
-              collection: str = AUTH_COLLECTION) -> dict:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    exp = jwt_exp(token)
-    data = {
-        "pb_url": base_url.rstrip("/"),
-        "collection": collection,
-        "method": method,
-        "token": token,
-        "exp": exp,
-        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)) if exp else "",
-        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "record": {k: record.get(k) for k in ("id", "email", "full_name", "role", "verified")},
-    }
-    tmp = AUTH_FILE.with_suffix(".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, AUTH_FILE)
-    return data
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def write_auth(data: dict) -> None:
@@ -177,11 +162,50 @@ def write_auth(data: dict) -> None:
     os.replace(tmp, AUTH_FILE)
 
 
+def update_store(updates: dict) -> None:
+    """Gabungkan key lokal ke auth.json tanpa menyentuh sesi PB."""
+    data = read_store()
+    data.update(updates)
+    write_auth(data)
+
+
+def _local_extras() -> dict:
+    return {k: v for k, v in read_store().items() if k not in _PB_SESSION_KEYS}
+
+
+def read_auth() -> Optional[dict]:
+    data = read_store()
+    return data if data.get("token") else None
+
+
+def save_auth(base_url: str, token: str, record: dict, *, method: str,
+              collection: str = AUTH_COLLECTION) -> dict:
+    exp = jwt_exp(token)
+    session = {
+        "pb_url": base_url.rstrip("/"),
+        "collection": collection,
+        "method": method,
+        "token": token,
+        "exp": exp,
+        "expires_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp)) if exp else "",
+        "saved_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "record": {k: record.get(k) for k in ("id", "email", "full_name", "role", "verified")},
+    }
+    data = {**_local_extras(), **session}
+    write_auth(data)
+    return data
+
+
 def clear_auth() -> bool:
-    if AUTH_FILE.exists():
+    """Logout: hapus sesi PB. File dihapus bila tidak ada key lokal yang tersisa."""
+    if not AUTH_FILE.exists():
+        return False
+    extras = _local_extras()
+    if extras:
+        write_auth(extras)
+    else:
         AUTH_FILE.unlink()
-        return True
-    return False
+    return True
 
 
 def refresh_auth(auth: dict) -> dict:
