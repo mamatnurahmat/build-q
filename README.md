@@ -224,8 +224,8 @@ bq --config       # tampilkan konfigurasi aktif
 | `PB_API_PASS` | (kosong) | Password superuser PocketBase — **legacy** |
 | `PB_API` | `false` | Set `true` untuk fetch secrets / cicd dari PocketBase. Tidak diset + sudah `bq auth login` → aktif otomatis |
 | `ARGOCD_API_URL` | `https://cicd-hw.qoin.id/argocd` | REST API ArgoCD — fallback `--e2e` saat kubectl gagal |
-| `ARGOCD_TOKEN` | (kosong) | Token SSO ArgoCD; kosong → dibaca dari `ARGOCD_AUTH_FILE` (`~/.pi/agent/auth.json`) |
-| `ARGOCD_AUTO_LOGIN` | `true` | Token ArgoCD 401 → jalankan `argocd-app token-login` otomatis (terminal interaktif saja) |
+| `ARGOCD_TOKEN` | (kosong) | Token SSO ArgoCD; kosong → dibaca dari `~/.build-q/auth.json` (key `ARGOCD_TOKEN`, hasil `bq --argocd-auth-sso`) |
+| `ARGOCD_AUTO_LOGIN` | `true` | Token ArgoCD 401 → jalankan `bq --argocd-auth-sso` otomatis (terminal interaktif saja) |
 
 #### Toggle native (tanpa `gh` CLI)
 
@@ -1004,7 +1004,19 @@ Config baru di `~/.build-q/.env` (opsional): `ARGOCD_KUBE_CONTEXT=hw-pro-p`, `AR
 
 **Cluster tak terjangkau (sejak v0.1.48):** bila kubectl ke `ARGOCD_KUBE_CONTEXT` timeout, tahap
 ArgoCD dibaca via REST API (`ARGOCD_API_URL`, token SSO yang sama dengan MCP `argocd` /
-`argocd-app`). Token kedaluwarsa → `argocd-app token-login` dijalankan otomatis di terminal.
+`argocd-app`). Token kedaluwarsa → `bq --argocd-auth-sso` dijalankan otomatis di terminal.
+
+**Penyimpanan terpusat (PocketBase):** token SSO ArgoCD disimpan sebagai secret PB `ARGOCD_TOKEN`
+(scope `argocd`, `expires_at`/`rotated_at` terisi) dan salinan lokal di `~/.build-q/auth.json` (perm 600).
+Prioritas: env / secret PB yang di-hydrate → `~/.build-q/auth.json`; token yang kedaluwarsa dilewati.
+Setiap `bq --argocd-auth-sso` (termasuk auto-login saat 401) memperbarui kedua tempat itu.
+
+- `bq --argocd-auth-sso` — login SSO memakai official `argocd login` dengan `--config` sementara,
+  sehingga tidak menulis ke `~/.config/argocd`.
+- `bq argocd <args>` — menjalankan official `argocd` dengan `--server`/`--grpc-web` dan token via env
+  `ARGOCD_AUTH_TOKEN` (tidak muncul di argv). Contoh: `bq argocd app list`.
+
+Login/logout PB tidak menghapus `ARGOCD_TOKEN` lokal. Tidak ada salinan di `~/.pi/agent/`.
 
 ---
 

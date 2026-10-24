@@ -39,7 +39,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from . import github_api
+from . import argocd_auth, github_api
 from .audit import redact
 
 OK, WARN, FAIL, SKIP, RUNNING = "ok", "warn", "fail", "skip", "running"
@@ -190,17 +190,8 @@ class ArgocdApiError(RuntimeError):
 
 
 def _argocd_token(config: dict) -> str:
-    acfg = config.get("argocd") or {}
-    if acfg.get("token"):
-        return acfg["token"]
-    auth_file = os.path.expanduser(acfg.get("auth_file") or "")
-    if not auth_file or not os.path.isfile(auth_file):
-        return ""
-    try:
-        with open(auth_file, encoding="utf-8") as f:
-            return str(json.load(f).get("ARGOCD_TOKEN") or "")
-    except (OSError, ValueError):
-        return ""
+    # PB secret / env dulu, lalu ~/.build-q/auth.json; yang kedaluwarsa dilewati.
+    return argocd_auth.resolve_token(config)
 
 
 def argocd_api_apps(config: dict) -> List[dict]:
@@ -228,21 +219,18 @@ def argocd_api_apps(config: dict) -> List[dict]:
 
 
 def argocd_token_login(config: dict) -> bool:
-    """Jalankan `argocd-app token-login` (SSO via browser) — hanya di terminal
-    interaktif & ARGOCD_AUTO_LOGIN aktif. Return True bila login sukses."""
-    import shutil
+    """Login SSO ArgoCD (`bq --argocd-auth-sso`) — hanya di terminal interaktif
+    & ARGOCD_AUTO_LOGIN aktif. Return True bila login sukses."""
     import sys
 
     if not (config.get("argocd") or {}).get("auto_login", True) or not sys.stdin.isatty():
         return False
-    exe = shutil.which("argocd-app")
-    if not exe:
-        return False
-    print("🔐 Token ArgoCD kedaluwarsa — menjalankan `argocd-app token-login` ...", file=sys.stderr)
+    print("🔐 Token ArgoCD kedaluwarsa — menjalankan `bq --argocd-auth-sso` ...", file=sys.stderr)
     try:
-        # Output diteruskan ke terminal: user perlu melihat URL login SSO.
-        return subprocess.run([exe, "token-login"], timeout=300).returncode == 0
-    except (OSError, subprocess.TimeoutExpired):
+        argocd_auth.sso_login(config)
+        return True
+    except argocd_auth.ArgocdAuthError as e:
+        print(f"❌ {e}", file=sys.stderr)
         return False
 
 
@@ -912,13 +900,13 @@ def _stage_argocd(rep: E2EReport, config: dict, gitops: Stage) -> Stage:
                     raise
                 # Token baru ditulis ke auth file; env ARGOCD_TOKEN lama diabaikan.
                 apps = argocd_api_apps({**config, "argocd": {**config["argocd"], "token": ""}})
-                st.details.append("token ArgoCD diperbarui via `argocd-app token-login`")
+                st.details.append("token ArgoCD diperbarui via `bq --argocd-auth-sso`")
         except ArgocdApiError as api_err:
             st.summary = f"tidak bisa baca Application ArgoCD ({ctx}/{ns} maupun API)"
             st.details.append(f"kubectl: {e}")
             st.details.append(f"ArgoCD API {api_url}: {api_err}")
             if api_err.auth:
-                st.hints.append("Perbarui token SSO ArgoCD: `argocd-app token-login` "
+                st.hints.append("Perbarui token SSO ArgoCD: `bq --argocd-auth-sso` "
                                 "(atau set ARGOCD_TOKEN), lalu ulangi.")
             return st
         st.data["via"] = "api"
