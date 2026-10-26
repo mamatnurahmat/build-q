@@ -38,7 +38,8 @@ from pathlib import Path
 from typing import Dict, Optional
 
 
-CONFIG_DIR = Path.home() / ".build-q"
+# BUILD_Q_CONFIG_DIR: pisahkan folder konfigurasi (tes lokal, pb-dev). Sama dengan config.py.
+CONFIG_DIR = Path(os.getenv("BUILD_Q_CONFIG_DIR") or (Path.home() / ".build-q")).expanduser()
 CACHE_FILE = CONFIG_DIR / ".pb-cache.json"
 AUTH_FILE = CONFIG_DIR / "auth.json"
 AUTH_COLLECTION = "devops_users"
