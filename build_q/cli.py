@@ -132,6 +132,11 @@ def main() -> None:
     if requires_login(sys.argv[1:]):
         require_login()
 
+    # `bq bin ...` (PRD-bin fase 1): sinkron ~/.build-q/bin dengan collection bq_bin.
+    if sys.argv[1:2] == ["bin"]:
+        from .bin import cli_main as bin_main
+        sys.exit(bin_main(sys.argv[2:]))
+
     # `bq argocd <args>` → official argocd CLI dengan token SSO (inline).
     if sys.argv[1:2] == ["argocd"]:
         from . import argocd_auth
