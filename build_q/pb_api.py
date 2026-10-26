@@ -112,8 +112,19 @@ def _http_json(
     return json.loads(payload.decode("utf-8"))
 
 
+def require_secure_url(url: str) -> str:
+    """Tolak URL PocketBase non-https, kecuali loopback (127.0.0.1 / localhost) untuk tes lokal."""
+    parts = urllib.parse.urlparse(url)
+    if parts.scheme == "https" and parts.hostname:
+        return url
+    if parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost"):
+        return url
+    raise PBAPIError("URL PocketBase harus https (http hanya untuk 127.0.0.1 atau localhost)")
+
+
 def authenticate(base_url: str, user: str, password: str) -> str:
     """Return a JWT token for the `_superusers` collection."""
+    require_secure_url(base_url)
     url = f"{base_url}/api/collections/_superusers/auth-with-password"
     resp = _http_json("POST", url, body={"identity": user, "password": password})
     token = resp.get("token")

@@ -136,3 +136,100 @@ def test_pb_unreachable_exit_code(bin_dir, monkeypatch, capsys):
     monkeypatch.setattr(bqbin, "_list_records", boom)
     import argparse
     assert bqbin.cmd_check(argparse.Namespace(json=False)) == bqbin.EXIT_PB
+
+
+def test_valid_name_rejects_trailing_newline():
+    assert not bqbin._valid_name("tool\n")
+
+
+def test_system_names_reserved(tmp_path, monkeypatch):
+    assert bqbin._is_system_name("git")
+    assert bqbin._is_system_name("bq")
+    assert not bqbin._is_system_name("gh-clone")
+    sysdir = tmp_path / "sys"
+    sysdir.mkdir()
+    (sysdir / "mytool").write_text("x")
+    monkeypatch.setattr(bqbin, "SYSTEM_DIRS", (str(sysdir),))
+    assert bqbin._is_system_name("mytool")
+
+
+def test_push_refuses_system_name(tmp_path, monkeypatch):
+    f = tmp_path / "git"
+    f.write_bytes(b"#!/bin/bash\necho hi\n")
+    monkeypatch.setattr(bqbin.getpass, "getpass", lambda *a: (_ for _ in ()).throw(AssertionError("prompt")))
+    import argparse
+    args = argparse.Namespace(file=str(f), mode=None, kind=None, version=None, notes=None, email=None, yes=True)
+    assert bqbin.cmd_push(args) == 1
+
+
+def test_pull_refuses_system_name_without_download(bin_dir, monkeypatch):
+    rec = {"name": "curl", "sha256": _sha(b"x"), "mode": "0755", "file": "f", "id": "r", "collectionId": "c"}
+    monkeypatch.setattr(bqbin, "_list_records", lambda token: [rec])
+    monkeypatch.setattr(bqbin, "_token", lambda: "tok")
+    def no_download(record, token):
+        raise AssertionError("tidak boleh mengunduh")
+    monkeypatch.setattr(bqbin, "_download", no_download)
+    import argparse
+    assert bqbin.cmd_pull(argparse.Namespace(all=False, names=["curl"], yes=True)) == 1
+    assert not (bin_dir / "curl").exists()
+
+
+def test_check_flags_system_name(bin_dir, monkeypatch):
+    (bin_dir / "ssh").write_bytes(b"lokal\n")
+    monkeypatch.setattr(bqbin, "_list_records", lambda token: [])
+    rows = {r["name"]: r for r in bqbin._compare("tok")}
+    assert rows["ssh"]["sistem"] is True
+
+
+def test_require_secure_url():
+    from build_q import pb_api
+    assert pb_api.require_secure_url("https://cicd-hw.qoin.id/devops")
+    assert pb_api.require_secure_url("http://127.0.0.1:8193")
+    assert pb_api.require_secure_url("http://localhost:8193")
+    for bad in ("http://cicd-hw.qoin.id/devops", "http://10.0.0.5:8090", "ftp://127.0.0.1/x"):
+        with pytest.raises(PBAPIError):
+            pb_api.require_secure_url(bad)
+
+
+def test_bak_symlink_refused(bin_dir, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (bin_dir / "tool").write_bytes(b"lama\n")
+    (bin_dir / ".bak").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(OSError):
+        bqbin._write_atomic("tool", b"baru\n", 0o755)
+    assert (bin_dir / "tool").read_bytes() == b"lama\n"
+    assert list(outside.iterdir()) == []
+
+
+def test_scan_new_patterns_flagged():
+    samples = {
+        "glpat-": "TOKEN_X=glpat-" + "A" * 20 + "\n",
+        "sk_live_": "STRIPE=sk_live_" + "A" * 16 + "\n",
+        "AIza": "KEY=AIza" + "A" * 35 + "\n",
+        "dckr_pat_": "DOCKER=dckr_pat_" + "A" * 20 + "\n",
+        "URL": "curl https://user:pass1234@host.example/x\n",
+        "basic auth": "curl -u alice:secretpw http://h\n",
+        "Authorization": "H='Authorization: Basic abcdEFGH1234'\n",
+        "--password": "login --password=hunter22\n",
+    }
+    for key, text in samples.items():
+        assert bqbin._scan_secrets(text), key
+
+
+def test_scan_allows_non_secret_shell_forms():
+    text = ('docker login --password-stdin\ncurl -u "$USER:$PASS" https://h\nmake --token $X\n'
+            'URL="https://x-access-token:${TOKEN}@github.com/o/r.git"\n')
+    assert bqbin._scan_secrets(text) == []
+
+
+def test_download_sends_file_token(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(bqbin.pb_api, "_http_json", lambda *a, **k: {"token": "ft123"})
+    def fake_raw(method, url, token, body=None, content_type=None):
+        seen["url"] = url
+        return b"isi"
+    monkeypatch.setattr(bqbin, "_raw", fake_raw)
+    rec = {"file": "tool_x.sh", "id": "r1", "collectionId": "c1"}
+    assert bqbin._download(rec, "tok") == b"isi"
+    assert seen["url"].endswith("/api/files/c1/r1/tool_x.sh?token=ft123")

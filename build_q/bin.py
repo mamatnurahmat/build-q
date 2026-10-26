@@ -37,10 +37,18 @@ from .pb_api import PBAPIError
 
 COLLECTION = "bq_bin"
 MAX_SIZE = 512 * 1024
-NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+NAME_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 MODES = ("0644", "0755")
 KINDS = ("bash", "python", "binary")
 EXIT_OK, EXIT_DIFF, EXIT_PB, EXIT_HASH = 0, 1, 2, 122
+
+# Nama yang menimpa perintah sistem ditolak (push, pull). Daftar tetap + isi folder sistem.
+SYSTEM_NAMES = frozenset(
+    "git ssh scp sftp curl wget sudo su doas sh bash zsh dash ksh fish python python3 pip pip3 pipx "
+    "gh kubectl docker helm terraform make env rm cp mv ls cat sed awk grep find tar open node npm npx "
+    "go jq xargs nc chmod chown dd kill ps bq security launchctl osascript".split()
+)
+SYSTEM_DIRS = ("/bin", "/usr/bin", "/usr/sbin", "/sbin")
 
 BIN_DIR = pb_api.CONFIG_DIR / "bin"
 BAK_DIR = BIN_DIR / ".bak"
@@ -53,6 +61,18 @@ SECRET_PATTERNS = [
     ("kunci akses AWS", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("kunci privat", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("token GitLab", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
+    ("kunci Stripe", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}")),
+    ("kunci Google (AIza)", re.compile(r"\bAIza[0-9A-Za-z_-]{35}")),
+    ("token Docker Hub", re.compile(r"\bdckr_pat_[A-Za-z0-9_-]{20,}")),
+    ("kredensial di URL", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@'\"]+:(?!\$)[^\s/@'\"]+@", re.I)),
+    ("basic auth", re.compile(
+        r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}"
+        r"|(?:^|\s)(?:-u|--user)[\s=]+['\"]?[^\s:'\"$]+:[^\s'\"]{4,}",
+        re.I | re.M,
+    )),
+    ("password di argumen", re.compile(
+        r"--(?:password|passwd|pass|token|secret|api-?key)(?:=|\s+)['\"]?[^\s'\"$]{6,}", re.I)),
     ("penugasan rahasia", re.compile(
         r"^\s*(?:export\s+)?[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|APIKEY|API_KEY|KEY)[A-Za-z0-9_]*"
         r"\s*=\s*['\"]?[^\s'\"$]{8,}",
@@ -72,7 +92,21 @@ def _sha256(data: bytes) -> str:
 
 
 def _valid_name(name: str) -> bool:
-    return bool(NAME_RE.match(name))
+    return bool(NAME_RE.fullmatch(name))
+
+
+def _system_names() -> frozenset[str]:
+    names = set(SYSTEM_NAMES)
+    for d in SYSTEM_DIRS:
+        try:
+            names.update(os.listdir(d))
+        except OSError:
+            pass
+    return frozenset(names)
+
+
+def _is_system_name(name: str) -> bool:
+    return name in _system_names()
 
 
 def _raw(method: str, url: str, token: str, body: Optional[bytes] = None,
@@ -118,9 +152,19 @@ def _find_record(token: str, name: str) -> Optional[dict]:
     return items[0] if items else None
 
 
+def _file_token(token: str) -> str:
+    """Token berkas sementara; field file bersifat protected, jadi unduhan wajib membawanya."""
+    resp = pb_api._http_json("POST", f"{_base()}/api/files/token", body={},
+                             headers={"Authorization": f"Bearer {token}"})
+    if not resp.get("token"):
+        raise PBAPIError("token berkas tidak ada")
+    return resp["token"]
+
+
 def _download(record: dict, token: str) -> bytes:
     fname = urllib.parse.quote(record["file"])
-    url = f"{_base()}/api/files/{record['collectionId']}/{record['id']}/{fname}"
+    ftoken = urllib.parse.quote(_file_token(token), safe="")
+    url = f"{_base()}/api/files/{record['collectionId']}/{record['id']}/{fname}?token={ftoken}"
     return _raw("GET", url, token)
 
 
@@ -168,6 +212,7 @@ def _multipart(fields: dict[str, str], filename: str, data: bytes) -> tuple[byte
 
 
 def _superuser_token(email: str, password: str) -> str:
+    pb_api.require_secure_url(_base())
     resp = pb_api._http_json("POST", f"{_base()}/api/collections/_superusers/auth-with-password",
                              body={"identity": email, "password": password})
     if not resp.get("token"):
@@ -228,7 +273,8 @@ def _compare(token: str) -> list[dict]:
             saran = f"bq bin push {lp}"
         else:
             saran = "-"
-        rows.append({"name": name, "status": status, "sha_lokal": lsha, "sha_pb": rsha, "saran": saran})
+        rows.append({"name": name, "status": status, "sha_lokal": lsha, "sha_pb": rsha, "saran": saran,
+                     "sistem": _is_system_name(name)})
     return rows
 
 
@@ -238,6 +284,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     except PBAPIError as e:
         _err(f"PocketBase tidak terjangkau atau login gagal: {e}")
         return EXIT_PB
+    for r in rows:
+        if r["sistem"]:
+            _err(f"peringatan: '{r['name']}' sama dengan perintah sistem; jangan dijalankan tanpa periksa")
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=2))
     else:
@@ -273,6 +322,9 @@ def _show_diff(name: str, local: Optional[Path], data: bytes) -> None:
 
 
 def _write_atomic(name: str, data: bytes, mode: int) -> None:
+    for d in (BAK_DIR, TMP_DIR):
+        if d.is_symlink():
+            raise OSError(f"{d.name} tidak boleh berupa symlink")
     TMP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
     tmp = TMP_DIR / f"{name}.{uuid.uuid4().hex}"
     try:
@@ -312,6 +364,9 @@ def cmd_pull(args: argparse.Namespace) -> int:
         if not _valid_name(name):
             _err(f"nama '{name}' di PocketBase tidak valid; ditolak")
             return EXIT_HASH
+        if _is_system_name(name):
+            _err(f"nama '{name}' sama dengan perintah sistem; ditolak")
+            return 1
         lp = local.get(name)
         if lp is not None and _sha256(lp.read_bytes()) == remote[name].get("sha256"):
             continue  # sudah MATCH
@@ -344,7 +399,11 @@ def cmd_pull(args: argparse.Namespace) -> int:
                 print(f"  dilewati: {name}")
                 continue
         mode = int(remote[name].get("mode") or "0755", 8)
-        _write_atomic(name, staged[name], mode)
+        try:
+            _write_atomic(name, staged[name], mode)
+        except OSError as e:
+            _err(f"'{name}' tidak diganti: {e}")
+            return 1
         print(f"  diganti: {name} (sha {_sha256(staged[name])[:8]}, mode {oct(mode)[2:]})")
     return EXIT_OK
 
@@ -366,6 +425,9 @@ def cmd_push(args: argparse.Namespace) -> int:
     name = src.name
     if not _valid_name(name):
         _err(f"nama '{name}' tidak sesuai pola {NAME_RE.pattern}")
+        return 1
+    if _is_system_name(name):
+        _err(f"nama '{name}' sama dengan perintah sistem; ditolak")
         return 1
     data = src.read_bytes()
     if len(data) > MAX_SIZE:
@@ -454,6 +516,11 @@ def build_parser() -> argparse.ArgumentParser:
 def cli_main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     if args.pb_url:
+        try:
+            pb_api.require_secure_url(args.pb_url)
+        except PBAPIError as e:
+            _err(str(e))
+            return 1
         os.environ["PB_API_URL"] = args.pb_url.rstrip("/")
     handlers = {"ls": cmd_ls, "check": cmd_check, "pull": cmd_pull, "push": cmd_push}
     return handlers[args.cmd](args)

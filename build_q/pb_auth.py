@@ -138,6 +138,7 @@ def login_sso(base: str, collection: str = AUTH_COLLECTION, *, open_browser: boo
 
 
 def login_password(base: str, email: str, password: str, collection: str = AUTH_COLLECTION) -> dict:
+    pb_api.require_secure_url(base)
     resp = pb_api._http_json("POST", f"{base}/api/collections/{collection}/auth-with-password",
                              body={"identity": email, "password": password})
     if not resp.get("token"):
