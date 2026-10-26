@@ -233,3 +233,63 @@ def test_download_sends_file_token(monkeypatch):
     rec = {"file": "tool_x.sh", "id": "r1", "collectionId": "c1"}
     assert bqbin._download(rec, "tok") == b"isi"
     assert seen["url"].endswith("/api/files/c1/r1/tool_x.sh?token=ft123")
+
+
+def test_system_name_found_on_any_path_dir(tmp_path, monkeypatch):
+    bindir = tmp_path / "homebrew-bin"
+    bindir.mkdir()
+    (bindir / "aws").write_text("x")
+    (bindir / "vault").write_text("x")
+    monkeypatch.setenv("PATH", f"{tmp_path / 'kosong'}:{bindir}")
+    assert bqbin._is_system_name("aws")
+    assert bqbin._is_system_name("vault")
+    assert not bqbin._is_system_name("tidak-ada-di-path")
+
+
+def test_own_bin_dir_on_path_not_reserved(bin_dir, monkeypatch):
+    (bin_dir / "gh-clone").write_text("x")
+    monkeypatch.setenv("PATH", f"{bin_dir}:/nonexistent-xyz")
+    assert not bqbin._is_system_name("gh-clone")
+
+
+def test_push_refuses_name_found_on_path(tmp_path, monkeypatch):
+    pathdir = tmp_path / "p"
+    pathdir.mkdir()
+    (pathdir / "argocd").write_text("x")
+    monkeypatch.setenv("PATH", str(pathdir))
+    f = tmp_path / "argocd"
+    f.write_bytes(b"#!/bin/bash\n")
+    monkeypatch.setattr(bqbin.getpass, "getpass", lambda *a: (_ for _ in ()).throw(AssertionError("prompt")))
+    import argparse
+    args = argparse.Namespace(file=str(f), mode=None, kind=None, version=None, notes=None, email=None, yes=True)
+    assert bqbin.cmd_push(args) == 1
+
+
+def test_env_pb_api_url_must_be_secure(monkeypatch, capsys):
+    monkeypatch.setenv("PB_API_URL", "http://evil.example.com/devops")
+    assert bqbin.cli_main(["ls"]) == 1
+    assert "https" in capsys.readouterr().err
+
+
+def test_scan_quoted_with_spaces_and_pwd_and_hyphen():
+    samples = [
+        'PASS="correct horse battery"\n',
+        "PASS='correct horse battery'\n",
+        "PB_PASS=Abc$defgh!9\n",
+        "PWD=secret123456\n",
+        "MY-API-KEY=abcdef12345\n",
+    ]
+    for text in samples:
+        assert bqbin._scan_secrets(text), text
+
+
+def test_scan_no_false_positive_on_benign_samples():
+    text = (
+        'PWD=$(pwd)\n'
+        'TOKEN=$(gh auth token)\n'
+        'PASS="${PB_PASS:?set}"\n'
+        'NAME=gh-clone\n'
+        'echo "$TOKEN"\n'
+        'PASSWORD=<your-password>\n'
+    )
+    assert bqbin._scan_secrets(text) == []
