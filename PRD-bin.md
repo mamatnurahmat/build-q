@@ -1,15 +1,142 @@
 # PRD: `bq bin`, tool CLI terpusat di PocketBase
 
-> **Version:** 0.3 (plan final sebelum fase 1; review ulang Security: PASS BERSYARAT untuk fase 1)
+> **Version:** 0.4 (fase 1 disederhanakan setelah review manusia di PR #34)
 > **Last Updated:** 2026-10-26
 > **Ticket:** HAG-63
 > **Target build-q:** v0.2.6+
-> **Status:** Dokumen saja. Belum ada kode, collection, atau merge. Tidak ada ronde review dokumen lagi; Security mereview kode fase 1.
-> **Riwayat:** v0.1 (`2b281bd`), v0.2 (`48d8919`, review v1 FAIL), v0.3 (review v2 PASS BERSYARAT fase 1 PB lokal, tier `external` belum lulus)
-> **Sumber review:** review Security internal (v1 dan review ulang). Temuan dan perbaikannya dirangkum di bagian 12.
-> **CLI (usulan):** `bq bin ls` · `bq bin show <cmd>` · `bq bin [--version <v>] <cmd> <args...>` · `bq bin --dry-run <cmd> <args...>` · `bq bin publish|release|rollback|yank|deprecate`
+> **Status:** Dokumen saja. Belum ada kode, collection, atau merge.
+> **Riwayat:** v0.1 (`2b281bd`), v0.2 (`48d8919`, review v1 FAIL), v0.3 (`cb2fcdd`, PASS BERSYARAT fase 1 PB lokal, external belum lulus), v0.4 (fase 1 sederhana di bagian F1, desain v0.3 jadi fase lanjut)
 
 ---
+
+# Fase 1 (v0.4): sinkron `~/.build-q/bin` dengan PocketBase
+
+## F1.0 Ringkasan
+
+- Tool disimpan sebagai berkas biasa di `~/.build-q/bin`. Engineer menjalankannya langsung lewat `PATH` (`export PATH="$HOME/.build-q/bin:$PATH"` sudah ada di `~/.zshrc`). **bq tidak mengeksekusi tool.**
+- Collection PocketBase `bq_bin` menyimpan isi berkas, sha256, dan metadata.
+- `bq bin check` membandingkan lokal dengan PocketBase dan hanya melapor. `bq bin pull` menyalin dari PocketBase ke lokal dengan konfirmasi dan backup. `bq bin push` (superuser) mengunggah berkas.
+- Tidak ada sandbox, tanda tangan, rilis dua orang, atau tier di fase 1. Semuanya ada di "Fase lanjut" di bawah.
+
+## F1.1 Collection `bq_bin`
+
+| Field | Tipe | Keterangan |
+|---|---|---|
+| `name` | text, unik | Sama dengan nama berkas. Pola `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `file` | file, maks 1 berkas, maks 512 KB | Isi berkas. |
+| `sha256` | text | Diisi hook dari berkas yang diunggah. Tidak dari klien. |
+| `size` | number | Diisi hook. |
+| `mode` | text | Mode file, mis. `0755`. Dipakai `pull` untuk `chmod`. Hanya `0644` atau `0755`. |
+| `kind` | select | `bash`, `python`, `binary`. **Informasi saja**, tidak mengubah perilaku. |
+| `version` | text | Informasi. |
+| `notes` | text | Informasi. |
+
+**Rules:**
+
+- `listRule` dan `viewRule`: `@request.auth.id != ""` (pengguna login).
+- `createRule`, `updateRule`, `deleteRule`: `null`, yaitu hanya superuser. Token admin bersama (akun `devops_users`) tidak bisa menulis.
+
+**Hook (onRecordCreateRequest dan onRecordUpdateRequest):**
+
+- Hitung sha256 dari berkas yang diunggah, isi `sha256` dan `size`, tolak bila `sha256` dari klien (jika dikirim) tidak sama.
+- Tolak bila ukuran > 512 KB atau nama berkas tidak sama dengan `name`.
+- Catatan teknis: cara membaca berkas unggahan di hook PocketBase diuji di PB lokal (F1.5, langkah 1). Bila tidak tersedia, `bq` menghitung sha256 dan hook memverifikasi ulang dengan membaca berkas yang tersimpan.
+
+## F1.2 Perintah
+
+```
+bq bin ls
+bq bin check [--json]
+bq bin pull <name> [--yes]
+bq bin pull --all [--yes]
+bq bin push <file> [--mode 0755] [--kind bash|python|binary] [--version <v>] [--notes "<teks>"]
+```
+
+**`bq bin ls`**: daftar `name`, `kind`, `size`, `sha256` (8 karakter), `version`, dan apakah ada di lokal. Hanya membaca PocketBase.
+
+**`bq bin check`**: tabel nama, sha256 lokal, sha256 PB, status, dan saran perintah.
+
+| Status | Arti | Saran |
+|---|---|---|
+| `MATCH` | sama | - |
+| `BEDA` | ada di kedua tempat, isi berbeda | `bq bin pull <name>` |
+| `TIDAK ADA DI LOKAL` | ada di PB saja | `bq bin pull <name>` |
+| `HANYA DI LOKAL` | ada lokal saja | `bq bin push <file>` (superuser) |
+
+- Berkas di `~/.build-q/bin` yang lebih besar dari 512 KB (mis. `docker-buildx`, 65 MB) **dilewati** dan tidak dihitung. Ditampilkan sebagai `DILEWATI (ukuran)`.
+- Exit 0 bila semua `MATCH` (atau dilewati). Exit 1 bila ada `BEDA`, `TIDAK ADA DI LOKAL`, atau `HANYA DI LOKAL`. Exit 2 bila PB tidak terjangkau.
+- **Tidak pernah mengubah file.**
+
+**`bq bin pull <name>|--all`**:
+
+1. Unduh berkas dari PB ke direktori sementara di dalam `~/.build-q/bin/.tmp/`.
+2. Hitung sha256, bandingkan dengan `sha256` di record. Tidak cocok: batalkan, hapus sementara, exit 122.
+3. Bila lokal ada dan teks: tampilkan diff unified. Bila biner: tampilkan ukuran dan sha saja.
+4. Minta konfirmasi (`y/N`), kecuali `--yes`.
+5. Backup lokal lama ke `~/.build-q/bin/.bak/<name>.<UTC-timestamp>`.
+6. Ganti secara atomik: `rename(2)` dari sementara ke `~/.build-q/bin/<name>`. `chmod` sesuai `mode`.
+7. `--all`: daftar semua perubahan dulu, lalu konfirmasi sekali (atau `--yes`). Tidak mengubah berkas yang `MATCH`.
+
+**`bq bin push <file>`**:
+
+1. Hanya superuser. `bq` meminta login superuser secara interaktif. Kredensial tidak disimpan di `~/.build-q` (lihat keputusan F1-1).
+2. Tolak bila berkas > 512 KB, bukan teks (fase 1 hanya skrip teks), atau nama tidak sesuai pola.
+3. **Pemindaian pola rahasia.** Tolak bila ditemukan: `ghp_`, `github_pat_`, `gho_`, `xox[abprs]-`, `AKIA[0-9A-Z]{16}`, `-----BEGIN`, JWT (`eyJ...` dengan dua titik), dan penugasan `NAME=<nilai>` untuk nama `*TOKEN*`, `*SECRET*`, `*PASS*`, `*PASSWORD*`, `*KEY*` dengan nilai literal ≥ 8 karakter. Pola daftar ada di `bq`. Ini pagar, bukan jaminan.
+4. Tampilkan nama, sha256, dan ukuran. Minta konfirmasi (kecuali `--yes`).
+5. Unggah. Verifikasi bahwa sha256 yang dikembalikan PB sama dengan lokal. Tidak sama: exit 122.
+
+## F1.3 Yang tidak ada di fase 1
+
+- Tidak ada eksekusi lewat `bq`. `bq bin` tidak pernah menjalankan isi tool.
+- Tidak ada sandbox, tanda tangan, rilis dua orang, tier, atau manifest.
+- Tidak ada cache khusus. Sumber pembanding adalah PB langsung.
+- Tidak ada biner di collection, kecuali sebagai informasi (`kind`). Batas 512 KB membuatnya praktis hanya skrip.
+
+## F1.4 Risiko sisa (3 baris)
+
+1. Berkas lokal bisa diubah setelah `pull`. `PATH` tetap menjalankannya; `bq bin check` hanya menampilkan `BEDA` bila dijalankan manual.
+2. Token GitHub (dari env atau `gh auth token`) bisa dibaca semua skrip di `PATH`, termasuk `gh-clone`. Ini sama seperti sekarang, tidak berkurang di fase 1.
+3. Superuser yang dibajak bisa mengubah isi tool untuk semua yang menjalankan `pull`. Diperbaiki di fase lanjut (tanda tangan dan rilis dua orang).
+
+## F1.5 Rencana tes (PocketBase lokal, skrip `gh-clone` sebagai contoh)
+
+Lingkungan: PB lokal dari DevOps (bukan produksi). Data uji berawalan `TEST-`. Collection `bq_bin` dibuat di PB lokal setelah DevOps setuju.
+
+1. `push ~/.build-q/bin/gh-clone` sebagai superuser lokal. Hasil: sha256 di PB sama dengan lokal, `size` 2435.
+2. `push` sebagai pengguna biasa: ditolak (403). Token admin bersama ditolak.
+3. `check`: `gh-clone` = `MATCH`, exit 0.
+4. Ubah satu baris lokal (salinan, bukan produksi). `check`: `BEDA`, exit 1, saran `pull`.
+5. `pull gh-clone` tanpa `--yes`: diff tampil, konfirmasi `n` membatalkan tanpa mengubah berkas.
+6. `pull gh-clone --yes`: backup muncul di `.bak/`, sha256 lokal sama dengan PB, mode `0755`.
+7. `pull` dengan sha256 PB yang sengaja tidak cocok (uji di PB lokal): ditolak, exit 122, berkas lokal tidak berubah.
+8. `push` berkas uji yang berisi pola rahasia uji (`TEST-` diberi awalan dan nilai palsu): ditolak sebelum unggah.
+9. `gh-clone` tanpa argumen dari `PATH`: menampilkan usage, tidak ada jaringan. (Tidak menjalankan clone sungguhan.)
+10. `ls`: tabel benar, termasuk `docker-buildx` sebagai `DILEWATI (ukuran)`.
+11. Hapus data uji oleh DevOps setelah selesai.
+
+## F1.6 Estimasi ukuran kode
+
+| Bagian | Perkiraan |
+|---|---|
+| `build_q/bin.py` (ls, check, pull, push, diff, pemindaian pola) | ±350 baris Python |
+| Pemanggilan di `cli.py` (dispatch `bq bin`, gate login) | ±20 baris |
+| Hook PocketBase (sha256, ukuran, nama, rules) | ±60 baris JavaScript |
+| Tes (unit dan integrasi dengan PB lokal) | ±250 baris |
+| **Total** | **±680 baris** |
+
+Perkiraan kasar. Hook sha256 bisa lebih panjang bila cara membaca unggahan di PB perlu jalur kedua.
+
+## F1.7 Keputusan untuk manusia (fase 1)
+
+1. **Superuser untuk `push`.** Rekomendasi: login superuser interaktif setiap kali `push`, tanpa menyimpan kredensial. Alternatif: akun superuser khusus untuk `push` dengan kredensial di keychain.
+2. **Pembuatan collection `bq_bin` di PB lokal.** Menunggu persetujuan DevOps sesuai aturan uji bersama. Produksi tetap perlu izin tertulis.
+3. **Pemindaian pola rahasia.** Rekomendasi: pagar sederhana (F1.2 push, langkah 3) cukup untuk fase 1. Alternatif: tambahkan `gitleaks` sebagai pemeriksaan tambahan (menambah dependensi).
+
+---
+
+# Fase lanjut: desain v0.3 (tidak dihapus)
+
+Bagian di bawah ini adalah desain v0.3 apa adanya. Istilah "fase 1" di dalamnya berarti fase 1 versi v0.3, bukan F1 di atas. Sandbox, tanda tangan, rilis dua orang, tier, dan eksekusi lewat `bq bin` berlaku untuk fase lanjut.
 
 ## 0. Ringkasan
 
@@ -538,7 +665,7 @@ Semua menunggu keputusan manusia. Maksimal lima, masing-masing dengan rekomendas
 
 Catatan: `(param ...)` dan `string-append` perlu diuji di matriks macOS (N9). Bila tidak didukung, path ditulis langsung ke profil sebelum dijalankan. Hanya satu aturan `process-exec` (interpreter); tidak ada aturan exec lain. Perilaku `deny` terhadap `allow` yang lebih umum diuji di 7.1.
 
-## Lampiran B. Tool `devops-bin` yang bisa jalan di fase 1
+## Lampiran B. Tool `devops-bin` yang bisa jalan di fase 1 v0.3 (fase lanjut)
 
 Kriteria: tidak memakai jaringan, tidak mengeksekusi `yq`, `curl`, `gh`, `kubectl`, `git`, `docker`, `ssh`, `argocd`, `helm`, `sops`, `age`, `openssl`, atau skrip lain yang memanggilnya, dan tidak membaca kredensial.
 
