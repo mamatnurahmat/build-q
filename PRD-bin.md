@@ -1,58 +1,64 @@
 # PRD: `bq bin` — Tool CLI terpusat di PocketBase
 
-> **Version:** 0.1 (draft untuk review)
+> **Version:** 0.2 (revisi setelah review Security FAIL v1)
 > **Last Updated:** 2026-10-26
 > **Ticket:** HAG-63
 > **Target build-q:** v0.2.6+
-> **Status:** Plan saja. Belum ada kode implementasi, belum ada collection di produksi.
-> **CLI Entry (usulan):** `bq bin ls` · `bq bin show <cmd>` · `bq bin <cmd> <args...>` · `bq bin <cmd> --dry-run` · `bq bin publish|release|rollback|deprecate`
+> **Status:** Dokumen saja. Belum ada kode, belum ada collection, belum ada merge. Menunggu review ulang Security.
+> **Ganti dari:** v0.1 (commit `2b281bd`), review: `security-engineer-mvkyygr4/hag-63-review.md`
+> **CLI Entry (usulan):** `bq bin ls` · `bq bin show <cmd>` · `bq bin <cmd> <args...>` · `bq bin --dry-run <cmd> <args...>` · `bq bin publish|release|rollback|yank|deprecate`
 
 ---
 
-## 0. Ringkasan dan keputusan kunci
+## 0. Ringkasan
 
-Tujuan: semua tool CLI tim (bash, python, dan kelak biner) disimpan terpusat di PocketBase, dijalankan lewat `bq bin <cmd> <args...>`, dan dirawat dengan versi, review, dan rollback.
+Tujuan tidak berubah: tool CLI tim (bash dan python) disimpan terpusat di PocketBase, dijalankan lewat `bq bin`, dan dirawat dengan versi, review, dan rollback.
 
-Keputusan kunci (detail di bagian 9):
+Review Security v1 memberi FAIL dengan dua KRITIS dan tiga TINGGI. v2 menutupnya dengan prinsip berikut:
 
-1. **Eksekusi kode dari database adalah risiko terbesar.** Siapa pun yang bisa menulis versi tool yang dirilis bisa menjalankan kode di laptop semua engineer. Karena itu rilis wajib dua orang (penulis ≠ perilis), dan isi tool wajib ditandatangani di luar PocketBase (rekomendasi, lihat keputusan 1).
-2. **Isi tool tidak pernah dievaluasi shell.** Tool dijalankan sebagai file sementara dengan interpreter tetap (`/bin/bash` atau `python3 -I`), argumen diteruskan sebagai daftar argv, bukan string.
-3. **Rahasia tidak pernah disimpan di collection tool.** Tool hanya mendeklarasikan nama env yang dibutuhkan; nilainya diambil dari collection `secrets` yang sudah ada, lewat `pb_api`, dan hanya dimasukkan ke env proses anak.
-4. **Versi bersifat immutable setelah rilis.** Perubahan isi berarti versi baru. Rollback berarti memindahkan penunjuk versi aktif ke versi rilis sebelumnya.
-5. **Versi biner tidak masuk v1.** Biner `docker-buildx` (65 MB) yang sudah ada di `~/.build-q/bin` tetap lokal.
-6. **Tidak ada perubahan skema produksi tanpa izin manusia.** Collection hanya dibuat di staging oleh DevOps lebih dulu.
+1. **Tool tidak pernah melihat kredensial.** Tool berjalan di sandbox OS. `~/.build-q` dan `HOME` asli tidak terbaca. Tool tidak menerima token. Hanya nilai rahasia yang dideklarasikan dan disetujui yang masuk ke env.
+2. **Identitas datang dari server, bukan dari klien.** `author` dan `releaser` diisi hook dari `e.auth`. Agent tidak pernah merilis.
+3. **Manifest bertanda tangan mencakup semua yang berpengaruh pada eksekusi.** Runtime, tier, env yang dibutuhkan, requires, args, dan hash body ditandatangani bersama. Kunci publik dipin di `bq`. Tanpa tanda tangan valid, tool tidak jalan.
+4. **Perubahan status hanya lewat hook.** Klien tidak bisa menulis langsung ke collection tool. Semua tulisan lewat route kustom yang memvalidasi akses dan mencatat audit.
+5. **Tanpa biner.** Offline: 72 jam untuk tier `read`, 24 jam untuk tier `external`.
+6. **Uji dulu di PocketBase lokal.** Staging tidak ada. Produksi hanya setelah izin tertulis dari manusia.
+
+**Menunggu keputusan manusia** (ditandai di bagian 10): akun pribadi untuk perilis, peran `tool_releaser`, peran untuk akun agent yang hanya boleh membuat draft, pengelolaan kunci penandatanganan, dan sandbox network per tier.
+
+Tabel temuan Security ke bagian yang memperbaikinya ada di bagian 12.
 
 ---
 
-## 1. Latar dan kondisi saat ini
+## 1. Latar dan prasyarat
 
 ### 1.1 Yang sudah ada di build-q
 
-| Komponen | Lokasi | Catatan untuk fitur ini |
+| Komponen | Lokasi | Catatan untuk v2 |
 |---|---|---|
-| Login SSO dan token user | `build_q/pb_auth.py`, `~/.build-q/auth.json` | Dipakai ulang lewat `pb_api.get_token()`. Gate login `requires_login()` di `cli.py:main()` harus juga mencakup `bq bin`. |
-| Ambil data collection umum | `build_q/pb_api.py: fetch_collection_records()` | Dipakai ulang untuk `cli_tools`. Sudah menangani auth dan HTTP error (`PBAPIError`). |
-| Ambil secret per key | `pb_api.fetch_secrets()`, `pb_api.hydrate_env()` | Dipakai ulang untuk env tool. Hanya key yang dideklarasikan tool yang diinjeksi. |
-| Cache dengan TTL | `pb_api._write_cache()` (0600), `tui_catalog.py` (TTL 1 jam) | Pola cache dipakai ulang. Cache tool memakai direktori sendiri (lihat bagian 4). |
-| Katalog TUI | collection `build_q_tools`, `build_q_providers`, `build_q_patterns` | Ini katalog perintah bq untuk TUI, bukan isi script. Tidak diubah. Collection baru `cli_tools` dipisah. |
-| Kebijakan risiko | `build_q/tool_policy.py` (tier read/local/external) | Tool `bin` memakai tier yang sama: setiap tool punya field `tier`. |
+| Login SSO dan token user | `build_q/pb_auth.py`, `~/.build-q/auth.json` | Token ini tidak pernah masuk ke proses tool. Gate `requires_login()` di `cli.py:main()` juga mencakup `bq bin`. |
+| Ambil record | `pb_api.fetch_collection_records()` | Dipakai ulang untuk membaca katalog. |
+| Ambil secret per key | `pb_api.fetch_secrets()` | Dipakai ulang, tetapi hanya nilai yang dideklarasikan tool yang diambil, dan tidak disimpan di cache (lihat P0). |
+| Cache | `pb_api._write_cache()` (`.pb-cache.json`, 0600) | **Menyimpan nilai rahasia dalam teks biasa** (`pb_api.py:266-271`). Ini harus diubah sebelum fitur ini dipakai (P0). |
+| Fallback superuser | `pb_api.get_token()` membaca `PB_API_USER/PASS` dari `.env` (`pb_api.py:222`) | Jalur ini tidak boleh dipakai oleh `bq bin` (P0). |
+| Kebijakan risiko | `build_q/tool_policy.py` | Tier `read`, `local`, `external` dipakai ulang. |
 
-Catatan: `bq` wajib login (`requires_login`). Akses per peran di bagian 3.4 harus dikonfirmasi DevOps, karena akun RnD tidak bisa membaca schema (`GET /api/collections/<nama>` mengembalikan 403). Yang terbaca hanya record; untuk katalog, hanya nama field yang diperiksa (isi tidak dicatat).
+### 1.2 Prasyarat P0 (wajib sebelum fase 1)
 
-### 1.2 Inventaris skrip yang ada (read-only)
+Ini perbaikan di luar `bq bin`, tetapi tanpanya KRITIS 1 tidak tertutup:
+
+- **P0-a:** cache `pb_api` tidak menyimpan nilai rahasia. Bila perlu cache, simpan di keychain OS atau jangan cache sama sekali untuk jalur `bin`.
+- **P0-b:** `bq bin` tidak memakai fallback superuser dari `.env`. Hanya token SSO pribadi.
+- **P0-c:** setiap orang dan setiap agent punya akun PocketBase sendiri. Token bersama tidak dipakai di jalur `bq bin`. (Menunggu keputusan manusia, bagian 10.)
+
+### 1.3 Inventaris skrip (read-only, tidak berubah dari v1)
 
 | Sumber | Jumlah | Rincian |
 |---|---|---|
-| `~/.claude/skills/devops-bin/bin/` | 66 berkas | 57 bash, 9 python. Ada `source_auth.py`, `k8s-dump`, `k8s-secret`, `pb-seed*`, `cicd-*`, `argocd-app`, `gitops-audit`, dan lainnya. |
-| `~/.build-q/bin/` | 1 berkas | `docker-buildx` (biner, 65 MB). Tetap lokal. |
-| `~/.agents/bin/` | tidak ada di mesin ini | Skill `devops-bin` masih menyebut lokasi ini, jadi katalog skill sudah tidak sesuai dengan kondisi mesin. |
+| `~/.claude/skills/devops-bin/bin/` | 66 berkas | 57 bash, 9 python. |
+| `~/.build-q/bin/` | 1 berkas | `docker-buildx` (biner). Tetap lokal, di luar v1. |
+| `~/.agents/bin/` | tidak ada | Skill `devops-bin` masih menyebut lokasi ini. |
 
-Temuan yang memengaruhi migrasi:
-
-- **Ketergantungan path mesin:** 9 skrip merujuk `~/.pi/` dan 10 merujuk `~/.agents/`. Path ini harus diganti dengan mekanisme `bq auth get` atau env dari `secrets`.
-- **Ketergantungan antar-skrip:** skrip saling memanggil (mis. `gitops-match-gh-latest-tag` memanggil `gh-latest-tag`). Migrasi harus mengikuti urutan dependensi, dan pemanggilan ke skrip lain diganti menjadi `bq bin <cmd>`.
-- **Pemakaian `yq`:** `k8s-dump` dan `k8s-secret` memakai `yq eval`. Tool harus mendeklarasikan `requires` (biner pendukung) dan `bq` memeriksanya saat `--dry-run`.
-- **Skrip yang menyentuh rahasia:** `k8s-secret`, `sops-*`, `source_auth.py`, `gh-fetch-secret`. Kategori ini tidak dimigrasi pada fase awal (lihat bagian 8).
+Ketergantungan yang perlu dipindah: 9 skrip merujuk `~/.pi/`, 10 merujuk `~/.agents/`. Skrip saling memanggil. `k8s-dump` dan `k8s-secret` memakai `yq`. Sekitar 25 skrip menyebut kata seperti TOKEN, SECRET, atau PASSWORD, dan harus diaudit.
 
 ---
 
@@ -63,138 +69,143 @@ Temuan yang memengaruhi migrasi:
 ```
 bq bin ls [--json] [--runtime bash|python] [--tier read|local|external]
 bq bin show <cmd> [--version <v>] [--body] [--json]
-bq bin <cmd> [--version <v>] [args...]       # argumen diteruskan apa adanya; --version hanya bila sebelum args
-bq bin --dry-run <cmd> [args...]             # tampilkan rencana, tidak menjalankan
-bq bin publish <file> --name <cmd> --runtime bash|python --version <semver> --changelog "<teks>" [--args-spec <file.json>] [--env NAME ...] [--tier ...] [--description "<teks>"]
-bq bin release <cmd> <version>               # draft → released (perlu peran perilis, bukan penulis)
-bq bin rollback <cmd> <version>              # pindahkan penunjuk aktif ke versi released sebelumnya
-bq bin deprecate <cmd> [--replacement <cmd>] # status deprecated, tetap bisa dijalankan dengan peringatan
-bq bin yank <cmd> <version>                  # tarik versi karena masalah keamanan; tidak bisa dijalankan
+bq bin [--version <v>] <cmd> [args...]          # argumen diteruskan apa adanya
+bq bin --dry-run <cmd> [args...]                # tampilkan rencana, tidak menjalankan
+bq bin publish <file> --name <cmd> --version <semver> --manifest <file.json> --changelog "<teks>"
+bq bin release <cmd> <version>                  # hanya perilis (akun pribadi manusia), menandatangani di laptop
+bq bin rollback <cmd> <version>                 # hanya perilis
+bq bin yank <cmd> <version> --reason "<teks>"   # hanya perilis
+bq bin deprecate <cmd> [--replacement <cmd>]    # hanya perilis
 ```
 
-### 2.2 Aturan argumen
+Aturan:
 
-- Semua token setelah `bq bin <cmd>` diteruskan ke tool **tanpa diparse** oleh argparse `bq`. Penangkapan dilakukan di `main()` sebelum argparse, seperti `bq auth` (`cli.py:126`). Dengan begitu, `--dry-run` hanya dikenali bila muncul **sebelum** `<cmd>`, atau dengan tanda `--bq-dry-run`. Usulan: flag `bq` selalu didahulukan, contoh `bq bin --dry-run <cmd> ...`. Ini mencegah bentrok dengan flag milik tool (mis. tool yang punya `--dry-run` sendiri).
-- Exit code tool diteruskan apa adanya sebagai exit code `bq`.
-- Galat dari `bq` sendiri memakai rentang exit yang tidak dipakai tool: `120` tool tidak ditemukan, `121` tool ditarik (yanked), `122` integritas gagal, `123` PB tidak terjangkau dan cache tidak layak pakai, `124` env wajib tidak tersedia, `125` runtime tidak didukung. Kode 126 dan 127 mengikuti shell.
-- Keterbatasan: tool yang sendiri mengembalikan 120–125 akan tampak sama. Opsi mitigasi: `bq bin` mencetak prefiks `[bq-bin]` di stderr setiap kali exit code berasal dari `bq`. Ini diputuskan saat implementasi (lihat keputusan 5 pada bagian 10).
+- `publish` boleh dipakai akun agent, tetapi hanya membuat draft. Hook menolak `state` selain `draft` dari klien.
+- `release`, `rollback`, `yank`, dan `deprecate` memerlukan sesi pribadi manusia. `bq` menolak bila sesi berasal dari token bersama atau akun agent.
+- Flag `--version` dan `--dry-run` harus muncul sebelum `<cmd>`. Semua token setelah `<cmd>` diteruskan apa adanya, tanpa diparse `bq`.
+- Exit code tool diteruskan apa adanya. Galat `bq` memakai rentang 120–125: 120 tool tidak ditemukan, 121 ditarik (yanked), 122 integritas atau tanda tangan gagal, 123 offline dan cache tidak layak, 124 env wajib tidak tersedia, 125 runtime atau sandbox tidak tersedia. Galat `bq` dicetak dengan prefiks `[bq-bin]` di stderr.
 
-### 2.3 `--dry-run`
+### 2.2 `--dry-run`
 
-Menampilkan tanpa menjalankan:
+Menampilkan, tanpa menjalankan:
 
-- nama, versi, status, sha256 (16 karakter pertama dan panjang penuh dengan `--json`);
-- sumber: `pb` (baru diambil), `cache`, atau `stale-cache` (offline);
-- runtime dan interpreter yang akan dipakai (`/bin/bash` atau `python3 -I`), termasuk versi yang terdeteksi;
-- daftar **nama** env yang akan diinjeksi (`GITHUB_TOKEN` dst.), status tersedia atau tidak. Nilainya **tidak** pernah ditampilkan;
-- argv yang akan dieksekusi, dengan argumen ditampilkan sebagai literal dalam tanda kutip.
+- nama, versi, status, tier, runtime, dan `signer_key_id`;
+- hasil verifikasi tanda tangan (OK atau gagal, dengan alasan);
+- sumber: `pb`, `cache`, atau `stale-cache`;
+- interpreter dan profil sandbox yang akan dipakai;
+- **nama** env yang akan diinjeksi dan statusnya (tersedia atau tidak). Nilai tidak pernah ditampilkan;
+- argumen sebagai literal, dan pemeriksaan pola token pada argumen (lihat 4.7);
+- argv yang akan dieksekusi.
 
-### 2.4 Contoh
+### 2.3 Contoh
 
 ```
-$ bq bin ls
-NAME                  VERSI    RUNTIME  TIER      STATUS      SUMBER
-k8s-scale-active      1.2.0    bash     external  active      cache
-gitops-match-tag      0.4.1    python   read      active      pb
-svc-endpoints-audit   2.0.0    bash     read      deprecated  pb  → pengganti: <nama>  (dari field replacement)
-
-$ bq bin --dry-run gitops-match-tag plus-be-merchantappauth-module --json
-{"name":"gitops-match-tag","version":"0.4.1","sha256":"9f2c…","source":"pb",
- "runtime":"python","interpreter":"python3 -I","env_needed":["GITHUB_TOKEN"],
- "env_missing":[], "argv":["python3","-I","<tmp>","plus-be-merchantappauth-module"]}
-
-$ bq bin gitops-match-tag plus-be-merchantappauth-module
-...output tool...
-$ echo $?   # exit code tool
+$ bq bin --dry-run gitops-match-tag plus-be-merchantappauth-module
+name: gitops-match-tag  version: 0.4.1  tier: read  runtime: python
+signature: OK (key kunci-perilis-2026a)  source: pb (diperbarui 09:12)
+sandbox: profil read, HOME kosong, network ditolak
+env: GITHUB_TOKEN (tersedia)
+argv: python3 -I <tmp>/run.py 'plus-be-merchantappauth-module'
 ```
 
 ---
 
 ## 3. Skema PocketBase
 
-Nama collection diusulkan, belum dibuat. Pembuatan hanya di staging, oleh DevOps. Produksi butuh izin manusia.
+Nama collection diusulkan. Belum dibuat. Pembuatan hanya di PocketBase lokal (lihat bagian 8).
 
 ### 3.1 `cli_tools` (satu record per tool)
 
-| Field | Tipe | Wajib | Keterangan |
-|---|---|---|---|
-| `name` | text | ya | Unik, pola `^[a-z][a-z0-9-]{1,60}$`. Nama yang bentrok dengan perintah bawaan bq atau berkas di `~/.build-q/bin` ditolak. |
-| `description` | text | ya | Satu kalimat. |
-| `runtime` | select | ya | `bash`, `python`. (`binary` ditunda, lihat keputusan 2.) |
-| `tier` | select | ya | `read`, `local`, `external`, sama dengan `tool_policy.py`. |
-| `current_version` | relation → `cli_tool_versions` | tidak | Versi aktif. Kosong berarti tool belum rilis. |
-| `status` | select | ya | `active`, `deprecated`, `yanked`. |
-| `replacement` | text | tidak | Nama tool pengganti bila `deprecated`. |
-| `owner` | relation → `devops_users` | ya | Pemilik yang bertanggung jawab. |
-| `env_required` | json | tidak | Daftar nama env, mis. `["GITHUB_TOKEN"]`. Hanya nama, tidak pernah nilai. |
-| `requires` | json | tidak | Biner pendukung, mis. `["yq", "jq"]`. |
-| `args_spec` | json | tidak | Dokumentasi argumen (bagian 3.3). Dipakai `show` dan `--help`. |
-| `active` | bool | ya | `false` menyembunyikan tool dari `ls`. |
-| `created` / `updated` | autodate | — | Pola standar PocketBase. |
+| Field | Tipe | Keterangan |
+|---|---|---|
+| `name` | text | Unik. Pola `^[a-z][a-z0-9-]{1,60}$`. Nama bentrok dengan perintah bq atau berkas di `~/.build-q/bin` ditolak. |
+| `description` | text | Satu kalimat. |
+| `owner` | relation → `devops_users` | Pemilik yang bertanggung jawab. |
+| `current_version` | relation → `cli_tool_versions` | Versi aktif. Diubah hanya oleh hook. |
+| `status` | select | `active`, `deprecated`, `yanked`. Diubah hanya oleh hook. |
+| `replacement` | text | Nama tool pengganti bila `deprecated`. |
+| `active` | bool | `false` menyembunyikan tool dari `ls`. |
 
-### 3.2 `cli_tool_versions` (satu record per versi, immutable setelah rilis)
+Field `runtime`, `tier`, `env_required`, `requires`, dan `args_spec` **tidak ada di sini**. Semuanya ada di `cli_tool_versions` dan masuk manifest bertanda tangan (temuan TINGGI 3).
 
-| Field | Tipe | Wajib | Keterangan |
-|---|---|---|---|
-| `tool` | relation → `cli_tools` | ya | |
-| `version` | text | ya | SemVer. Unik per `tool`. |
-| `state` | select | ya | `draft`, `released`, `yanked`. |
-| `body` | file (maks 512 KB) | ya | Isi script. Batas 512 KB untuk bash dan python; di atas itu ditolak. |
-| `sha256` | text | ya | Hash isi `body`, dihitung saat publish. |
-| `signature` | text | tidak | Tanda tangan Ed25519 base64 (bila keputusan 1 disetujui). |
-| `changelog` | text | ya | Wajib diisi. |
-| `args_spec` | json | tidak | Salinan spesifikasi argumen saat rilis. |
-| `author` | relation → `devops_users` | ya | Penulis draft. |
-| `releaser` | relation → `devops_users` | tidak | Perilis. Wajib berbeda dari `author` (dijaga di hook/rule). |
-| `released_at` | date | tidak | |
-| `yanked_reason` | text | tidak | Wajib bila `state = yanked`. |
+### 3.2 `cli_tool_versions` (satu record per versi, immutable setelah `released`)
 
-Aturan tambahan:
-- Setelah `state = released`, field `body`, `sha256`, `signature`, dan `version` tidak bisa diubah. Hanya `state` (ke `yanked`) dan `yanked_reason` yang bisa.
-- Batas ukuran `body` dan validasi `sha256` dijalankan ulang di server (hook) saat publish.
-- Hapus record tidak diizinkan (`deleteRule` none). Yank adalah jalur penarikan.
+| Field | Tipe | Keterangan |
+|---|---|---|
+| `tool` | relation → `cli_tools` | |
+| `version` | text | SemVer. Unik per `tool`. |
+| `state` | select | `draft`, `released`, `yanked`. Hanya hook yang mengubah. |
+| `runtime` | select | `bash`, `python`. |
+| `tier` | select | `read`, `local`, `external`. |
+| `env_required` | json | Daftar nama env yang boleh diinjeksi. Hanya nama. |
+| `requires` | json | Biner pendukung, mis. `["yq"]`. |
+| `args_spec` | json | Dokumentasi argumen (dan pemeriksaan pola token, lihat 4.7). |
+| `body` | file (maks 512 KB) | Isi script. |
+| `sha256` | text | Hash `body`, dihitung server. |
+| `manifest_json` | json | Manifest kanonik yang ditandatangani (3.3). |
+| `signature` | text | Ed25519, base64. Wajib untuk `released`. |
+| `signer_key_id` | text | Id kunci publik yang dipakai, lihat 4.5. |
+| `changelog` | text | Wajib. |
+| `author` | relation → `devops_users` | **Diisi hook dari `e.auth.id`.** Nilai dari body diabaikan. |
+| `releaser` | relation → `devops_users` | **Diisi hook dari `e.auth.id`.** Nilai dari body diabaikan. |
+| `released_at` | date | Diisi hook. |
+| `yanked_reason` | text | Wajib bila `yanked`. |
 
-### 3.3 Format `args_spec`
+Aturan immutable: setelah `released`, field `body`, `sha256`, `manifest_json`, `signature`, `signer_key_id`, `runtime`, `tier`, `env_required`, `requires`, `args_spec`, dan `version` tidak bisa diubah. Hanya `state` (ke `yanked`) dan `yanked_reason` yang boleh diubah, dan hanya oleh hook rilis. Hapus record tidak diizinkan.
+
+### 3.3 Manifest bertanda tangan
+
+`manifest_json` adalah JSON kanonik (kunci urut, tanpa spasi, UTF-8). Yang ditandatangani adalah seluruh manifest:
 
 ```json
 {
-  "usage": "gitops-match-tag <repo> [--json]",
-  "positional": [{"name": "repo", "required": true, "pattern": "^[a-z0-9-]+$"}],
-  "flags": [{"name": "--json", "description": "Keluaran JSON"}],
-  "max_args": 4
+  "schema": 1,
+  "name": "gitops-match-tag",
+  "version": "0.4.1",
+  "runtime": "python",
+  "tier": "read",
+  "env_required": ["GITHUB_TOKEN"],
+  "requires": [],
+  "args_spec": {"usage": "gitops-match-tag <repo> [--json]", "max_args": 4},
+  "sha256": "9f2c...",
+  "released_at": "2026-10-26T10:00:00Z",
+  "releaser": "<id PB perilis>",
+  "author": "<id PB penulis>"
 }
 ```
 
-Di v1, `args_spec` hanya dokumentasi. `bq` menampilkannya di `show` dan `--help`. Validasi pola argumen dilakukan oleh tool sendiri. Validasi dari `bq` ditunda (lihat bagian 10, keputusan 5 bila relevan).
+Verifikasi tanda tangan dilakukan dua kali: di `bq` (sebelum menjalankan, dengan kunci publik yang dipin di `bq`) dan di hook rilis (dengan kunci publik perilis yang terdaftar). Keduanya memakai byte manifest yang sama.
 
-### 3.4 Akses per peran (berdasarkan schema produksi)
+### 3.4 Akses per peran
 
-Schema produksi `devops_users.role` adalah select dengan `maxSelect: 1` dan nilai `view`, `admin`, `incident_support`, `incident_owner` (dibaca Boss sebagai superuser). Belum ada peran khusus perilis tool. Karena satu pengguna hanya punya satu peran, pemetaan di bawah memakai peran yang ada. Pemetaan ini masih draft dan menunggu review Security.
+Peran yang ada di `devops_users.role` (sesuai schema produksi): `view`, `admin`, `incident_support`, `incident_owner`. Peran untuk tool belum ada.
 
-| Aksi | `view` | `incident_support` / `incident_owner` | `admin` |
-|---|---|---|---|
-| `ls`, `show`, jalankan tool `released` dan `active` | ya | ya | ya |
-| Lihat `body` versi `draft` | tidak | penulisnya saja | ya |
-| Buat tool dan draft versi | tidak | tidak | ya |
-| Ubah `draft` milik sendiri | tidak | tidak | ya |
-| `release` / `rollback` | tidak | tidak | ya, bukan penulis draft |
-| `yank` | tidak | tidak | ya |
-| Hapus record | tidak | tidak | tidak (tidak ada delete rule) |
-| Ubah skema | tidak | tidak | izin manusia |
+| Aksi | `view` | `incident_*` | `admin` (sesi pribadi) | `tool_releaser` (**menunggu keputusan manusia**) | Akun agent (**menunggu keputusan manusia**) |
+|---|---|---|---|---|---|
+| `ls`, `show`, jalankan `released` dan `active` | ya | ya | ya | ya | ya |
+| Baca `body` draft | tidak | tidak | ya | ya (bukan penulis) | penulisnya saja |
+| Buat draft | tidak | tidak | ya | ya | ya, **hanya draft** |
+| `release`, `rollback`, `yank`, `deprecate` | tidak | tidak | ya, bukan penulis draft | ya, bukan penulis draft | tidak |
+| Ubah `state` langsung lewat API | tidak | tidak | tidak | tidak | tidak |
 
-Akibat pemetaan ini:
+Catatan:
+- Sampai `tool_releaser` ada dan ada akun pribadi, rilis dinonaktifkan. Tidak ada jalur rilis lewat token bersama.
+- `admin` pada tabel ini berarti akun admin pribadi milik manusia. Token admin bersama tidak masuk tabel.
+- Pemeriksaan peran dilakukan di hook dengan `e.auth.role`, bukan hanya di rule.
 
-- Aturan dua orang (penulis ≠ perilis) hanya bisa dipenuhi bila ada dua akun `admin`. Peran `incident_*` tidak bisa merilis.
-- Peran `incident_*` tidak punya hak menulis tool. Ini membatasi siapa yang bisa mengubah isi tool, tetapi juga berarti pemilik insiden tidak bisa ikut merawat tool.
-- Opsi yang ditunda (keputusan manusia): menambah peran khusus `tool_releaser` (atau sejenisnya) ke `devops_users.role`. Ini perubahan skema produksi dan butuh izin manusia.
+### 3.5 Klien tidak menulis langsung
 
-Rule PB (usulan bentuk, belum final):
+- `createRule`, `updateRule`, dan `deleteRule` untuk `cli_tools`, `cli_tool_versions`, dan `cli_tool_audit` adalah kosong (tidak bisa diakses klien).
+- Penulisan lewat route kustom (`/api/bq/bin/publish`, `/api/bq/bin/release`, `/api/bq/bin/rollback`, `/api/bq/bin/yank`, `/api/bq/bin/deprecate`). Setiap route:
+  1. memeriksa `e.auth` dan peran;
+  2. mengabaikan `author`, `releaser`, `state`, `released_at` dari body;
+  3. memvalidasi manifest, sha256, ukuran, dan (untuk rilis) tanda tangan;
+  4. menulis dengan `$app` dan menambah baris `cli_tool_audit`.
+- `listRule`: `cli_tools` `active = true` untuk pengguna terautentikasi. `cli_tool_versions` `state = "released"`, atau draft untuk penulis dan perilis. Body draft tidak bisa dibaca oleh peran lain.
 
-- `listRule` `cli_tools`: `active = true && @request.auth.id != ""`
-- `listRule` `cli_tool_versions`: `state = "released" || author = @request.auth.id || @request.auth.role = "admin"`
-- `updateRule` `cli_tool_versions`: `state = "draft" && author = @request.auth.id`
-- `deleteRule`: kosong (none).
-- Pemeriksaan `releaser != author` dijalankan di hook server (`onRecordUpdate`), bukan hanya di rule, karena rule PB tidak membandingkan dua field relasi yang berbeda pada satu update.
+### 3.6 `cli_tool_audit` (ditulis hook saja)
+
+Setiap publish, release, rollback, yank, deprecate, dan penolakan tercatat: `action`, `tool`, `version`, `actor` (dari `e.auth.id`), `actor_role`, `result` (ok, atau alasan tolak), `ip`, `at`. Tidak bisa diubah dan tidak bisa dihapus.
 
 ---
 
@@ -202,139 +213,167 @@ Rule PB (usulan bentuk, belum final):
 
 ### 4.1 Alur `bq bin <cmd> args...`
 
-1. Cek login (`requires_login`). Tanpa login, berhenti dengan pesan `bq auth login`.
-2. Muat indeks lokal `~/.build-q/bin/tools/index.json` (nama → versi aktif, sha256, status, `fetched_at`).
-3. Ambil katalog dari PB bila `fetched_at` lebih tua dari TTL katalog (default 1 jam). Gagal ambil PB: lanjut ke langkah 4.
-4. Tentukan versi yang akan dipakai, lalu cek status:
-   - `yanked` → tolak (exit 121), walau ada di cache.
-   - `deprecated` → jalankan, cetak peringatan dengan `replacement`.
-   - tidak ditemukan → exit 120.
-5. Cek cache: `~/.build-q/bin/tools/<name>/<version>/body`. Hitung sha256 dan bandingkan dengan `sha256` (dari indeks, yang diambil dari PB). Tidak cocok → hapus entri cache, ambil ulang dari PB. Tetap tidak cocok → exit 122.
-6. Verifikasi tanda tangan (bila keputusan 1 disetujui). Gagal → exit 122.
-7. Kumpulkan env: hanya nama dalam `env_required`. Nilai diambil dari `pb_api.fetch_secrets` (sudah tersedia di cache `.pb-cache.json`). Nama yang tidak ada → exit 124 dan tampilkan nama saja.
-8. Buat direktori kerja sementara `~/.build-q/run/<random>` dengan mode `700`. Tulis `body` ke `run.<ext>` dengan mode `700`, bukan `eval`.
-9. Jalankan proses anak:
-   - bash: `/bin/bash <file> <args...>`
-   - python: `python3 -I <file> <args...>`
-   Argumen dikirim sebagai daftar argv (`subprocess.run([...], shell=False)`). Environment dimulai dari kosong, hanya ditambah `PATH` minimal (`/usr/bin:/bin:/usr/sbin:/sbin`), `HOME`, `LANG`, dan env yang dideklarasikan. Stdin, stdout, dan stderr diteruskan langsung (tanpa buffer), termasuk TTY.
-10. Hapus direktori kerja di `finally`, termasuk saat proses dihentikan dengan Ctrl-C (signal ditangani dan diteruskan ke proses anak).
+1. Cek login pribadi (`requires_login`). Token bersama atau fallback superuser ditolak (P0-b).
+2. Muat indeks lokal `~/.build-q/bin/tools/index.json`. Indeks hanya berisi nama, versi aktif, sha256, id kunci, dan waktu ambil. Tidak ada nilai rahasia.
+3. Ambil katalog dari PB bila indeks lebih tua dari TTL katalog (1 jam). Gagal ambil: lanjut ke 4.6.
+4. Tentukan versi dan cek status: `yanked` ditolak (121), `deprecated` jalan dengan peringatan.
+5. Ambil `manifest.json` dan `body` dari cache atau PB.
+6. **Verifikasi:** hitung sha256 body dan bandingkan dengan manifest. Verifikasi tanda tangan manifest dengan kunci publik yang dipin di `bq` (4.5). Gagal di salah satunya: exit 122, cache entri dihapus. Verifikasi ulang dilakukan setiap jalan, termasuk dari cache.
+7. Tentukan env: hanya nama dalam `env_required` dari manifest yang sudah diverifikasi. Nilai diambil oleh `bq` dari PB (P0-a, tanpa cache), hanya untuk nama itu. Nama yang tidak ada: exit 124, nama ditampilkan, nilai tidak.
+8. Siapkan sandbox (4.2): direktori kerja sementara `~/.build-q/run/<random>` mode 700, `HOME` baru dan kosong di dalamnya.
+9. Tulis body ke `run.<ext>` mode 700 dari byte yang sudah diverifikasi di memori, lalu jalankan di bawah sandbox.
+10. Hapus direktori kerja di `finally`, termasuk saat Ctrl-C (signal diteruskan ke proses anak).
 11. Exit dengan exit code anak.
 
-### 4.2 Perilaku offline
+### 4.2 Sandbox OS untuk proses tool (KRITIS 1)
 
-| Kondisi | Perilaku |
-|---|---|
-| PB terjangkau | Ambil katalog, perbarui indeks, lalu jalankan. |
-| PB tidak terjangkau, indeks ada dan `fetched_at` < `OFFLINE_MAX_AGE` (usulan 72 jam) | Jalankan dari cache. Cetak peringatan `sumber: stale-cache`. |
-| PB tidak terjangkau, indeks lebih tua dari `OFFLINE_MAX_AGE` | Tolak (exit 123). Pesan menyebut usia cache. |
-| PB tidak terjangkau, cache tool tidak ada | Tolak (exit 123). |
+Setiap proses tool dijalankan dengan `sandbox-exec` (macOS) memakai profil berikut:
 
-Dalam mode offline, tool yang sudah di-yank di PB tidak bisa diketahui. Batas 72 jam membatasi jendela itu. Ini diputuskan di bagian 10 (keputusan 4).
+- `(deny default)`. Yang diizinkan hanya:
+  - baca dan eksekusi interpreter (`/bin/bash`, `python3` dari path sistem) dan pustaka sistem yang diperlukan;
+  - baca dan tulis di direktori kerja sementara;
+  - baca dan tulis di pipe stdin, stdout, stderr.
+- **Tidak boleh dibaca:** `~/.build-q`, `~/.claude`, `~/.ssh`, `~/.kube`, `~/.config`, `~/.agents`, `~/.pi`, dan seluruh `HOME` asli. `HOME` yang dilihat tool adalah direktori kosong sementara.
+- **Eksekusi:** hanya interpreter yang sudah ditentukan. `exec` proses lain ditolak, sehingga tool tidak bisa memanggil `bq` lagi (rekursi juga ditolak lewat `BQ_BIN_DEPTH`).
+- **Network:** tier `read` ditolak seluruhnya. Tier `external` ditolak kecuali ke host yang didaftarkan di manifest (keputusan manusia, bagian 10, butir 5).
+- Bila `sandbox-exec` tidak ada atau gagal dimuat, `bq` menolak menjalankan tool (exit 125). Tidak ada jalur tanpa sandbox.
+- Catatan: `sandbox-exec` sudah ditandai usang oleh Apple, tetapi masih ada di macOS saat ini. Rencana jangka panjang: pindah ke mekanisme yang didukung, dan Linux memakai `bwrap`. Dicatat sebagai risiko residual (bagian 9).
 
-### 4.3 Verifikasi integritas dan file sementara
+Tes wajib (bagian 7): tool gema yang mencoba membaca `~/.build-q/auth.json` harus gagal. Tool yang mencoba `curl` ke host di luar daftar harus gagal.
 
-- Hash dihitung pada byte yang ditulis ke file sementara, bukan pada file yang sudah ada di disk. Dua langkah (hitung lalu baca ulang file) menyisakan jendela race. Dengan menulis byte yang sudah diverifikasi dari memori ke file yang baru dibuat (`O_EXCL`, mode `0700`), jendela itu hilang.
-- Race dengan proses lain pada akun yang sama tetap ada. Ini risiko residual: pada mesin dengan akun yang sama, proses lain sudah bisa membaca `~/.build-q` (kredensial ada di sana juga). Dicatat di threat model (bagian 9).
-- Cache tool: `~/.build-q/bin/tools/`, direktori `0700`, berkas `0600`. Cache tidak pernah menyimpan rahasia.
-- Nama `docker-buildx` di `~/.build-q/bin/` tidak masuk `tools/`. Nama tool yang bentrok dengan berkas di `~/.build-q/bin/` ditolak saat publish.
+### 4.3 Tool tidak menerima token
 
-### 4.4 Rahasia
+- Env proses anak dibangun dari kosong. Yang masuk: `PATH` minimal (`/usr/bin:/bin:/usr/sbin:/sbin`), `LANG`, `HOME` sementara, `BQ_BIN_DEPTH=1`, dan nilai env yang dideklarasikan.
+- Tidak ada `GITHUB_TOKEN`, `PB_*`, `auth.json`, atau token apa pun yang tidak dideklarasikan.
+- Tool tidak bisa memanggil PB. Tool yang butuh data dari PB harus melewati argumen atau env yang sudah disiapkan `bq`.
+- Tool yang menerima rahasia tetap bisa membocorkannya lewat network yang diizinkan. Risiko ini dicatat di bagian 9 dan dibatasi oleh tinjauan isi saat rilis (env yang dideklarasikan ada di manifest bertanda tangan) dan oleh aturan network per tier.
 
-- Rahasia tidak pernah disimpan di `cli_tools`, `cli_tool_versions`, argumen, atau cache.
-- Nilai env hanya ada di memori `bq` dan env proses anak.
-- `--dry-run`, `show`, dan log hanya menampilkan **nama** env.
-- Peringatan: argumen yang berisi rahasia (mis. `--token xyz`) akan terlihat di `ps`. Dokumentasi pengguna meminta rahasia lewat env, bukan argumen. `bq` tidak mencoba mendeteksi ini.
+### 4.4 Cache tanpa nilai rahasia (KRITIS 1)
 
-### 4.5 Kenapa tidak `eval`
+- `~/.build-q/bin/tools/index.json`: nama, versi, sha256, `signer_key_id`, `fetched_at`.
+- `~/.build-q/bin/tools/<name>/<version>/manifest.json` dan `body`, mode 600 di dalam direktori mode 700.
+- Tidak ada nilai rahasia di cache, termasuk di `.pb-cache.json` (P0-a). Nilai rahasia hanya di memori, selama satu proses.
+- Cache hanya berisi versi `released`. Versi `yanked` dihapus dari cache saat terdeteksi.
 
-Isi tool tidak pernah dikonkatenasi ke shell `bq`. Tool dijalankan sebagai file dengan interpreter tetap, dan argumen masuk sebagai argv. Dengan begitu, argumen seperti `$(rm -rf ~)` atau `; curl ...` tampil sebagai teks literal dan tidak dieksekusi oleh `bq`. Tes wajib memverifikasi ini (bagian 7).
+### 4.5 Kunci penandatanganan (TINGGI 4)
+
+- **Kunci privat:** satu pasang Ed25519 per perilis manusia. Kunci privat disimpan di keychain OS (macOS Keychain) atau perangkat keras. Tidak pernah di PB, tidak di repo, tidak di `~/.build-q` sebagai berkas teks.
+- **Kunci publik:** daftar kunci publik perilis dipin di `bq` (berkas `build_q/keys/bin-release-keys.json` dengan `key_id`, nama perilis, kunci publik, dan `valid_from`/`revoked_at`). Mengubah daftar ini berarti rilis `bq`.
+- **Penandatanganan:** hanya di laptop perilis, saat `bq bin release`. Server memverifikasi ulang dengan kunci publik yang terdaftar di hook, dan menolak bila tidak cocok.
+- **Tanpa tanda tangan valid, tool tidak jalan.** Tidak ada mode opsional.
+- **Rotasi dan pencabutan:** `revoked_at` mencabut kunci. Versi yang ditandatangani kunci yang dicabut berubah ke `yanked` lewat hook. Prosedur rotasi perlu keputusan manusia (bagian 10).
+
+### 4.6 Perilaku offline (SEDANG 7)
+
+| Kondisi | Tier `read` | Tier `external` |
+|---|---|---|
+| PB terjangkau | ambil katalog, jalan | ambil katalog, jalan |
+| PB tidak terjangkau, cache < 72 jam (read) atau < 24 jam (external) | jalan dari cache, peringatan `stale-cache` | sama |
+| PB tidak terjangkau, cache lebih tua | exit 123 | exit 123 |
+| PB tidak terjangkau, tanpa cache | exit 123 | exit 123 |
+
+Tier diambil dari manifest yang sudah diverifikasi, bukan dari indeks. Tier `external` tidak punya jendela offline lebih dari 24 jam, karena yank tidak bisa diketahui selama offline.
+
+### 4.7 Pemeriksaan argumen dan token (SEDANG 6)
+
+- `--dry-run` dan eksekusi menolak argumen yang cocok pola token umum (mis. `ghp_`, `xox`, `AKIA`, `eyJ` yang panjang, atau nama flag `--token`, `--password`, `--secret`). Pola daftar di `bq`, bukan di PB.
+- Penolakan ini sekadar pagar. Pengguna tetap harus memberi rahasia lewat env. Argumen tetap terlihat di `ps` bila lolos pemeriksaan.
+
+### 4.8 Verifikasi integritas dan file sementara
+
+- Byte body diverifikasi di memori, lalu ditulis ke file baru (`O_EXCL`, mode 700) dalam direktori mode 700. Tidak ada jendela baca ulang.
+- Sandbox melindungi dari proses lain di akun yang sama yang mencoba membaca direktori `bq`. Proses lain yang bisa menulis ke `run/` di dalam sandbox tidak bisa memengaruhi isi yang sudah diverifikasi di memori.
+
+### 4.9 Kenapa tidak `eval`
+
+Body tidak pernah dikonkatenasi ke shell. Tool dijalankan sebagai berkas dengan interpreter tetap. Argumen masuk sebagai argv. Tes wajib membuktikan `$(...)`, backtick, dan `;` tampil literal.
 
 ---
 
 ## 5. Alur maintenance
 
-### 5.1 Terbitkan tool baru
+### 5.1 Publish (draft)
 
-1. Penulis: `bq bin publish ./tool.sh --name ... --version 0.1.0 --changelog "..."`. `bq` membuat `cli_tools` (jika belum ada) dan `cli_tool_versions` dengan `state = draft`, menghitung sha256, dan memeriksa ukuran dan nama.
-2. Penulis mengajukan review (pada tiket atau PR), biasanya di repo `build-q` untuk tool yang disimpan juga di Git. Sumber kebenaran isi tool tetap di Git bila ada; PB adalah distribusi.
-3. Perilis (bukan penulis) memeriksa diff isi dan argumen, lalu `bq bin release <cmd> 0.1.0`. `current_version` diisi.
+1. Penulis (akun pribadi atau akun agent, bila disetujui) memanggil `bq bin publish`. Route membuat `cli_tools` (jika baru) dan `cli_tool_versions` dengan `state = draft`. Hook mengisi `author` dari `e.auth.id`.
+2. Draft tidak bisa dijalankan oleh siapa pun kecuali penulis untuk uji lokal (`bq bin --draft`, lihat 5.5).
+3. Penulis membuka tiket atau PR untuk review isi.
 
-### 5.2 Perbarui tool
+### 5.2 Release (hanya perilis manusia)
 
-Selalu versi baru: `publish` dengan versi yang lebih tinggi. Versi lama tetap `released` dan bisa dijalankan dengan `bq bin --version <v> <cmd> args...` (flag ini termasuk di bagian 2.1).
+1. Perilis dengan sesi pribadi menjalankan `bq bin release <cmd> <versi>`.
+2. `bq` mengambil draft dan menampilkan manifest yang akan ditandatangani, termasuk diff body dan daftar env dan network.
+3. Perilis mengonfirmasi. `bq` menandatangani manifest dengan kunci keychain perilis.
+4. `bq` mengirim tanda tangan ke route release.
+5. Hook memeriksa: `e.auth.role` adalah `tool_releaser` (atau `admin` pribadi, selama keputusan belum ada), `e.auth.id != author`, sha256 cocok, tanda tangan valid dengan kunci terdaftar milik `e.auth.id`, dan state adalah `draft`.
+6. Hook menulis `state = released`, `releaser = e.auth.id`, dan `released_at`, lalu menulis audit.
 
-### 5.3 Rollback
+Hanya hook yang mengubah state ke `released` (TINGGI 5).
 
-`bq bin rollback <cmd> <versi-sebelumnya>` memindahkan `current_version`. Syarat: versi tujuan `released` dan tidak `yanked`. Rollback tidak mengubah isi versi apa pun.
+### 5.3 Update = versi baru
 
-### 5.4 Yank (darurat)
+Versi lama tetap `released` dan bisa dijalankan dengan `--version`.
 
-`bq bin yank <cmd> <versi>` mengubah `state` menjadi `yanked` dan mewajibkan alasan. Jika versi itu adalah `current_version`, pemilihan versi aktif mundur ke versi `released` terbaru yang tidak di-yank. Tool yang tidak punya versi tersisa berubah ke `status = deprecated`. Yank berlaku di semua klien setelah indeks diperbarui (maks. TTL katalog, atau langsung bila klien online).
+### 5.4 Rollback dan yank
 
-### 5.5 Deprecate
+- `rollback`: target harus `released` dan tidak `yanked`. Hook memindahkan `current_version`. Tanda tangan target sudah ada, jadi tidak perlu tanda tangan baru.
+- `yank`: hook mengubah `state` ke `yanked`, mewajibkan alasan, dan memindahkan `current_version` ke versi `released` terbaru yang tidak di-yank. Bila tidak ada, `status` tool menjadi `deprecated` tanpa versi aktif.
+- Yank berlaku pada klien saat indeks diperbarui. Pada tier `external`, jendela 24 jam menjadi batas paparan.
 
-`status = deprecated` dengan `replacement`. Tool tetap berjalan dengan peringatan. Penghapusan total tidak dilakukan lewat `bq`; hanya `active = false` yang menyembunyikan tool dari `ls`.
+### 5.5 Uji draft lokal
+
+`bq bin --draft <cmd>` menjalankan draft milik penulis yang sedang login, di sandbox yang sama. Tidak bisa dipakai untuk versi `released`. Peringatan selalu tercetak. Draft tidak masuk cache.
+
+### 5.6 Deprecate
+
+Perilis mengubah `status` ke `deprecated` dengan `replacement`. Tool tetap jalan dengan peringatan.
 
 ---
 
 ## 6. Inventaris dan migrasi
 
-### 6.1 Klasifikasi (usulan, per skrip)
-
-| Kelompok | Contoh | Risiko | Fase migrasi |
+| Kelompok | Contoh | Risiko | Fase |
 |---|---|---|---|
-| A. Baca saja, tanpa rahasia, tanpa path mesin | `k8s-latest-tag`, `check-pod-ip`, `svc-endpoints-audit` (mode read) | read | Fase 3 |
-| B. Baca saja dengan token GitHub/Docker | `gh-latest-tag`, `gh-check-lang`, `tag-match`, `gitops-match-gh-latest-tag`, `image-ready` | read, open-world | Fase 3 |
-| C. Ubah cluster atau GitOps | `set-image`, `k8s-scale-active-deploys`, `gitops-audit --apply-*`, `gh-k8s-dump`, `apply-file-config` | external | Fase 4, dengan review dan release dua orang |
-| D. Menyentuh rahasia atau SOPS | `k8s-secret`, `sops-*`, `source_auth.py`, `gh-fetch-secret`, `get-file-secret`, `argocd-app token-set` | local/external, sensitif | Tetap lokal. Tidak dimigrasi di v1 |
-| E. Bootstrap dan init repo | `cicd-init*`, `k8s-init-*`, `init-master`, `bootstrap-app` | external | Fase 4, bila sudah ada kebutuhan |
-| F. Biner | `docker-buildx` | — | Tetap lokal (keputusan 2) |
+| A. Baca saja, tanpa rahasia | `k8s-latest-tag`, `check-pod-ip`, `svc-endpoints-audit` (mode read) | read | Fase 3 |
+| B. Baca dengan token (GitHub, Docker) | `gh-latest-tag`, `gh-check-lang`, `tag-match`, `gitops-match-gh-latest-tag`, `image-ready` | read, open-world | Fase 3, setelah P0 dan network per tier |
+| C. Ubah cluster atau GitOps | `set-image`, `k8s-scale-active-deploys`, `gitops-audit --apply-*`, `gh-k8s-dump`, `apply-file-config` | external | Fase 4, review per tool |
+| D. Rahasia atau SOPS | `k8s-secret`, `sops-*`, `source_auth.py`, `gh-fetch-secret`, `get-file-secret`, `argocd-app token-set` | sensitif | Tetap lokal. Tidak dimigrasi di v2 |
+| E. Bootstrap dan init | `cicd-init*`, `k8s-init-*`, `init-master`, `bootstrap-app` | external | Fase 4, bila ada kebutuhan |
+| F. Biner | `docker-buildx` | — | Tetap lokal |
 
-Menurut inventaris, sekitar 25 dari 66 skrip menyebut kata seperti TOKEN, SECRET, atau PASSWORD. Kebanyakan adalah nama env, bukan nilai, tetapi wajib diaudit sebelum migrasi, termasuk memastikan tidak ada nilai yang tertanam.
-
-### 6.2 Langkah migrasi per skrip
-
-1. Hapus path mesin (`~/.pi/`, `~/.agents/`), ganti dengan env yang dideklarasikan.
-2. Ganti pemanggilan ke skrip lain dengan `bq bin <cmd>` (atau dengan fungsi internal bila ringan).
-3. Isi `args_spec`, `env_required`, `requires`.
-4. Jalankan `shellcheck` (bash) atau `ruff` (python) dan tes lokal dengan `--dry-run`.
-5. Publish sebagai draft, release oleh perilis, lalu hapus salinan di skill `devops-bin` dalam satu PR terpisah (mengikuti pola skill-convert bila perlu).
-
-### 6.3 Kompatibilitas
-
-Selama masa transisi, skill `devops-bin` tetap memanggil path lama. Skrip lama tidak dihapus sampai `bq bin` versi yang sama terbukti di dua siklus rilis. Bila ada masalah, skrip lama masih bisa dipakai.
+Langkah migrasi per skrip: hapus path mesin (`~/.pi`, `~/.agents`), ganti rahasia dari file dengan env yang dideklarasikan, ganti panggilan ke skrip lain dengan `bq bin`, isi `args_spec`, `env_required`, `requires`, `runtime`, `tier` di manifest, jalankan `shellcheck` atau `ruff`, dan publish sebagai draft. Salinan di `devops-bin` dihapus hanya setelah dua siklus rilis berjalan tanpa masalah.
 
 ---
 
 ## 7. Rencana tes
 
-Unit (offline, tanpa PB):
+Uji di **PocketBase lokal** (bukan staging, karena staging belum ada; instance lokal dari DevOps di port 8193 ke atas, bukan 8192 kecuali DevOps menyetujui). Data uji berawalan `TEST-` atau `UJI-BIN-` dan dihapus oleh DevOps. Tidak ada uji di produksi.
 
-- Hash mismatch di cache → cache dihapus dan diambil ulang; hash tetap tidak cocok → exit 122.
-- Versi `yanked` → exit 121, walau ada di cache.
-- `deprecated` → jalan, ada peringatan di stderr.
-- Env wajib tidak ada → exit 124, nama disebut, nilai tidak pernah tercetak.
-- Argumen berisi `$(...)`, backtick, `;`, dan spasi → diteruskan literal (uji dengan tool gema yang menulis argv).
-- Exit code anak `0`, `1`, `42`, `130` diteruskan tanpa berubah.
-- Mode file dan direktori (`700`/`600`) sesuai.
+Keamanan (wajib lulus sebelum fase 2):
+
+- Tool gema yang membaca `~/.build-q/auth.json` gagal di sandbox.
+- Tool gema yang membaca `~/.build-q/.pb-cache.json` atau `.env` gagal.
+- Env anak tidak berisi `GITHUB_TOKEN`, `PB_*`, atau nilai apa pun yang tidak dideklarasikan (diperiksa dengan `env` di dalam tool).
+- `curl` ke host di luar daftar gagal (tier `read` semua gagal).
+- Cache tidak memuat nilai rahasia (`grep` nilai uji di seluruh `~/.build-q` setelah jalan: nol).
+- Manifest diubah (mis. `env_required` ditambah `SECRET_X`) tanpa tanda tangan baru: ditolak, exit 122.
+- Body diubah tanpa mengubah sha256: ditolak.
+- Tanda tangan dengan kunci yang dicabut: ditolak.
+- `state` diubah ke `released` lewat API langsung oleh penulis: 403.
+- Penulis merilis draft miliknya sendiri, atau mengirim `releaser` atau `author` di body: ditolak atau diabaikan (nilai dari `e.auth`).
+- Token bersama di jalur `release`: ditolak oleh `bq`.
+- Akun agent mencoba `release`: ditolak.
+- `--dry-run` tidak menjalankan tool (tool menulis penanda, penanda tidak ada) dan tidak menampilkan nilai env.
+- Argumen `$(...)`, backtick, `;`, dan token uji (`ghp_...`) diperlakukan literal, dan token ditolak oleh pemeriksaan pola.
+- Rekursi: tool yang memanggil `bq bin` ditolak.
+- Offline: tier `read` jalan sampai 72 jam, `external` sampai 24 jam, lebih dari itu exit 123.
+- Biner tidak bisa dipublish (ditolak oleh route).
+
+Fungsional:
+
+- Publish → draft → release (perilis berbeda) → jalankan → rollback → yank.
+- Exit code tool `0`, `1`, `42`, `130` diteruskan.
+- Mode file dan direktori 700/600.
 - File sementara terhapus saat sukses, gagal, dan Ctrl-C.
-- `--dry-run` tidak menjalankan tool (dibuktikan dengan tool yang menulis file penanda) dan tidak mencetak nilai env.
-- Offline: di dalam batas 72 jam → jalan; di luar → exit 123.
-
-Integrasi (PB staging, bukan produksi):
-
-- Alur publish → draft → release oleh akun berbeda → jalankan → rollback → yank.
-- Penulis tidak bisa release draft miliknya sendiri (dijaga di hook dan dicek lewat API).
-- Versi `released` tidak bisa di-update isinya (403 dari PB).
-- Akun `viewer` tidak bisa melihat `draft`.
-
-Keamanan (diminta Boss setelah PRD, lihat bagian 9):
-
-- Body yang diubah tanpa mengubah sha256 → ditolak.
-- Tanda tangan salah atau kunci lain → ditolak (bila keputusan 1 disetujui).
-- Percobaan injeksi lewat nama tool, argumen, dan changelog.
-
-Catatan data uji: data uji diberi awalan `TEST-` atau `UJI-BIN-`, dibuat di PB staging atau instance lokal yang disediakan DevOps (port 8193 ke atas), dan dihapus oleh DevOps. Tidak ada record uji di produksi.
 
 ---
 
@@ -342,54 +381,72 @@ Catatan data uji: data uji diberi awalan `TEST-` atau `UJI-BIN-`, dibuat di PB s
 
 | Fase | Isi | Gerbang keluar |
 |---|---|---|
-| 0. PRD | Dokumen ini, review, keputusan manusia | Keputusan 1–5 disetujui |
-| 1. Staging | DevOps membuat `cli_tools`, `cli_tool_versions` di staging. Hook dan rule diuji | Tes integrasi lulus |
-| 2. CLI baca | `bq bin ls`, `show`, `--dry-run`, eksekusi tool `released` di staging | Tes unit dan keamanan lulus, Security review |
-| 3. Publish dan rilis | `publish`, `release`, `rollback`, `yank`. Migrasi kelompok A dan B | Dua orang sudah mencoba alur rilis, tidak ada insiden |
-| 4. Kelompok C dan E | Migrasi aksi yang mengubah cluster dan repo, dengan review wajib | Review per tool oleh DevOps dan Security |
-| 5. Produksi | Pembuatan collection di produksi **hanya** setelah izin manusia. Lalu hapus salinan di `devops-bin` | Izin manusia tertulis |
-
-Kelompok D tidak masuk fase mana pun sampai ada desain terpisah untuk rahasia.
+| 0. P0 dan prasyarat | P0-a, P0-b, P0-c (akun pribadi dan akun agent), peran (`tool_releaser`, peran agent), kunci perilis di keychain. Semua menunggu keputusan manusia bila belum disetujui | P0 selesai, Security setuju |
+| 1. PocketBase lokal | Schema, hook, route, `cli_tool_audit`, uji keamanan bagian 7 | Semua uji keamanan lulus, Security review ulang |
+| 2. CLI baca dan draft | `ls`, `show`, `--dry-run`, eksekusi `released` di sandbox, `publish`, `--draft` | Tes fungsional lulus |
+| 3. Rilis | `release`, `rollback`, `yank`, `deprecate` dengan dua perilis berbeda di PB lokal. Migrasi A dan B | Dua orang sudah mencoba alur, tidak ada insiden |
+| 4. Kelompok C dan E | Migrasi aksi yang mengubah cluster dan repo, dengan review per tool | Review DevOps dan Security per tool |
+| 5. Produksi | Pembuatan collection dan route di produksi **hanya** setelah izin tertulis dari manusia, dan Security PASS | Izin tertulis |
 
 ---
 
-## 9. Threat model (ringkas, untuk review Security)
+## 9. Threat model (v2)
 
-Aset: laptop engineer yang menjalankan `bq bin`, kredensial di `~/.build-q` dan `secrets`, serta cluster dan repo yang bisa diubah tool.
+Aset: laptop perilis dan engineer, kredensial di `~/.build-q`, token PB, cluster dan repo yang bisa diubah tool.
 
-| Ancaman | Dampak | Kontrol |
+| Ancaman | Kontrol v2 | Risiko residual |
 |---|---|---|
-| Penulis jahat atau akun penulis yang diambil alih menerbitkan tool berbahaya | Eksekusi kode di semua laptop | Rilis dua orang (penulis ≠ perilis). Tanda tangan di luar PB (keputusan 1). Kebijakan rilis dan audit log. Yank cepat. |
-| Akses tulis langsung ke record PB lewat API (lewati hook) | Sama seperti di atas | Rule `updateRule` hanya untuk draft. Rilis lewat hook yang memeriksa sha256 dan tanda tangan. Tanda tangan dicek di klien, jadi perubahan DB tanpa kunci tidak lolos. |
-| Pengubahan isi tool setelah rilis | Tool berubah diam-diam | Versi `released` immutable. Cek sha256 setiap jalan. |
-| Injeksi shell lewat argumen | Eksekusi perintah tak terduga | Tanpa `eval`. Argv terpisah. Interpreter tetap. |
-| Kebocoran rahasia lewat cache, log, atau argumen | Kredensial bocor | Rahasia tidak pernah di cache atau katalog. Dry-run dan log hanya nama. Dokumentasi: rahasia lewat env. |
-| Race pada file sementara | Tool diganti di antara tulis dan eksekusi | Byte ditulis dari memori, file baru `O_EXCL`, mode `0700`, direktori `0700`. Risiko residual dicatat. |
-| Cache tampil setelah yank (offline) | Tool yang sudah ditarik masih jalan | Batas offline 72 jam (keputusan 4). Yank yang darurat perlu komunikasi di luar bq. |
-| Penyerang lokal pada akun yang sama | Sudah di luar jangkauan bq | Di luar cakupan. Dicatat. |
-| Peningkatan hak lewat peran | Viewer bisa merilis | Pemeriksaan peran di rule dan hook. Peta peran perlu dikonfirmasi DevOps. |
-
-Pertanyaan untuk Security: (a) apakah Ed25519 dengan kunci di luar PB cukup, atau perlu alur kunci yang lebih ketat; (b) apakah audit log per rilis harus disimpan di collection terpisah; (c) apakah batas 72 jam offline dapat diterima.
+| Tool jahat membaca kredensial dari `~/.build-q` | Sandbox OS, `HOME` kosong, tanpa token (4.2, 4.3) | Sandbox macOS sudah usang. Perlu rencana pindah ke mekanisme yang didukung |
+| Tool jahat membawa rahasia yang dideklarasikan keluar lewat network | Network ditolak untuk `read`. `external` hanya host terdaftar (4.2) | Rahasia yang dideklarasikan tetap bisa bocor ke host terdaftar. Ditinjau saat rilis |
+| Penulis atau pihak tak berhak mengubah `released` lewat API | Klien tidak bisa menulis langsung (3.5). State hanya via hook (5.2) | Akun admin yang dibajak tetap bisa merilis. Diatasi dengan kunci perilis dan audit |
+| Penulis merilis sendiri | `e.auth.id != author` di hook (5.2) | Bergantung pada akun pribadi (P0-c). Token bersama tidak boleh dipakai |
+| Identitas dipalsukan lewat body | `author`, `releaser` dari `e.auth` (3.2, 3.5) | Tidak ada |
+| Manifest diubah setelah rilis (mis. env ditambah) | Manifest ditandatangani utuh (3.3), verifikasi di `bq` dan hook (4.1 langkah 6) | Tidak ada selama kunci aman |
+| Body dan indeks diubah bersama di PB | Tanda tangan wajib dan dipin di `bq`, bukan dari PB (4.5) | Kunci perilis yang bocor. Dicabut dengan `revoked_at` |
+| Kunci privat perilis dicuri | Keychain atau perangkat keras, pencabutan (4.5) | Sampai dicabut, perilis itu bisa merilis. Dicatat di audit |
+| Injeksi shell lewat argumen | Tanpa `eval`, argv terpisah (4.9) | Tidak ada |
+| Rahasia di cache, log, atau argumen | Cache tanpa nilai (4.4), dry-run hanya nama, pemeriksaan pola token (4.7) | Argumen tetap terlihat di `ps` bila lolos pemeriksaan |
+| Tool yang sudah ditarik masih jalan offline | Batas 72 jam (read) dan 24 jam (external) (4.6) | Jendela 72 jam untuk read |
+| Rekursi tool ke `bq bin` | `BQ_BIN_DEPTH` dan `exec` ditolak (4.2) | Tidak ada |
+| Race pada file sementara | Byte diverifikasi di memori, `O_EXCL`, mode 700 (4.8) | Penyerang di dalam sandbox tidak bisa mengubah isi yang sudah diverifikasi |
+| Biner tidak terverifikasi | Tidak ada biner di v2 | Tidak ada |
+| Peningkatan hak lewat peran | Pemeriksaan di hook dengan `e.auth.role` (3.4) | Peran belum ada (menunggu keputusan manusia) |
 
 ---
 
 ## 10. Keputusan untuk manusia
 
-Maksimal lima. Masing-masing dengan rekomendasi.
+Keputusan ini **menunggu keputusan manusia**. Masing-masing dengan rekomendasi. Usulan Boss dicatat sebagai pilihan yang sedang ditanyakan.
 
-1. **Tanda tangan tool.** Rekomendasi: Ed25519, kunci privat dipegang perilis (bukan di PB), kunci publik dibundel di rilis `bq`. `bq` menolak tool tanpa tanda tangan valid. Alternatif: sha256 saja, lebih sederhana tetapi tidak melindungi bila DB ditulis oleh pihak yang tidak berhak.
-2. **Biner di v1.** Rekomendasi: tidak. v1 hanya bash dan python. Biner (mis. `docker-buildx`, 65 MB) tetap lokal dan dikelola lewat jalur lain. Alternatif: menyimpan biner di file PB dengan batas ukuran (perlu cek batas upload PB dan kuota).
-3. **Aturan rilis.** Rekomendasi: dua orang wajib (penulis ≠ perilis), dijaga di hook. Alternatif: satu admin boleh rilis, lebih cepat tetapi lebih lemah.
-4. **Batas offline.** Rekomendasi: 72 jam sejak sinkronisasi terakhir, dengan peringatan tampil di setiap jalan. Alternatif: 24 jam (lebih ketat, lebih sering gagal di laptop yang sering offline).
-5. **Pembuatan collection dan kode galat.** Rekomendasi: DevOps membuat collection di staging dulu (fase 1), produksi menunggu izin manusia tertulis setelah Security review. Untuk kode galat, rekomendasi: prefiks `[bq-bin]` di stderr setiap kali exit code berasal dari `bq`, supaya tidak tertukar dengan tool.
+1. **Akun dan peran perilis.** Rekomendasi: setiap perilis punya akun PocketBase pribadi dengan peran baru `tool_releaser` (menambah nilai ke `devops_users.role`, perubahan skema produksi, butuh izin). Sampai itu ada, rilis dinonaktifkan. Alternatif: admin pribadi saja, lebih cepat tetapi lebih lemah.
+2. **Akun agent.** Rekomendasi: agent punya akun sendiri dengan peran draft-only (`tool_author`, perubahan skema juga). Agent tidak pernah merilis. Alternatif: agent tidak membuat draft sama sekali, dan manusia yang mempublish.
+3. **Kunci penandatanganan.** Rekomendasi: satu pasang Ed25519 per perilis di keychain atau perangkat keras. Kunci publik dipin di `bq` (`build_q/keys/bin-release-keys.json`), dan rotasi atau pencabutan lewat rilis `bq`. Perlu prosedur tertulis untuk rotasi dan pencabutan.
+4. **Batas offline dan network.** Rekomendasi: offline 72 jam untuk `read`, 24 jam untuk `external`. Network: `read` ditolak seluruhnya, `external` hanya host terdaftar di manifest. Alternatif: tidak ada network sama sekali untuk `external`, sehingga tool yang butuh API eksternal tidak bisa jalan lewat `bq bin`.
+5. **Sandbox dan izin produksi.** Rekomendasi: pakai `sandbox-exec` sekarang sebagai jalan awal, dengan rencana tertulis pindah ke mekanisme yang didukung. Gagal menutup sandbox berarti tool tidak jalan (exit 125), tidak ada jalur tanpa sandbox. Produksi (collection dan route) hanya setelah izin tertulis dan Security PASS.
 
 ---
 
-## 11. Yang belum dijawab
+## 11. Pertanyaan terbuka
 
-- Peran perilis tool belum ada di `devops_users.role`. Sampai ada keputusan, rilis hanya bisa dilakukan `admin`, dan aturan dua orang bergantung pada adanya dua akun admin.
-- Apakah `secrets` boleh dibaca oleh peran `view` dan `incident_*`. Saat ini `bq` membacanya dengan akun pengguna, jadi perilaku yang sudah ada tetap dipakai, tetapi perlu dikonfirmasi.
-- Apakah tool yang berjalan di mesin lain (CI) perlu jalur yang sama. Di luar cakupan PRD ini.
-- Revisi besar menunggu hasil review Security atas threat model (bagian 9).
+- Peran dan field di `devops_users` yang menentukan siapa perilis. Akses RnD hanya bisa membaca record (schema 403), jadi konfirmasi DevOps diperlukan.
+- Apakah `secrets` bisa dibaca oleh akun non-admin. Berpengaruh pada P0-b.
+- Format dan lokasi pemasangan kunci publik di `bq` untuk rilis awal.
+- Apakah tool yang jalan di CI perlu jalur yang sama. Di luar cakupan.
+- Revisi besar lanjutan menunggu review ulang Security.
+
+## 12. Temuan Security → perbaikan
+
+| Temuan (review v1) | Perbaikan di v2 |
+|---|---|
+| KRITIS 1: tool membaca `~/.build-q` (auth, cache rahasia, `.env`) | Sandbox OS dan `HOME` kosong (4.2); tool tidak menerima token (4.3); cache tanpa nilai rahasia (4.4); P0-a, P0-b |
+| KRITIS 2: pemisahan penulis dan perilis bisa dilewati; token admin bersama | Identitas dari `e.auth` di hook (3.2, 3.5, 5.2); klien tidak menulis langsung (3.5); rilis hanya akun pribadi manusia, token bersama ditolak (2.1, 3.4, P0-c); peran `tool_releaser` menunggu keputusan (10.1) |
+| TINGGI 3: `env_required`, `tier`, `requires`, `runtime` di `cli_tools` tanpa perlindungan | Dipindah ke `cli_tool_versions` (3.1, 3.2); masuk manifest bertanda tangan (3.3); verifikasi ulang tiap jalan (4.1 langkah 6) |
+| TINGGI 4: sha256 dan indeks dari sumber yang sama | Tanda tangan Ed25519 wajib atas manifest, kunci publik dipin di `bq`, kunci privat di keychain (4.5); tanpa tanda tangan valid, tool tidak jalan |
+| TINGGI 5: penulis bisa mengubah `state` ke `released` lewat API | Klien tidak bisa menulis (3.5); state hanya lewat route dan hook (5.2, 5.4) |
+| SEDANG 6: rahasia di argumen dan `ps` | Pemeriksaan pola token di `--dry-run` dan eksekusi (4.7); dicatat sebagai risiko residual (9) |
+| SEDANG 7: offline 72 jam untuk tier external | `read` 72 jam, `external` 24 jam (4.6); keputusan 4 di bagian 10 |
+| RENDAH 8: kunci privat di laptop, draft bisa dibaca, batas ukuran | Keychain atau perangkat keras dan pencabutan (4.5, 9); `listRule` draft hanya penulis dan perilis (3.5); batas 512 KB (3.2) |
+| Pendapat atas keputusan 1 sampai 5 | Keputusan 1 (tanda tangan wajib), 2 (tanpa biner), 3 (dua orang dengan akun pribadi), 4 (offline dengan syarat), 5 (staging dulu, izin tertulis) dimasukkan di bagian 10 |
+| Pertanyaan (a) sampai (c) | (a) tanda tangan dan sandbox (4.2, 4.5); (b) audit di collection terpisah yang ditulis hook (3.6); (c) 72 jam hanya untuk `read` (4.6) |
 
 Semoga dimudahkan, aamiin.
