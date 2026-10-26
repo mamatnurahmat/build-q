@@ -167,24 +167,30 @@ Aturan tambahan:
 
 Di v1, `args_spec` hanya dokumentasi. `bq` menampilkannya di `show` dan `--help`. Validasi pola argumen dilakukan oleh tool sendiri. Validasi dari `bq` ditunda (lihat bagian 10, keputusan 5 bila relevan).
 
-### 3.4 Akses per peran (usulan, perlu dikonfirmasi DevOps)
+### 3.4 Akses per peran (berdasarkan schema produksi)
 
-Peran di `devops_users` belum diketahui persis. Yang terbaca: rule pembuatan mensyaratkan `role=view` untuk pengguna baru. Peran di bawah adalah konsep, nama field-nya perlu dicocokkan dengan schema sebenarnya.
+Schema produksi `devops_users.role` adalah select dengan `maxSelect: 1` dan nilai `view`, `admin`, `incident_support`, `incident_owner` (dibaca Boss sebagai superuser). Belum ada peran khusus perilis tool. Karena satu pengguna hanya punya satu peran, pemetaan di bawah memakai peran yang ada. Pemetaan ini masih draft dan menunggu review Security.
 
-| Aksi | viewer | maintainer | perilis (release/rollback/yank) | admin (skema) |
-|---|---|---|---|---|
-| `ls`, `show`, jalankan tool `released` dan `active` | ya | ya | ya | ya |
-| Lihat `body` versi `draft` | tidak | penulisnya saja | ya | ya |
-| Buat tool dan draft versi | tidak | ya | ya | ya |
-| Ubah `draft` milik sendiri | tidak | penulisnya saja | ya | ya |
-| `release` / `rollback` | tidak | tidak | ya, bukan penulis draft | ya |
-| `yank` | tidak | tidak | ya | ya |
-| Hapus record | tidak | tidak | tidak | tidak (tidak ada delete rule) |
-| Ubah skema | tidak | tidak | tidak | izin manusia |
+| Aksi | `view` | `incident_support` / `incident_owner` | `admin` |
+|---|---|---|---|
+| `ls`, `show`, jalankan tool `released` dan `active` | ya | ya | ya |
+| Lihat `body` versi `draft` | tidak | penulisnya saja | ya |
+| Buat tool dan draft versi | tidak | tidak | ya |
+| Ubah `draft` milik sendiri | tidak | tidak | ya |
+| `release` / `rollback` | tidak | tidak | ya, bukan penulis draft |
+| `yank` | tidak | tidak | ya |
+| Hapus record | tidak | tidak | tidak (tidak ada delete rule) |
+| Ubah skema | tidak | tidak | izin manusia |
+
+Akibat pemetaan ini:
+
+- Aturan dua orang (penulis ≠ perilis) hanya bisa dipenuhi bila ada dua akun `admin`. Peran `incident_*` tidak bisa merilis.
+- Peran `incident_*` tidak punya hak menulis tool. Ini membatasi siapa yang bisa mengubah isi tool, tetapi juga berarti pemilik insiden tidak bisa ikut merawat tool.
+- Opsi yang ditunda (keputusan manusia): menambah peran khusus `tool_releaser` (atau sejenisnya) ke `devops_users.role`. Ini perubahan skema produksi dan butuh izin manusia.
 
 Rule PB (usulan bentuk, belum final):
 
-- `listRule` `cli_tools`: `active = true && (@request.auth.id != "")`
+- `listRule` `cli_tools`: `active = true && @request.auth.id != ""`
 - `listRule` `cli_tool_versions`: `state = "released" || author = @request.auth.id || @request.auth.role = "admin"`
 - `updateRule` `cli_tool_versions`: `state = "draft" && author = @request.auth.id`
 - `deleteRule`: kosong (none).
@@ -381,8 +387,9 @@ Maksimal lima. Masing-masing dengan rekomendasi.
 
 ## 11. Yang belum dijawab
 
-- Peran pasti di `devops_users` dan nama field-nya (akses RnD hanya bisa membaca record, schema 403).
-- Apakah `secrets` boleh dibaca oleh peran `viewer`. Saat ini `bq` membacanya dengan akun pengguna, jadi perilaku yang sudah ada tetap dipakai.
+- Peran perilis tool belum ada di `devops_users.role`. Sampai ada keputusan, rilis hanya bisa dilakukan `admin`, dan aturan dua orang bergantung pada adanya dua akun admin.
+- Apakah `secrets` boleh dibaca oleh peran `view` dan `incident_*`. Saat ini `bq` membacanya dengan akun pengguna, jadi perilaku yang sudah ada tetap dipakai, tetapi perlu dikonfirmasi.
 - Apakah tool yang berjalan di mesin lain (CI) perlu jalur yang sama. Di luar cakupan PRD ini.
+- Revisi besar menunggu hasil review Security atas threat model (bagian 9).
 
 Semoga dimudahkan, aamiin.
