@@ -6,7 +6,7 @@
 > **Target build-q:** v0.2.6+
 > **Status:** Dokumen saja. Belum ada kode, collection, atau merge. Tidak ada ronde review dokumen lagi; Security mereview kode fase 1.
 > **Riwayat:** v0.1 (`2b281bd`), v0.2 (`48d8919`, review v1 FAIL), v0.3 (review v2 PASS BERSYARAT fase 1 PB lokal, tier `external` belum lulus)
-> **Sumber review:** `security-engineer-mvkyygr4/hag-63-review.md` (review v1 dan review ulang)
+> **Sumber review:** review Security internal (v1 dan review ulang). Temuan dan perbaikannya dirangkum di bagian 12.
 > **CLI (usulan):** `bq bin ls` · `bq bin show <cmd>` · `bq bin [--version <v>] <cmd> <args...>` · `bq bin --dry-run <cmd> <args...>` · `bq bin publish|release|rollback|yank|deprecate`
 
 ---
@@ -393,7 +393,7 @@ Publish → draft → release (dua perilis berbeda, di PB lokal setelah syarat 5
 | 4. Tier external | Proxy egress localhost (13.1), lalu migrasi grup B dan C | Review DevOps dan Security per tool |
 | 5. Produksi | Collection dan route di produksi **hanya** setelah izin tertulis dari manusia dan Security PASS | Izin tertulis |
 
-Tidak ada kode fase 1 yang dibuat sebelum Boss menerima dokumen ini.
+Tidak ada kode fase 1 yang dibuat sebelum dokumen ini disetujui.
 
 ---
 
