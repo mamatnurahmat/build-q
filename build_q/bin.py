@@ -74,10 +74,12 @@ SECRET_PATTERNS = [
     ("password di argumen", re.compile(
         r"--(?:password|passwd|pass|token|secret|api-?key)(?:=|\s+)['\"]?[^\s'\"$]{6,}", re.I)),
     ("penugasan rahasia", re.compile(
-        r"^\s*(?:export\s+)?[A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASS|APIKEY|API_KEY|KEY)[A-Za-z0-9_]*"
-        r"\s*=\s*['\"]?[^\s'\"$]{8,}",
+        # Nilai yang diawali $ (referensi shell) atau < (placeholder) tidak dihitung; nilai berkutip boleh berspasi.
+        r"^\s*(?:export\s+)?[A-Za-z0-9_-]*(?:TOKEN|SECRET|PASSWORD|PASS|APIKEY|API_KEY|KEY)[A-Za-z0-9_-]*"
+        r"\s*=\s*(?:'(?![$<])[^'\n]{8,}'|\"(?![$<])[^\"\n]{8,}\"|(?![$<])[^\s'\"]{8,})",
         re.M | re.I,
     )),
+    ("penugasan PWD", re.compile(r"^\s*(?:export\s+)?PWD\s*=\s*(?!\$)(?!/)[^\s'\"]{8,}", re.M)),
 ]
 
 
@@ -96,10 +98,18 @@ def _valid_name(name: str) -> bool:
 
 
 def _system_names() -> frozenset[str]:
+    """Nama tetap, isi folder sistem, dan isi setiap folder di PATH (kecuali folder bin bq sendiri)."""
     names = set(SYSTEM_NAMES)
-    for d in SYSTEM_DIRS:
+    own = {BIN_DIR.resolve()}
+    dirs = list(SYSTEM_DIRS) + os.environ.get("PATH", "").split(os.pathsep)
+    for d in dirs:
+        if not d:
+            continue
         try:
-            names.update(os.listdir(d))
+            path = Path(d).expanduser()
+            if path.resolve() in own:
+                continue
+            names.update(os.listdir(path))
         except OSError:
             pass
     return frozenset(names)
@@ -516,11 +526,12 @@ def build_parser() -> argparse.ArgumentParser:
 def cli_main(argv: list[str]) -> int:
     args = build_parser().parse_args(argv)
     if args.pb_url:
-        try:
-            pb_api.require_secure_url(args.pb_url)
-        except PBAPIError as e:
-            _err(str(e))
-            return 1
         os.environ["PB_API_URL"] = args.pb_url.rstrip("/")
+    # Berlaku untuk --pb-url maupun PB_API_URL dari environment.
+    try:
+        pb_api.require_secure_url(_base())
+    except PBAPIError as e:
+        _err(str(e))
+        return 1
     handlers = {"ls": cmd_ls, "check": cmd_check, "pull": cmd_pull, "push": cmd_push}
     return handlers[args.cmd](args)
