@@ -105,6 +105,9 @@ def run_pr_fix(
     `failure_log`: path file log step pipeline yang gagal. Bila diisi, Jev
     mengklasifikasikan penyebabnya (lihat build_q/jev.py) dan hasilnya dicatat.
     """
+    if failure_log and not Path(failure_log).is_file():
+        print(f"❌ --failure-log tidak ditemukan: {failure_log}", file=sys.stderr)
+        return 2
     ts = time.strftime("%Y%m%d-%H%M%S")
     run_id = f"{api_repo.split('/')[-1]}-{ref.replace('/', '_')}-{ts}"
     trace = PrFixTrace(api_repo, ref, run_id)
@@ -161,6 +164,7 @@ def _run_pr_fix_impl(
     cicd, cicd_found, _ = fetch_cicd_data(api_repo, ref, cicd_path)
     if not cicd:
         print(f"   ❌ Tidak ada cicd config valid (tried: {', '.join(cicd_candidates(cicd_path))})", file=sys.stderr)
+        trace.step("fetch_cicd", "fail", tried=cicd_candidates(cicd_path))
         return 1
     print(f"   ✅ {cicd_found} — IMAGE={cicd.get('IMAGE')} PROJECT={cicd.get('PROJECT')} PORT={cicd.get('PORT')}")
     trace.step("fetch_cicd", "ok", source=cicd_found, image=cicd.get("IMAGE"), project=cicd.get("PROJECT"))
