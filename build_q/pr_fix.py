@@ -22,6 +22,8 @@ from .config import cicd_candidates, load_config, save_env_value
 from .dockerfile_checks import (
     analyze_dockerfile, format_issues_console, format_issues_markdown, has_error,
 )
+from . import jev
+from .pr_fix_trace import PrFixTrace
 
 
 def _preflight(config: Dict) -> Optional[str]:
@@ -95,6 +97,47 @@ def run_pr_fix(
     keep_workdir: bool = False,
     pr_branch: Optional[str] = None,
     legacy: bool = False,
+    failure_log: Optional[str] = None,
+) -> int:
+    """Pembungkus: mencatat jejak ke `pr_fix_runs` / `pr_fix_steps` (PocketBase + lokal)
+    lalu menjalankan alur utama `_run_pr_fix_impl`. Status akhir run ditentukan di sini.
+
+    `failure_log`: path file log step pipeline yang gagal. Bila diisi, Jev
+    mengklasifikasikan penyebabnya (lihat build_q/jev.py) dan hasilnya dicatat.
+    """
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    run_id = f"{api_repo.split('/')[-1]}-{ref.replace('/', '_')}-{ts}"
+    trace = PrFixTrace(api_repo, ref, run_id)
+    print(f"🧾 Jejak run: {trace.local_path}")
+    try:
+        rc = _run_pr_fix_impl(
+            api_repo, ref,
+            cicd_path=cicd_path, dry_run=dry_run, keep_workdir=keep_workdir,
+            pr_branch=pr_branch, legacy=legacy, failure_log=failure_log, trace=trace,
+        )
+    except Exception as e:
+        trace.step("unhandled", "fail", error=f"{type(e).__name__}: {e}"[:500])
+        trace.finish("failed")
+        raise
+    if rc != 0:
+        status = "failed"
+    else:
+        status = trace.outcome or "ok"
+    trace.finish(status)
+    return rc
+
+
+def _run_pr_fix_impl(
+    api_repo: str,
+    ref: str,
+    *,
+    cicd_path: str,
+    dry_run: bool,
+    keep_workdir: bool,
+    pr_branch: Optional[str],
+    legacy: bool,
+    failure_log: Optional[str],
+    trace: PrFixTrace,
 ) -> int:
     """`legacy=True` (`--pr-fix --init-legacy`): regenerate Makefile + compose.yaml
     pola legacy (setara `bq --init-legacy --force` di dalam clone). Dockerfile
@@ -107,7 +150,9 @@ def run_pr_fix(
     err = _preflight(config)
     if err:
         print(f"   ❌ {err}", file=sys.stderr)
+        trace.step("preflight", "fail", error=err)
         return 1
+    trace.step("preflight", "ok")
     print(f"   ✅ GITHUB_TOKEN ({len(config['github']['token'])} chars)")
     print("   ✅ WEBHOOK_TRIGGER_TOKEN")
 
@@ -118,6 +163,7 @@ def run_pr_fix(
         print(f"   ❌ Tidak ada cicd config valid (tried: {', '.join(cicd_candidates(cicd_path))})", file=sys.stderr)
         return 1
     print(f"   ✅ {cicd_found} — IMAGE={cicd.get('IMAGE')} PROJECT={cicd.get('PROJECT')} PORT={cicd.get('PORT')}")
+    trace.step("fetch_cicd", "ok", source=cicd_found, image=cicd.get("IMAGE"), project=cicd.get("PROJECT"))
 
     # Prepare workdir + clone
     ts = time.strftime("%Y%m%d-%H%M%S")
@@ -139,12 +185,39 @@ def run_pr_fix(
 
     head_sha = _sh(["git", "rev-parse", "HEAD"], cwd=str(repo_dir)).stdout.strip()
     print(f"   ↪ HEAD {head_sha[:12]}")
+    trace.set(head_sha=head_sha)
+    trace.step("clone", "ok", head=head_sha[:12])
 
     # Determine branch name
     default_prefix = "fix/init-legacy-" if legacy else config["pr_fix"]["branch_prefix"]
     branch_name = pr_branch or f"{default_prefix}{ts}"
     print(f"\n🌿 Branch: {branch_name} (dari {ref})")
     _sh(["git", "checkout", "-b", branch_name], cwd=str(repo_dir))
+    trace.set(branch=branch_name)
+    trace.step("branch", "ok", name=branch_name)
+
+    # Deteksi placeholder registry di repo (aturan code, bukan Jev).
+    # Render ulang di bawah memakai resolve_registry() sehingga nilai placeholder terganti.
+    placeholder_hits = [
+        p for p in ("Makefile", "compose.yaml")
+        if (repo_dir / p).exists() and "registry.example.com" in (repo_dir / p).read_text(errors="ignore")
+    ]
+    if placeholder_hits:
+        print(f"\n🔎 Placeholder registry.example.com ditemukan di: {', '.join(placeholder_hits)}")
+        trace.step("detect_registry_placeholder", "info", files=placeholder_hits,
+                   action="render ulang dengan resolve_registry")
+    else:
+        trace.step("detect_registry_placeholder", "ok")
+
+    # Klasifikasi penyebab kegagalan pipeline (Jev + aturan) bila log diberikan.
+    if failure_log:
+        log_text = Path(failure_log).read_text(errors="ignore")
+        verdict = jev.classify(log_text)
+        trace.set(cause=verdict.get("cause"), cause_source=verdict.get("source"),
+                  cause_confidence=verdict.get("confidence"))
+        trace.step("classify_cause", "info", **verdict)
+        print(f"\n🧠 Penyebab (source={verdict.get('source')}): {verdict.get('cause')}"
+              + (f" (confidence {verdict.get('confidence'):.2f})" if verdict.get("confidence") is not None else ""))
 
     # Render + write artifacts
     from .templates import load_template, render
@@ -193,6 +266,7 @@ def run_pr_fix(
         added, removed = _diff_lines(str(repo_dir), path_str)
         print(f"   ✏️  {path_str} (+{added}, -{removed})")
         changes.append(path_str)
+        trace.step(f"render:{path_str}", "ok", added=added, removed=removed)
 
     # ── Fase 3 cleanup: hapus artifact legacy (mis. trigger-ci.yml action) ──
     # Sekarang standar CI/CD pakai GitHub webhook cicd-hw.qoin.id/hook.
@@ -212,6 +286,8 @@ def run_pr_fix(
 
     if not changes and not removals:
         print("\n✅ Semua artifact sudah up-to-date & clean. Tidak perlu PR.")
+        trace.step("render_artifacts", "skip", reason="already up-to-date")
+        trace.outcome = "no_change"
         if not keep_workdir:
             shutil.rmtree(workdir, ignore_errors=True)
         return 0
@@ -239,9 +315,12 @@ def run_pr_fix(
     )
     total = len(changes) + len(removals)
     print(f"   ✅ {total} file ({len(changes)} regen + {len(removals)} legacy removed)")
+    trace.set(head_sha=head_sha, branch=branch_name)
+    trace.step("commit", "ok", files=changes, removed=removals)
 
     if dry_run:
         print(f"\n🔍 Dry-run: skip push, set-secret, open PR. Workdir: {repo_dir}")
+        trace.outcome = "dry_run"
         return 0
 
     # Push
@@ -251,6 +330,7 @@ def run_pr_fix(
     except subprocess.CalledProcessError as e:
         err = (e.stderr or "").strip()
         print(f"   ❌ Push gagal: {err}", file=sys.stderr)
+        trace.step("push", "fail", error=err[:500])
         if "workflow" in err and "scope" in err:
             # Terjadi kalau removals berisi file .github/workflows/* (Fase 3 cleanup
             # menghapus trigger-ci.yml). GitHub tetap butuh scope `workflow` utk push
@@ -266,6 +346,8 @@ def run_pr_fix(
             )
         return 2
 
+    trace.step("push", "ok", branch=branch_name)
+
     # Repo secrets — DIHAPUS (Fase 3): WEBHOOK_TRIGGER_URL/TOKEN dipakai oleh
     # trigger-ci.yml action. Setelah action dihapus, secret tsb tidak diperlukan.
     # Untuk backward-compat repo yg masih pakai action (fallback tanpa akses
@@ -278,6 +360,8 @@ def run_pr_fix(
         if existing:
             url = existing[0].get("html_url", "(unknown)")
             print(f"   ℹ️  PR sudah ada: {url}")
+            trace.set(pr_url=url)
+            trace.step("open_pr", "skip", url=url, reason="already open")
             return 0
     except github_api.GitHubAPIError:
         pass
@@ -313,8 +397,11 @@ def run_pr_fix(
             body=body,
         )
         print(f"   ✅ {pr.get('html_url')}")
+        trace.set(pr_url=pr.get("html_url"))
+        trace.step("open_pr", "ok", url=pr.get("html_url"))
     except github_api.GitHubAPIError as e:
         print(f"   ❌ Gagal buat PR: {e}", file=sys.stderr)
+        trace.step("open_pr", "fail", error=str(e)[:500])
         return 2
 
     # Setup webhook standar (Fase 3) — skip bila sudah ada, soft-fail bila error.
