@@ -145,6 +145,17 @@ def test_trace_survives_pb_failure(local_dir, monkeypatch):
     assert t.final_status == "failed"
 
 
+def test_run_pr_fix_rejects_missing_failure_log(tmp_path, monkeypatch):
+    # Validasi di awal: tidak boleh clone/buat jejak bila path log salah.
+    from build_q import pr_fix
+    monkeypatch.setattr(pr_fix_trace, "LOCAL_DIR", tmp_path)
+    called = []
+    monkeypatch.setattr(pr_fix, "PrFixTrace", lambda *a, **k: called.append(a) or None)
+    rc = pr_fix.run_pr_fix("Org/repo", "v1", failure_log=str(tmp_path / "nope.log"))
+    assert rc == 2
+    assert called == []
+
+
 def test_schema_defines_both_collections():
     assert set(PR_FIX_COLLECTIONS) == {"pr_fix_runs", "pr_fix_steps"}
     run_fields = {f["name"] for f in PR_FIX_COLLECTIONS["pr_fix_runs"]["fields"]}

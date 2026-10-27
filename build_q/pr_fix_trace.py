@@ -32,14 +32,22 @@ STEP_STATUSES = ["ok", "skip", "fail", "info"]
 
 # Schema yang diharapkan di PocketBase. Dipakai untuk `bq --pr-fix-schema`
 # (cetak JSON untuk dibuat superuser) dan sebagai dokumentasi.
+# Sementara (prioritas fungsi berjalan): rules dikosongkan = hanya superuser yang
+# bisa baca/tulis. Penulisan jejak memakai token superuser dari PB_API_USER/PASS.
 PR_FIX_COLLECTIONS: Dict[str, Dict[str, Any]] = {
     RUNS_COLLECTION: {
+        "name": RUNS_COLLECTION,
         "type": "base",
+        "listRule": None,
+        "viewRule": None,
+        "createRule": None,
+        "updateRule": None,
+        "deleteRule": None,
         "fields": [
             {"name": "run_id", "type": "text", "required": True},
             {"name": "repo", "type": "text", "required": True},
             {"name": "ref", "type": "text", "required": True},
-            {"name": "status", "type": "select", "values": RUN_STATUSES, "required": True},
+            {"name": "status", "type": "select", "values": RUN_STATUSES, "maxSelect": 1, "required": True},
             {"name": "head_sha", "type": "text"},
             {"name": "branch", "type": "text"},
             {"name": "pr_url", "type": "url"},
@@ -52,12 +60,18 @@ PR_FIX_COLLECTIONS: Dict[str, Dict[str, Any]] = {
         "indexes": ["CREATE UNIQUE INDEX idx_pr_fix_runs_run_id ON pr_fix_runs (run_id)"],
     },
     STEPS_COLLECTION: {
+        "name": STEPS_COLLECTION,
         "type": "base",
+        "listRule": None,
+        "viewRule": None,
+        "createRule": None,
+        "updateRule": None,
+        "deleteRule": None,
         "fields": [
             {"name": "run_id", "type": "text", "required": True},
             {"name": "seq", "type": "number", "required": True},
             {"name": "step", "type": "text", "required": True},
-            {"name": "status", "type": "select", "values": STEP_STATUSES, "required": True},
+            {"name": "status", "type": "select", "values": STEP_STATUSES, "maxSelect": 1, "required": True},
             {"name": "detail", "type": "json"},
             {"name": "at", "type": "date"},
         ],
@@ -68,6 +82,46 @@ PR_FIX_COLLECTIONS: Dict[str, Dict[str, Any]] = {
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _superuser_token(base: str) -> Optional[str]:
+    """Token superuser dari PB_API_USER/PB_API_PASS (.env). None bila tidak diset."""
+    user = os.getenv("PB_API_USER") or ""
+    password = os.getenv("PB_API_PASS") or ""
+    if not (user and password):
+        return None
+    return pb_api.authenticate(base, user, password)
+
+
+def write_token(base: str) -> str:
+    """Token untuk jejak pr-fix: superuser bila tersedia, lainnya token SSO user."""
+    return _superuser_token(base) or pb_api.get_token(base)
+
+
+def ensure_collections(base: str, token: str) -> Dict[str, str]:
+    """Buat collection pr-fix yang belum ada. Return {nama: 'created'|'exists'|error}."""
+    import json
+    import urllib.request
+
+    base = base.rstrip("/")
+    req = urllib.request.Request(
+        f"{base}/api/collections?perPage=500", headers={"Authorization": token}
+    )
+    existing = {c["name"] for c in json.load(urllib.request.urlopen(req, timeout=20))["items"]}
+    result: Dict[str, str] = {}
+    for name, spec in PR_FIX_COLLECTIONS.items():
+        if name in existing:
+            result[name] = "exists"
+            continue
+        try:
+            pb_api._http_json(
+                "POST", f"{base}/api/collections", body=spec,
+                headers={"Authorization": token}, timeout=20,
+            )
+            result[name] = "created"
+        except Exception as e:
+            result[name] = f"error: {type(e).__name__}: {e}"[:300]
+    return result
 
 
 class PrFixTrace:
@@ -95,7 +149,7 @@ class PrFixTrace:
             if not pb_api.is_enabled():
                 return False
             self._pb_base = pb_api._base_url().rstrip("/")
-            self._pb_token = pb_api.get_token(self._pb_base)
+            self._pb_token = write_token(self._pb_base)
             return True
         except Exception:
             return False
