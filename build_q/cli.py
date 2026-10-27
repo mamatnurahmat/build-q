@@ -475,6 +475,12 @@ Config file: ~/.build-q/.env
         help="Override nama branch fix (default: fix/jx-init-<timestamp>)",
     )
     parser.add_argument(
+        "--failure-log",
+        metavar="PATH",
+        help="Dengan --pr-fix: file log step pipeline yang gagal. Jev (TypeSafe) "
+             "mengklasifikasikan penyebabnya dan hasilnya dicatat di jejak run.",
+    )
+    parser.add_argument(
         "--keep-workdir",
         action="store_true",
         help="Jangan hapus /tmp workdir setelah --pr-fix selesai (untuk debugging)",
@@ -1172,6 +1178,7 @@ Config file: ~/.build-q/.env
                 keep_workdir=args.keep_workdir,
                 pr_branch=args.pr_branch,
                 legacy=args.init_legacy,
+                failure_log=args.failure_log,
             )
             # Note: --pr-fix now runs webhook SETUP internally (skip bila ada,
             # soft-fail bila error). Flag --cicd-webhook di sini menjadi
