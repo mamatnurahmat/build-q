@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -197,8 +198,10 @@ def run_cicd_trigger(
     Return 0 = triggered (200 OK + relay 2xx), 1 = webhook accepted but relay failed,
     2 = network/HMAC/API error.
 
-    force=True → kirim header `X-Force-Trigger: 1` yang di-relay ke webhook-trigger
-    untuk bypass middleware dedup (delete record lama + claim baru).
+    force=True → `x_force_trigger`, `x_nonce`, dan `x_timestamp` masuk body yang ditandatangani,
+    lalu bypass middleware dedup (delete record lama + claim baru). Header `X-Force-Trigger: 1`
+    tetap dikirim untuk server yang belum mendukung body. Hapus header ini setelah incoming-webhook
+    produksi berjalan dengan FORCE_HEADER_LEGACY=false (HAG-84).
     """
     print(f"🚀 Manual trigger: {api_repo} @ {ref} → {hook_url}" + ("  [FORCE]" if force else ""))
 
@@ -229,6 +232,12 @@ def run_cicd_trigger(
         api_repo, ref, commit, repo_meta,
         pusher_name=pusher, pusher_email=email,
     )
+    if force:
+        # Force ikut di body yang ditandatangani HMAC, beserta nonce dan timestamp
+        # agar tidak bisa di-replay dengan mengubah header (HAG-82, HAG-84).
+        payload["x_force_trigger"] = True
+        payload["x_nonce"] = uuid.uuid4().hex
+        payload["x_timestamp"] = int(time.time())
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
     try:
