@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Optional
 
 from . import pb_api
+from . import secret_scan as _secret_scan
 from .pb_api import PBAPIError
 
 COLLECTION = "bq_bin"
@@ -54,33 +55,8 @@ BIN_DIR = pb_api.CONFIG_DIR / "bin"
 BAK_DIR = BIN_DIR / ".bak"
 TMP_DIR = BIN_DIR / ".tmp"
 
-# Pola rahasia untuk `push`. Hanya label yang dicetak, tidak pernah nilainya.
-SECRET_PATTERNS = [
-    ("token GitHub", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
-    ("token Slack", re.compile(r"\bxox[abprs]-[A-Za-z0-9-]{10,}")),
-    ("kunci akses AWS", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
-    ("kunci privat", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
-    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
-    ("token GitLab", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}")),
-    ("kunci Stripe", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{16,}")),
-    ("kunci Google (AIza)", re.compile(r"\bAIza[0-9A-Za-z_-]{35}")),
-    ("token Docker Hub", re.compile(r"\bdckr_pat_[A-Za-z0-9_-]{20,}")),
-    ("kredensial di URL", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s/:@'\"]+:(?!\$)[^\s/@'\"]+@", re.I)),
-    ("basic auth", re.compile(
-        r"\bAuthorization:\s*Basic\s+[A-Za-z0-9+/=]{8,}"
-        r"|(?:^|\s)(?:-u|--user)[\s=]+['\"]?[^\s:'\"$]+:[^\s'\"]{4,}",
-        re.I | re.M,
-    )),
-    ("password di argumen", re.compile(
-        r"--(?:password|passwd|pass|token|secret|api-?key)(?:=|\s+)['\"]?[^\s'\"$]{6,}", re.I)),
-    ("penugasan rahasia", re.compile(
-        # Nilai yang diawali $ (referensi shell) atau < (placeholder) tidak dihitung; nilai berkutip boleh berspasi.
-        r"^\s*(?:export\s+)?[A-Za-z0-9_-]*(?:TOKEN|SECRET|PASSWORD|PASS|APIKEY|API_KEY|KEY)[A-Za-z0-9_-]*"
-        r"\s*=\s*(?:'(?![$<])[^'\n]{8,}'|\"(?![$<])[^\"\n]{8,}\"|(?![$<])[^\s'\"]{8,})",
-        re.M | re.I,
-    )),
-    ("penugasan PWD", re.compile(r"^\s*(?:export\s+)?PWD\s*=\s*(?!\$)(?!/)[^\s'\"]{8,}", re.M)),
-]
+# Pola rahasia untuk `push` — sumber tunggal di secret_scan.py.
+SECRET_PATTERNS = _secret_scan.SECRET_PATTERNS
 
 
 # ── helper ────────────────────────────────────────────────────────────────
@@ -202,11 +178,7 @@ def _is_text(data: bytes) -> bool:
 
 def _scan_secrets(text: str) -> list[tuple[str, int]]:
     """Kembalikan (label pola, nomor baris). Nilai rahasia tidak pernah dikembalikan."""
-    hits: list[tuple[str, int]] = []
-    for label, rx in SECRET_PATTERNS:
-        for m in rx.finditer(text):
-            hits.append((label, text.count("\n", 0, m.start()) + 1))
-    return hits
+    return _secret_scan.scan_patterns(text)
 
 
 def _multipart(fields: dict[str, str], filename: str, data: bytes) -> tuple[bytes, str]:

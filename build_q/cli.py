@@ -182,6 +182,9 @@ Examples:
   # Preflight — cek tools & credentials
   bq --doctor
 
+  # Rollback commit GitOps (compose / deploy yaml) lewat PR — pratinjau dulu
+  bq --pr-rollback https://github.com/<org>/gitops/commit/<sha> --dry-run
+
 Config file: ~/.build-q/.env
 """,
     )
@@ -260,7 +263,8 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--export-json",
         metavar="PATH",
-        help="Dengan --manifest-check: tulis laporan JSON (untuk CI/dashboard).",
+        help="Dengan --manifest-check / --pr-rollback: tulis laporan JSON (untuk CI/dashboard). "
+             "Dengan --pr-rollback, PATH `-` mencetak JSON ke stdout.",
     )
     parser.add_argument(
         "--simulate",
@@ -483,7 +487,35 @@ Config file: ~/.build-q/.env
     parser.add_argument(
         "--keep-workdir",
         action="store_true",
-        help="Jangan hapus /tmp workdir setelah --pr-fix selesai (untuk debugging)",
+        help="Jangan hapus /tmp workdir setelah --pr-fix / --pr-rollback selesai (untuk debugging)",
+    )
+    parser.add_argument(
+        "--pr-rollback",
+        metavar="TARGET",
+        help="Rollback satu commit GitOps lewat Pull Request (tidak pernah push ke base). "
+             "TARGET: URL commit GitHub, owner/repo@sha, atau sha (repo = GITOPS_REPO). "
+             "Hanya file compose (web/<env>/<app>/docker-compose.yaml) dan deploy yaml "
+             "(cce|k8s/<ns>/<app>_deployment.yaml) yang dimodifikasi. Cek: commit ada di base, "
+             "dedup PR/revert, konflik, isi == versi sebelum commit, image ada di Docker Hub, "
+             "override kustomize ArgoCD, secret plaintext. Opsi: --gitops-branch (base, default main), "
+             "--pr-branch, --dry-run, --yes, --skip-image-check, --keep-workdir, --export-json, --run-id. "
+             "Exit: 0 PR dibuat/tidak perlu, 1 validasi gagal, 2 error git/GitHub, 3 dibatalkan.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Dengan --pr-rollback: lewati konfirmasi sebelum commit/push/PR (wajib bila non-interaktif).",
+    )
+    parser.add_argument(
+        "--skip-image-check",
+        action="store_true",
+        help="Dengan --pr-rollback: tetap lanjut walau image hasil rollback tidak ada di Docker Hub (darurat).",
+    )
+    parser.add_argument(
+        "--run-id",
+        metavar="ID",
+        help="Dengan --pr-rollback: ID jejak run (default rollback-<sha7>-<waktu>); dipakai pemanggil "
+             "(mis. devops-app) untuk membaca hasil di PocketBase pr_rollback_runs.",
     )
     parser.add_argument(
         "--cicd-webhook",
@@ -1188,6 +1220,21 @@ Config file: ~/.build-q/.env
                 from .cicd_webhook import run_cicd_webhook_check
                 run_cicd_webhook_check(api_repo)
             sys.exit(rc)
+
+        if args.pr_rollback:
+            from .pr_rollback import run_pr_rollback
+            sys.exit(run_pr_rollback(
+                args.pr_rollback,
+                base=args.gitops_branch,
+                pr_branch=args.pr_branch,
+                dry_run=args.dry_run,
+                keep_workdir=args.keep_workdir,
+                assume_yes=args.yes,
+                skip_image_check=args.skip_image_check,
+                export_json=args.export_json,
+                run_id=args.run_id,
+                config=load_config(),
+            ))
 
         if args.cicd_webhook:
             from .cicd_webhook import run_cicd_webhook_check
