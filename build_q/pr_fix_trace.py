@@ -98,8 +98,10 @@ def write_token(base: str) -> str:
     return _superuser_token(base) or pb_api.get_token(base)
 
 
-def ensure_collections(base: str, token: str) -> Dict[str, str]:
-    """Buat collection pr-fix yang belum ada. Return {nama: 'created'|'exists'|error}."""
+def ensure_collections(
+    base: str, token: str, specs: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Dict[str, str]:
+    """Buat collection jejak yang belum ada (default: pr-fix). Return {nama: 'created'|'exists'|error}."""
     import json
     import urllib.request
 
@@ -109,7 +111,7 @@ def ensure_collections(base: str, token: str) -> Dict[str, str]:
     )
     existing = {c["name"] for c in json.load(urllib.request.urlopen(req, timeout=20))["items"]}
     result: Dict[str, str] = {}
-    for name, spec in PR_FIX_COLLECTIONS.items():
+    for name, spec in (specs or PR_FIX_COLLECTIONS).items():
         if name in existing:
             result[name] = "exists"
             continue
@@ -125,7 +127,17 @@ def ensure_collections(base: str, token: str) -> Dict[str, str]:
 
 
 class PrFixTrace:
-    """Pencatat satu run --pr-fix. Aman dipakai walau PB mati."""
+    """Pencatat satu run --pr-fix. Aman dipakai walau PB mati.
+
+    Bisa dipakai ulang perintah lain (mis. --pr-rollback) dengan subclass yang
+    meng-override atribut kelas di bawah.
+    """
+
+    LABEL = "pr-fix"
+    RUNS = RUNS_COLLECTION
+    STEPS = STEPS_COLLECTION
+    RUN_STATUSES = RUN_STATUSES
+    LOCAL_SUBDIR: Optional[str] = None  # None → LOCAL_DIR modul (pr-fix-runs)
 
     def __init__(self, repo: str, ref: str, run_id: str) -> None:
         self.repo = repo
@@ -139,8 +151,9 @@ class PrFixTrace:
         self._pb_base: Optional[str] = None
         self._pb_token: Optional[str] = None
         self._pb_enabled = self._init_pb()
-        LOCAL_DIR.mkdir(parents=True, exist_ok=True)
-        self.local_path = LOCAL_DIR / f"{run_id}.jsonl"
+        local_dir = LOCAL_DIR if self.LOCAL_SUBDIR is None else LOCAL_DIR.parent / self.LOCAL_SUBDIR
+        local_dir.mkdir(parents=True, exist_ok=True)
+        self.local_path = local_dir / f"{run_id}.jsonl"
         self._create_run({"status": "running", "started_at": _now()})
 
     # ── PocketBase plumbing ────────────────────────────────────────────
@@ -173,7 +186,7 @@ class PrFixTrace:
 
     def _warn(self, msg: str) -> None:
         import sys
-        print(f"   ⚠️  pr-fix trace: {msg}", file=sys.stderr)
+        print(f"   ⚠️  {self.LABEL} trace: {msg}", file=sys.stderr)
 
     # ── Public API ─────────────────────────────────────────────────────
     def step(self, step_name: str, status: str = "ok", /, **detail: Any) -> None:
@@ -189,14 +202,14 @@ class PrFixTrace:
             "at": _now(),
         }
         self._append_local({"type": "step", **row})
-        self._pb_post(STEPS_COLLECTION, row)
+        self._pb_post(self.STEPS, row)
 
     def set(self, **fields: Any) -> None:
         """Tambah/ubah field run (cause, head_sha, branch, pr_url, ...)."""
         self.fields.update(fields)
 
     def finish(self, status: str) -> None:
-        if status not in RUN_STATUSES:
+        if status not in self.RUN_STATUSES:
             raise ValueError(f"status run tidak valid: {status}")
         self.final_status = status
         final = {**self.fields, "status": status, "finished_at": _now()}
@@ -207,7 +220,7 @@ class PrFixTrace:
     def _create_run(self, extra: Dict[str, Any]) -> None:
         base = {"run_id": self.run_id, "repo": self.repo, "ref": self.ref}
         self._append_local({"type": "run", **base, **extra})
-        self._pb_post(RUNS_COLLECTION, {**base, **extra})
+        self._pb_post(self.RUNS, {**base, **extra})
 
     def _update_run(self, fields: Dict[str, Any]) -> None:
         if not self._pb_enabled or not self._pb_base:
@@ -217,24 +230,24 @@ class PrFixTrace:
             flt = f'run_id="{self.run_id}"'
             found = pb_api._http_json(
                 "GET",
-                f"{self._pb_base}/api/collections/{RUNS_COLLECTION}/records?filter={_q(flt)}&perPage=1",
+                f"{self._pb_base}/api/collections/{self.RUNS}/records?filter={_q(flt)}&perPage=1",
                 headers={"Authorization": self._pb_token or ""},
                 timeout=10,
             )
             items = found.get("items") or []
             if not items:
-                self._pb_post(RUNS_COLLECTION, {"run_id": self.run_id, "repo": self.repo,
+                self._pb_post(self.RUNS, {"run_id": self.run_id, "repo": self.repo,
                                                 "ref": self.ref, **fields})
                 return
             pb_api._http_json(
                 "PATCH",
-                f"{self._pb_base}/api/collections/{RUNS_COLLECTION}/records/{items[0]['id']}",
+                f"{self._pb_base}/api/collections/{self.RUNS}/records/{items[0]['id']}",
                 body=fields,
                 headers={"Authorization": self._pb_token or ""},
                 timeout=10,
             )
         except Exception as e:
-            self._warn(f"update pr_fix_runs dilewati ({type(e).__name__})")
+            self._warn(f"update {self.RUNS} dilewati ({type(e).__name__})")
 
     def _append_local(self, obj: Dict[str, Any]) -> None:
         try:

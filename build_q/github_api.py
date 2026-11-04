@@ -170,11 +170,25 @@ def get_auth_token() -> str:
 
 
 def list_open_prs(repo: str, head: str) -> list:
-    """Return list of open PRs where head branch matches `head` (short name)."""
-    # GitHub filter format for cross-fork PRs uses `<owner>:<branch>`; for same-repo,
-    # just the branch name works.
-    data = _request("GET", f"/repos/{repo}/pulls?state=open&head={quote(head)}")
-    return data or []
+    """Return list of open PRs where head branch matches `head` (short name or `owner:branch`).
+
+    GitHub hanya menerapkan filter `head` dalam format `<owner>:<branch>`; bila
+    hanya nama branch, filter DIABAIKAN dan semua PR terbuka dikembalikan.
+    Karena itu owner ditambahkan otomatis dan hasilnya disaring lagi per `head.ref`.
+    """
+    owner, branch = (head.split(":", 1) if ":" in head else (repo.split("/", 1)[0], head))
+    data = _request("GET", f"/repos/{repo}/pulls?state=open&head={quote(f'{owner}:{branch}')}")
+    return [pr for pr in (data or []) if (pr.get("head") or {}).get("ref") == branch]
+
+
+def get_commit(repo: str, sha: str) -> dict:
+    """GET /repos/{repo}/commits/{sha} — sha penuh, parents, files[], commit.message."""
+    return _request("GET", f"/repos/{repo}/commits/{quote(sha)}")
+
+
+def compare(repo: str, base: str, head: str) -> dict:
+    """GET /repos/{repo}/compare/{base}...{head} — status ahead|behind|identical|diverged + files[]."""
+    return _request("GET", f"/repos/{repo}/compare/{quote(base)}...{quote(head)}")
 
 
 def create_pull_request(repo: str, *, base: str, head: str, title: str, body: str) -> dict:

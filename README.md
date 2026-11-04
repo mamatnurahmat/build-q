@@ -6,7 +6,7 @@ Selain build, `bq` menyediakan:
 - **Scaffolding CI/CD** (`--init-jx`, `--init-legacy`)
 - **CI/CD Trigger** (`--gh-action-init`, `--init-secrets`, `--cicd-trigger`, `--cicd-webhook`)
 - **Build Ops** (`--fix-dockerfile`, `--init`, `--compose`)
-- **GitOps** (`--bootstrap-k8s`, `--gitops-set-image`, `--set-image`, `--is-match-image`)
+- **GitOps** (`--bootstrap-k8s`, `--gitops-set-image`, `--set-image`, `--is-match-image`, `--pr-rollback`)
 - **Verifikasi** (`--check`, `--repo-check`, `--doctor`)
 - **Fix** (`--pr-fix` repo legacy template)
 - **Interactive** (`--tui` Jev Agent Planner)
@@ -348,6 +348,50 @@ REGISTRY_URL=loyaltolpi
 GITHUB_ORG=Qoin-Digital-Indonesia
 WEBHOOK_TRIGGER_URL=https://cicd-hw.qoin.id/trigger
 ```
+
+---
+
+#### ⏪ `bq --pr-rollback <commit_url>` — rollback commit GitOps lewat PR (sejak v0.2.8)
+
+Mengembalikan satu commit di repo GitOps ke kondisi sebelumnya. Hasilnya **selalu Pull Request**
+(tidak pernah push ke `main`). Cakupan: file **compose** (`web/<env>/<app>/docker-compose.yaml`)
+dan **deploy yaml** (`cce|k8s/<ns>/<app>_deployment.yaml`) yang dimodifikasi.
+
+```bash
+# Pratinjau dulu (tanpa commit/push/PR)
+bq --pr-rollback https://github.com/Qoin-Digital-Indonesia/gitops/commit/<sha> --dry-run
+# Eksekusi (konfirmasi y/N sebelum push)
+bq --pr-rollback https://github.com/Qoin-Digital-Indonesia/gitops/commit/<sha>
+# Bentuk pendek: owner/repo@sha, atau sha saja (repo = GITOPS_REPO)
+bq --pr-rollback 9072935 --dry-run
+```
+
+Pemeriksaan sebelum PR dibuat:
+
+| Cek | Bila gagal |
+|---|---|
+| Semua file di commit masuk allowlist & berstatus *modified* | ditolak (exit 1) |
+| Commit sudah ada di base (`--gitops-branch`, default `main`; merge commit → `revert -m 1`) | ditolak (exit 1) |
+| PR revert untuk commit itu masih terbuka / `main` sudah berisi `This reverts commit <sha>` | berhenti, exit 0 |
+| Commit lanjutan pada file yang sama | ⚠️ ditampilkan; konflik → revert dibatalkan (exit 1) |
+| Isi file hasil revert identik dengan `<sha>^` (bila tidak ada commit lanjutan) | ditolak (exit 1) |
+| Image hasil rollback ada di Docker Hub | ditolak (exit 1), kecuali `--skip-image-check` |
+| Override `kustomize.images` di ArgoCD (deploy yaml) | ⚠️ peringatan (butuh token ArgoCD; soft-fail) |
+| Secret plaintext di hasil revert | ⚠️ nama key + baris saja (nilai tidak pernah dicetak), dicantumkan di body PR |
+
+| Flag | Keterangan |
+|---|---|
+| `--gitops-branch BRANCH` | Base PR (default `GITOPS_BRANCH` / `main`) |
+| `--pr-branch NAME` | Override branch (default `revert/<app>-<sha7>`) |
+| `--dry-run` | Berhenti setelah pratinjau; workdir dipertahankan |
+| `--yes` | Lewati konfirmasi (wajib di non-TTY: CI, devops-app) |
+| `--skip-image-check` | Darurat: lanjut walau image tidak ada di Docker Hub |
+| `--export-json PATH` | Laporan JSON (`-` = stdout; teks lain pindah ke stderr) |
+| `--run-id ID` | ID jejak (default `rollback-<sha7>-<waktu>`) |
+
+Exit code: `0` PR dibuat / tidak ada yang perlu dilakukan · `1` validasi gagal · `2` error git/GitHub ·
+`3` dibatalkan. Jejak tiap langkah: `~/.build-q/pr-rollback-runs/<run_id>.jsonl` (+ PocketBase
+`pr_rollback_runs` / `pr_rollback_steps` bila collection tersedia). Detail desain: [PRD-pr-rollback.md](./PRD-pr-rollback.md).
 
 ---
 
@@ -1142,6 +1186,7 @@ Subcommands (mutually exclusive):
   --init-secrets [<repo>]   Set GitHub Actions webhook secrets
   --fix-dockerfile [PATH]   Migrasi Dockerfile legacy ke secret mount (+ MAINTAINER/ENV/standalone netrc)
   --pr-fix [<repo> <ref>]   One-shot 11-step fix untuk repo legacy template (branch + commit + push + set secrets + PR).
+  --pr-rollback <commit_url> Rollback 1 commit GitOps (compose / deploy yaml) lewat PR; --dry-run untuk pratinjau.
   --cicd-webhook [<repo>]   Cek eksistensi webhook cicd-hw.qoin.id.
   --cicd-trigger <repo> <ref> Manual trigger pipeline via webhook (simulasi GitHub event).
   --check [<repo> <ref>]    Cek readiness repo (7 aspek).
