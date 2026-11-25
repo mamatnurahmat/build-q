@@ -168,7 +168,13 @@ def _check_docker_login() -> List[Result]:
 
 
 def _check_bq_login() -> List[Result]:
-    """Login bq wajib (v0.2.0): token `bq auth login` harus ada dan valid di server."""
+    """Login bq wajib (v0.2.0): token `bq auth login` harus ada dan valid di server.
+
+    Dilewati di mode lokal (BUILD_Q_DISABLE_PB_API=true): kredensial dibaca dari .env.
+    """
+    from . import pb_api
+    if pb_api.is_disabled_by_env():
+        return []
     from . import pb_auth
     ok, msg = pb_auth.check_login()
     return [("Login bq (bq auth login)", ok, msg[:100], True)]

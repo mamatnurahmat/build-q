@@ -856,8 +856,12 @@ def run_build(
     rollout_ns: str | None = None,
     rollout_infra: str | None = None,
     rollout_path: str | None = None,
+    out: dict | None = None,
 ) -> int:
     """Load config, build the command, and execute it.
+
+    `out` (opsional) diisi `out["image"]` dengan tag image bila build
+    berhasil atau image sudah ada di registry (dipakai `--json`).
 
     Returns:
         Exit code (0 = success)
@@ -884,6 +888,8 @@ def run_build(
         if check_image_exists(predicted_tag):
             print(f"✅ Image ready: {predicted_tag}")
             print("⏭️  Skipping build (use --rebuild to force).")
+            if out is not None:
+                out["image"] = predicted_tag
             return 0
         print("   Image not found. Proceeding with build.")
 
@@ -928,6 +934,8 @@ def run_build(
     result = subprocess.run(cmd)
     if result.returncode == 0:
         print("\n✅ Build completed successfully.")
+        if out is not None:
+            out["image"] = image_tag
         _print_rollout_suggestion(
             cicd, repo, ref, image_tag, config, rollout_ns, rollout_infra, rollout_path,
         )

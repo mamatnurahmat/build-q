@@ -336,7 +336,13 @@ def _stage_source(rep: E2EReport, config: dict) -> tuple[Stage, dict]:
 
     st = Stage("source", "Source")
     try:
-        commit = gh_get(f"/repos/{rep.repo}/commits/{quote(rep.ref, safe='')}")
+        try:
+            commit = gh_get(f"/repos/{rep.repo}/commits/{quote(rep.ref, safe='')}")
+        except github_api.GitHubAPIError as e:
+            # Token ditolak/kosong → coba SSH key user (shallow fetch), bukan gagal.
+            if not github_api.is_auth_failure(e):
+                raise
+            commit = github_api.ssh_get_commit(rep.repo, rep.ref)
     except github_api.GitHubAPIError as e:
         st.status, st.summary = FAIL, f"ref '{rep.ref}' tidak bisa diakses"
         st.details.append(str(e)[:200])

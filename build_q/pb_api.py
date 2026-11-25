@@ -62,8 +62,15 @@ def _parse_bool(value: Optional[str]) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def is_disabled_by_env() -> bool:
+    """BUILD_Q_DISABLE_PB_API=true → jangan sentuh PocketBase sama sekali (mis. `--remote`)."""
+    return _parse_bool(os.getenv("BUILD_Q_DISABLE_PB_API", "false"))
+
+
 def is_enabled() -> bool:
     """PB_API=true, atau PB_API tidak diset tapi sudah `bq auth login`."""
+    if is_disabled_by_env():
+        return False
     raw = os.getenv("PB_API")
     if raw is None or not raw.strip():
         return read_auth() is not None  # sesi PB, bukan sekadar file ada
@@ -341,6 +348,8 @@ def fetch_collection_records(
     Raises:
         PBAPIError: If auth fails or API returns error
     """
+    if is_disabled_by_env():
+        return []  # mode lokal (BUILD_Q_DISABLE_PB_API=true): jangan sentuh PocketBase
     base = _base_url()
     token = get_token(base)
     url = f"{base}/api/collections/{collection}/records?perPage={min(per_page, 500)}"
