@@ -76,7 +76,7 @@ def load_dockerhub_creds() -> tuple[str, str]:
     """(username, token) Docker Hub. Env (hasil hydrate PB) lebih dulu, lalu PB langsung."""
     user = os.getenv("DOCKERHUB_USER") or ""
     token = os.getenv("DOCKERHUB_TOKEN") or ""
-    if not (user and token):
+    if not (user and token) and not pb_api.is_disabled_by_env():
         try:
             base = pb_api._base_url()
             tok = pb_api.get_token(base)
@@ -99,7 +99,7 @@ def load_dockerhub_creds() -> tuple[str, str]:
 def _github_token() -> str:
     """GITHUB_TOKEN untuk secret build (opsional). Env lebih dulu, lalu PB."""
     tok = os.getenv("GITHUB_TOKEN") or os.getenv("GIT_TOKEN") or ""
-    if tok:
+    if tok or pb_api.is_disabled_by_env():
         return tok
     try:
         base = pb_api._base_url()
@@ -201,8 +201,12 @@ def run_cloud_build(
     secrets: list[str] | None = None,
     dry_run: bool = False,
     image_check: bool = True,
+    out: dict[str, Any] | None = None,
 ) -> int:
-    """Build (dan push) lewat Docker Build Cloud. Return exit code."""
+    """Build (dan push) lewat Docker Build Cloud. Return exit code.
+
+    `out` (opsional) diisi `out["image"]` bila build sukses / image sudah ada.
+    """
     ep = resolve_endpoint(endpoint)
     local_name = endpoint_to_local_name(ep)
 
@@ -223,6 +227,8 @@ def run_cloud_build(
         if image_exists_on_hub(predicted):
             print(f"✅ Image ready: {predicted}")
             print("⏭️  Skipping build (use --rebuild to force).")
+            if out is not None:
+                out["image"] = predicted
             return 0
 
     # Token GitHub: bila hanya di PB, isi env agar build_command ikut menambahkan
@@ -272,6 +278,8 @@ def run_cloud_build(
 
     if rc == 0:
         print(f"\n✅ Build cloud selesai: {image_tag}")
+        if out is not None:
+            out["image"] = image_tag
     else:
         print(f"\n❌ Build cloud gagal (exit {rc}).", file=sys.stderr)
     return rc

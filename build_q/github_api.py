@@ -20,7 +20,19 @@ from .config import get_github_credentials, load_config
 
 
 class GitHubAPIError(RuntimeError):
-    """Raised when a native GitHub API call fails."""
+    """Raised when a native GitHub API call fails.
+
+    `status` berisi HTTP status bila error berasal dari response API (mis. 401).
+    """
+
+    def __init__(self, message: str, status: Optional[int] = None):
+        super().__init__(message)
+        self.status = status
+
+
+def is_auth_failure(exc: GitHubAPIError) -> bool:
+    """Token ditolak (401/403) atau tidak ada → layak dicoba lewat SSH."""
+    return exc.status in (401, 403) or "GITHUB_TOKEN" in str(exc)
 
 
 # Token per-konteks (thread/request) — dipakai `bq --serve` agar tiap request
@@ -82,7 +94,9 @@ def _request(
             data = resp.read()
     except HTTPError as e:
         detail = e.read().decode("utf-8", errors="replace")
-        raise GitHubAPIError(f"GitHub API {method} {path} → HTTP {e.code}: {detail}") from e
+        raise GitHubAPIError(
+            f"GitHub API {method} {path} → HTTP {e.code}: {detail}", status=e.code,
+        ) from e
     except URLError as e:
         raise GitHubAPIError(f"GitHub API {method} {path} failed: {e.reason}") from e
     if raw:
@@ -101,16 +115,95 @@ def get_user_login() -> str:
     return data["login"]
 
 
+def _ssh_url(repo: str) -> str:
+    return f"git@github.com:{normalize_repo(repo)}.git"
+
+
+def _ssh_fetch(repo: str, ref: str) -> str:
+    """Shallow-fetch `ref` lewat SSH ke direktori sementara; return path-nya.
+
+    Caller bertanggung jawab menghapus direktori. Memakai SSH key/agent user,
+    jadi tidak membutuhkan GITHUB_TOKEN.
+    """
+    import tempfile
+
+    tmp = tempfile.mkdtemp(prefix="bq-ssh-")
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        subprocess.run(["git", "init", "-q", tmp], check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "-C", tmp, "fetch", "-q", "--depth", "1", _ssh_url(repo), ref],
+            check=True, capture_output=True, text=True, env=env,
+        )
+    except subprocess.CalledProcessError as e:
+        _ssh_cleanup(tmp)
+        detail = (e.stderr or e.stdout or "").strip()[-300:]
+        raise GitHubAPIError(f"SSH fetch {repo}@{ref} gagal: {detail}") from e
+    except FileNotFoundError as e:
+        _ssh_cleanup(tmp)
+        raise GitHubAPIError("`git` tidak ditemukan di PATH") from e
+    return tmp
+
+
+def _ssh_cleanup(path: str) -> None:
+    import shutil
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def ssh_get_commit(repo: str, ref: str) -> Dict[str, Any]:
+    """Bentuk seperti response REST `/commits/{ref}`, diambil lewat SSH."""
+    tmp = _ssh_fetch(repo, ref)
+    try:
+        fmt = "%H%x00%s%x00%an%x00%aI"
+        out = subprocess.run(
+            ["git", "-C", tmp, "log", "-1", f"--format={fmt}", "FETCH_HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    finally:
+        _ssh_cleanup(tmp)
+    sha, msg, name, date = (out.split("\x00") + ["", "", "", ""])[:4]
+    return {"sha": sha, "commit": {"message": msg, "author": {"name": name, "date": date}}}
+
+
+def ssh_get_file(repo: str, ref: str, path: str) -> bytes:
+    """Baca satu file pada `ref` lewat SSH (shallow fetch)."""
+    tmp = _ssh_fetch(repo, ref)
+    try:
+        res = subprocess.run(
+            ["git", "-C", tmp, "show", f"FETCH_HEAD:{path}"],
+            capture_output=True,
+        )
+        if res.returncode != 0:
+            raise GitHubAPIError(f"{path} tidak ada di {repo}@{ref}")
+        return res.stdout
+    finally:
+        _ssh_cleanup(tmp)
+
+
+def get_commit(repo: str, ref: str) -> Dict[str, Any]:
+    """Commit `ref`. REST dulu; bila token ditolak/kosong, fallback ke SSH."""
+    try:
+        return _request("GET", f"/repos/{repo}/commits/{quote(ref)}")
+    except GitHubAPIError as e:
+        if not is_auth_failure(e):
+            raise
+        return ssh_get_commit(repo, ref)
+
+
 def get_contents_raw(repo: str, path: str, ref: str) -> bytes:
-    """Fetch a repo file's raw bytes at `ref`."""
+    """Fetch a repo file's raw bytes at `ref`. REST dulu; fallback SSH bila auth gagal."""
     api_path = f"/repos/{repo}/contents/{quote(path)}?ref={quote(ref)}"
-    return _request("GET", api_path, accept="application/vnd.github.v3.raw", raw=True)
+    try:
+        return _request("GET", api_path, accept="application/vnd.github.v3.raw", raw=True)
+    except GitHubAPIError as e:
+        if not is_auth_failure(e):
+            raise
+        return ssh_get_file(repo, ref, path)
 
 
 def get_commit_sha(repo: str, ref: str) -> str:
     """Resolve `ref` (branch/tag/SHA) to a full commit SHA."""
-    data = _request("GET", f"/repos/{repo}/commits/{quote(ref)}")
-    return data["sha"]
+    return get_commit(repo, ref)["sha"]
 
 
 def clone(repo: str, ref: str, *, single_branch: bool = True) -> None:

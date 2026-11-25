@@ -21,6 +21,7 @@ import os
 import re
 import subprocess
 import sys
+from json import dumps as _json_dumps
 
 from . import __version__
 from .builder import (
@@ -60,6 +61,25 @@ def _ref_id_for_image_tag(ref: str, sha: str) -> str:
 # ── GitHub dispatchers ─────────────────────────────────────────────────────────
 # When GH_CLI=true (default) the existing `gh` subprocess path runs untouched.
 # When GH_CLI=false these helpers route to build_q.github_api (native REST/git).
+
+def _redirect_stdout_to_stderr() -> int:
+    """Alihkan fd stdout ke stderr; kembalikan fd asli untuk `_restore_stdout`.
+
+    Dipakai oleh `--json` supaya stdout hanya berisi hasil JSON, sehingga aman
+    ditangkap dengan `IMAGE=$(bq <repo> <ref> --remote --json | jq -r .image)`.
+    Output subprocess (docker/buildx) ikut dialihkan.
+    """
+    sys.stdout.flush()
+    saved = os.dup(1)
+    os.dup2(2, 1)
+    return saved
+
+
+def _restore_stdout(saved: int) -> None:
+    sys.stdout.flush()
+    os.dup2(saved, 1)
+    os.close(saved)
+
 
 def _github_contents(api_repo: str, path: str, ref: str) -> str | None:
     """Return raw file contents at `ref`, or None on any failure."""
@@ -126,6 +146,11 @@ def main() -> None:
     if sys.argv[1:2] == ["auth"]:
         from .pb_auth import cli_main
         sys.exit(cli_main(sys.argv[2:]))
+
+    # `--remote` membangun dari git tanpa PocketBase: secret dibaca dari env,
+    # ~/.build-q/.env, atau gh CLI — tidak di-hydrate dari PB (hindari timeout).
+    if "--remote" in sys.argv[1:]:
+        os.environ["BUILD_Q_DISABLE_PB_API"] = "true"
 
     # Gate login (sejak v0.2.0): perintah bq wajib login dengan token yang valid.
     from .pb_auth import requires_login, require_login
@@ -677,6 +702,12 @@ Config file: ~/.build-q/.env
         "--remote",
         action="store_true",
         help="Build remotely from git using buildx instead of cloning locally",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Cetak hanya hasil image sebagai JSON di stdout (log build ke stderr), "
+             "contoh: IMAGE=$(bq <repo> <ref> --remote --json | jq -r .image)",
     )
     parser.add_argument(
         "--clean",
@@ -1416,6 +1447,7 @@ Config file: ~/.build-q/.env
             print(f"   Registry URL : {registry['url'] or '(not set)'}")
             return
 
+        json_saved_fd = _redirect_stdout_to_stderr() if args.json else None
         # ── Build command ─────────────────────────────────────────────────────────
         # Auto-detect repo/ref from git when not provided
         repo = args.repo
@@ -1494,13 +1526,22 @@ Config file: ~/.build-q/.env
             
             repo_name = api_repo.split("/")[-1]
             if not args.tag:
-                ref_id = "unknown"
+                # Jangan fallback ke tag "unknown": tag itu bisa cocok dengan image
+                # lama di registry dan membuat build terlewat diam-diam.
                 try:
                     sha = _github_commit_sha(api_repo, ref)
-                    if sha:
-                        ref_id = _ref_id_for_image_tag(ref, sha)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(
+                        f"❌ Gagal resolve commit {api_repo}@{ref}: {e}\n"
+                        "   Pastikan GITHUB_TOKEN ada di ~/.build-q/.env (GH_CLI=false) "
+                        "atau set GH_CLI=true (gh auth login), atau berikan -t/--tag.",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+                if not sha:
+                    print(f"❌ Commit untuk {api_repo}@{ref} tidak ditemukan. Berikan -t/--tag.", file=sys.stderr)
+                    sys.exit(1)
+                ref_id = _ref_id_for_image_tag(ref, sha)
                 registry_url = config.get("registry", {}).get("url", "")
                 image_name = cicd_data.get("IMAGE", repo_name)
                 args.tag = f"{registry_url}/{image_name}:{ref_id}" if registry_url else f"{image_name}:{ref_id}"
@@ -1677,6 +1718,7 @@ Config file: ~/.build-q/.env
                 args.build_args.append(f"GITHUB_TOKEN={gh_token}")
             print(f"🔐 --gh-auth: injected GITHUB_USER={gh_user}, GITHUB_TOKEN=***")
 
+        build_out: dict = {}
         try:
             if args.compose:
                 rc = run_compose(
@@ -1709,6 +1751,7 @@ Config file: ~/.build-q/.env
                     secrets=args.secret,
                     dry_run=args.dry_run,
                     image_check=args.image_check,
+                    out=build_out,
                 )
             else:
                 rc = run_build(
@@ -1728,7 +1771,16 @@ Config file: ~/.build-q/.env
                     rollout_ns=args.ns,
                     rollout_infra=args.infra,
                     rollout_path=args.gitops_path,
+                    out=build_out,
                 )
+            if json_saved_fd is not None:
+                _restore_stdout(json_saved_fd)
+            if args.json and rc == 0:
+                image = build_out.get("image")
+                if image:
+                    print(_json_dumps({"image": image}))
+                else:
+                    print("⚠️ --json: image tidak tersedia (mode compose belum didukung).", file=sys.stderr)
             sys.exit(rc)
         finally:
             if args.clone and args.clean and clone_dir:

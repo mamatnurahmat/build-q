@@ -58,9 +58,7 @@ def load_config() -> Dict[str, Any]:
     # Set BUILD_Q_DISABLE_PB_API=true for an explicitly local-only run.
     # This is useful on Docker-context hosts where credentials must stay in
     # the selected local env file and no PocketBase request should be made.
-    if pb_api.is_enabled() and not _parse_bool(
-        os.getenv("BUILD_Q_DISABLE_PB_API", "false")
-    ):
+    if pb_api.is_enabled():
         pb_api.hydrate_env(quiet=True)
 
     return build_config(os.getenv)
@@ -193,16 +191,14 @@ def init_config(force: bool = False, silent: bool = False) -> None:
     default = """\
 # build-q Configuration
 
-# ── PB API (centralized credentials, PocketBase IDP) ────────────────────
-# Bila PB_API=true, credentials aplikasi (GITHUB_TOKEN, DOCKERHUB_TOKEN,
-# WEBHOOK_HOOK_HMAC, dst) diambil dari API — tidak perlu diisi di file ini.
-# Login: `bq auth login` (SSO GitHub via Dex) → token di ~/.build-q/auth.json,
-# PB_API_USER/PASS (superuser) tidak perlu lagi — hanya fallback legacy.
-# Cache secrets: ~/.build-q/.pb-cache.json (TTL default 15 menit).
+# ── Mode lokal (rekomendasi default) ────────────────────────────────────
+# true  = bq TIDAK bergantung pada PocketBase. Semua kredensial dibaca dari
+#         file ini (GITHUB_TOKEN, DOCKERHUB_USER/TOKEN). Tidak perlu login bq.
+# false = PocketBase dipakai (secrets terpusat + `bq auth login`).
+BUILD_Q_DISABLE_PB_API=true
 PB_API=false
-PB_API_URL=https://cicd-hw.qoin.id/devops
-PB_API_USER=
-PB_API_PASS=
+# Hanya bila memakai PocketBase (BUILD_Q_DISABLE_PB_API=false):
+# PB_API_URL=https://cicd-hw.qoin.id/devops
 # PB_API_CACHE_TTL=900
 
 # Docker builder name

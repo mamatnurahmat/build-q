@@ -202,7 +202,15 @@ _EXEMPT_FLAGS = {"-h", "--help", "--version", "--doctor"}
 
 
 def requires_login(argv: list) -> bool:
-    """Perlu login? Tidak untuk --help/--version/--doctor (--doctor melaporkan statusnya)."""
+    """Perlu login? Tidak untuk --help/--version/--doctor (--doctor melaporkan statusnya).
+
+    Mode lokal (BUILD_Q_DISABLE_PB_API=true di ~/.build-q/.env): kredensial di-hardcode di .env,
+    tidak bergantung PocketBase, sehingga gate login dilewati.
+    """
+    from .config import ENV_FILE, _load_dotenv
+    _load_dotenv(ENV_FILE)  # gate berjalan sebelum config dimuat; isi hanya key yang belum ada
+    if pb_api.is_disabled_by_env():
+        return False
     return not any(a in _EXEMPT_FLAGS for a in argv)
 
 
